@@ -70,10 +70,6 @@ SYMBOLS = {
 for stock_name, sec_id in NIFTY_50_STOCKS.items():
     SYMBOLS[stock_name] = {"security_id": sec_id, "exchange": "NSE", "type": "STOCK"}
 
-DISCLAIMER = """⚠️ DISCLAIMER:
-Educational purposes only. Not investment advice.
-Consult a SEBI-registered advisor before trading."""
-
 print(f"""
 {'='*100}
 🚀 PRODUCTION LIVE SCREENER - 10 MIN BREAKOUT STRATEGY + OPTIONS TRADING
@@ -112,9 +108,9 @@ Premium Selection:
   • NIFTY 50 STOCKS: >= 10 LTP (ITM/ATM)
   
 Position Management:
-  • Entry: Breakout close price
-  • Target: 30% above entry
-  • Stop Loss: 10% below entry
+  • Entry: Premium price at breakout
+  • Target: 30% above entry premium
+  • Stop Loss: 10% below entry premium
 {'='*100}
 """)
 
@@ -286,32 +282,37 @@ async def send_telegram_alert(message):
         return False
 
 def format_signal_message(symbol, signal_data):
-    """Format signal for Telegram with new format"""
-    entry = signal_data['entry']
-    target = entry * 1.30  # 30% above entry
-    stoploss = entry * 0.90  # 10% below entry
+    """Format signal for Telegram with premium-based entries"""
+    entry_premium = signal_data.get('premium', signal_data['entry'])
+    target_premium = entry_premium * 1.30  # 30% above entry premium
+    stoploss_premium = entry_premium * 0.90  # 10% below entry premium
     
     signal_type = signal_data['buy_side']  # CALL or PUT
     strike_price = signal_data['strike_price']
-    premium = signal_data.get('premium', 0)
+    
+    # Add CE/PE suffix
+    option_type = "CE" if signal_type == "CALL" else "PE"
     
     msg = f"""
 <b>{'🚀 CALL ENTRY' if signal_type == 'CALL' else '📉 PUT ENTRY'}</b>
 
 <b>Title:</b> {symbol} | {SYMBOLS[symbol]['type']}
-<b>Strike Price:</b> {strike_price:.0f}
-<b>Premium:</b> {premium:.2f} (LTP)
+<b>Strike Price:</b> {strike_price:.0f} {option_type}
+<b>Premium:</b> {entry_premium:.2f} (LTP)
 
 <b>📊 POSITION DETAILS:</b>
-  <b>Entry:</b> {entry:.2f}
-  <b>Target:</b> {target:.2f} (30% gain)
-  <b>Stop Loss:</b> {stoploss:.2f} (10% loss)
+  <b>Entry:</b> {entry_premium:.2f}
+  <b>Target:</b> {target_premium:.2f} (30% gain)
+  <b>Stop Loss:</b> {stoploss_premium:.2f} (10% loss)
 
 <b>⏰ Time:</b> {signal_data['timestamp']}
-<b>📈 Current Price:</b> {signal_data['current_price']:.2f}
+<b>📈 Current Premium:</b> {entry_premium:.2f}
 <b>⏱️ Timeframe:</b> 10-MIN
 
-{DISCLAIMER}
+<b>📢 IMPORTANT DISCLAIMER & NOTICE</b>
+I am <b>NOT a SEBI-registered investment advisor or research analyst.</b>
+This alert is created strictly for educational, informational, and learning purposes only.
+<b>Always consult a SEBI-registered advisor before trading.</b>
 """
     return msg
 
@@ -324,15 +325,16 @@ def process_signal(symbol, signal_data, signal_type):
     
     stats["total_signals"] += 1
     
+    entry_premium = signal_data.get('premium', signal_data['entry'])
     print(f"\n{'='*100}")
     print(f"🚀 SIGNAL #{stats['total_signals']} TRIGGERED - {signal_type}!")
     print(f"{'='*100}")
     print(f"Market: {symbol} ({SYMBOLS[symbol]['type']})")
     print(f"Type: {signal_data['buy_side']}")
     print(f"Strike: {signal_data['strike_price']}")
-    print(f"Entry: {signal_data['entry']:.2f}")
-    print(f"Target: {signal_data['entry'] * 1.30:.2f} (30%)")
-    print(f"SL: {signal_data['entry'] * 0.90:.2f} (10%)")
+    print(f"Entry Premium: {entry_premium:.2f}")
+    print(f"Target Premium: {entry_premium * 1.30:.2f} (30%)")
+    print(f"SL Premium: {entry_premium * 0.90:.2f} (10%)")
     print(f"Time: {signal_data['timestamp']}")
     print(f"{'='*100}\n")
     
