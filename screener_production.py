@@ -46,7 +46,7 @@ print(f"""
 🚀 PRODUCTION LIVE SCREENER - 5 MIN BREAKOUT STRATEGY
 {'='*90}
 [INFO] Configuration:
-  CLIENT_ID: {CLIENT_ID[:10]}... ✓
+  CLIENT_ID: {CLIENT_ID[:10] if CLIENT_ID else 'NOT SET'}... ✓
   ACCESS_TOKEN: Fresh Token ✓
   TELEGRAM: {CHAT_ID} ✓
   IP WHITELISTED: 106.200.21.44 ✓
@@ -137,49 +137,78 @@ def is_market_hours():
     return False, "Market Closed"
 
 def fetch_market_data():
-    """Fetch real-time OHLC data from DhanHQ"""
+    """Fetch real-time OHLC data from DhanHQ using correct API"""
     quotes = {}
     
     try:
-        # Build securities dict
-        securities_dict = {
-            "NSE_FNO": [13, 25],       # NIFTY, BANKNIFTY
-            "MCX_FUT": [565899]        # CRUDEOIL
-        }
+        # Fetch NIFTY
+        try:
+            resp = dhan_api.get_intraday_paracande(
+                exchange_tokens=[],
+                security_id=[13],
+                exchange="NSE_FNO",
+                interval=1
+            )
+            if resp and resp.get('status') == 'success' and resp.get('data'):
+                data = resp['data']
+                if isinstance(data, list) and len(data) > 0:
+                    candle = data[0]
+                    quotes["NIFTY"] = {
+                        "ltp": float(candle.get('close', 0)),
+                        "high": float(candle.get('high', 0)),
+                        "low": float(candle.get('low', 0)),
+                        "open": float(candle.get('open', 0)),
+                        "close": float(candle.get('close', 0)),
+                    }
+        except Exception as e:
+            pass
         
-        # Fetch data
-        response = dhan_api.ticker_data(securities_dict)
+        # Fetch BANKNIFTY
+        try:
+            resp = dhan_api.get_intraday_paracande(
+                exchange_tokens=[],
+                security_id=[25],
+                exchange="NSE_FNO",
+                interval=1
+            )
+            if resp and resp.get('status') == 'success' and resp.get('data'):
+                data = resp['data']
+                if isinstance(data, list) and len(data) > 0:
+                    candle = data[0]
+                    quotes["BANKNIFTY"] = {
+                        "ltp": float(candle.get('close', 0)),
+                        "high": float(candle.get('high', 0)),
+                        "low": float(candle.get('low', 0)),
+                        "open": float(candle.get('open', 0)),
+                        "close": float(candle.get('close', 0)),
+                    }
+        except Exception as e:
+            pass
         
-        if response and response.get('status') == 'success' and 'data' in response:
-            data = response.get('data', {})
-            
-            for exchange, quote_list in data.items():
-                if isinstance(quote_list, list):
-                    for quote in quote_list:
-                        if isinstance(quote, dict):
-                            sec_id = str(quote.get('security_id', ''))
-                            ltp = float(quote.get('LTP', 0))
-                            
-                            # Map to symbol
-                            symbol = None
-                            if sec_id == "13":
-                                symbol = "NIFTY"
-                            elif sec_id == "25":
-                                symbol = "BANKNIFTY"
-                            elif sec_id == "565899":
-                                symbol = "CRUDEOIL"
-                            
-                            if symbol and ltp > 0:
-                                quotes[symbol] = {
-                                    "ltp": ltp,
-                                    "high": float(quote.get('high_price', ltp)),
-                                    "low": float(quote.get('low_price', ltp)),
-                                    "open": float(quote.get('open_price', ltp)),
-                                    "close": float(quote.get('close_price', ltp)),
-                                }
+        # Fetch CRUDEOIL
+        try:
+            resp = dhan_api.get_intraday_paracande(
+                exchange_tokens=[],
+                security_id=[565899],
+                exchange="MCX_FUT",
+                interval=1
+            )
+            if resp and resp.get('status') == 'success' and resp.get('data'):
+                data = resp['data']
+                if isinstance(data, list) and len(data) > 0:
+                    candle = data[0]
+                    quotes["CRUDEOIL"] = {
+                        "ltp": float(candle.get('close', 0)),
+                        "high": float(candle.get('high', 0)),
+                        "low": float(candle.get('low', 0)),
+                        "open": float(candle.get('open', 0)),
+                        "close": float(candle.get('close', 0)),
+                    }
+        except Exception as e:
+            pass
     
     except Exception as e:
-        pass
+        print(f"[ERROR] API fetch failed: {e}")
     
     return quotes
 
@@ -317,7 +346,7 @@ def screener_loop():
                 
                 print("Waiting 5s...")
             else:
-                print("⚠️ No data")
+                print("⚠️ No data (Waiting for IP whitelist...)")
             
             time.sleep(5)
     
