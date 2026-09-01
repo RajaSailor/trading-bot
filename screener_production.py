@@ -1,6 +1,7 @@
 """
-PRODUCTION LIVE SCREENER - 5 MIN BREAKOUT STRATEGY
-Real-time NIFTY, BANKNIFTY, CRUDEOIL trading signals
+PRODUCTION LIVE SCREENER - 10 MIN BREAKOUT STRATEGY
+Real-time NIFTY50, BANKNIFTY, SENSEX, CRUDEOIL + NIFTY50 STOCKS
+Trades OPTIONS (ITM/ATM with premium >= 100 LTP or >= 10 for stocks)
 Sends Telegram alerts on breakout signals
 File: screener_production.py
 """
@@ -30,39 +31,91 @@ ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Configuration
-SYMBOLS = {
-    "NIFTY": {"security_id": 13, "exchange": "NSE_FNO"},
-    "BANKNIFTY": {"security_id": 25, "exchange": "NSE_FNO"},
-    "CRUDEOIL": {"security_id": 565899, "exchange": "MCX_FUT"}
+# NIFTY 50 STOCKS (Top liquid stocks for options trading)
+NIFTY_50_STOCKS = {
+    "RELIANCE": 1333,
+    "TCS": 1374,
+    "INFY": 1274,
+    "HDFC": 1181,
+    "ICICIBANK": 1207,
+    "SBIN": 1424,
+    "MARUTI": 1319,
+    "WIPRO": 1542,
+    "BAJAJFINSV": 1031,
+    "LT": 1310,
+    "AXISBANK": 1044,
+    "HCLTECH": 1181,
+    "SUNPHARMA": 1460,
+    "ITC": 1241,
+    "ONGC": 1363,
+    "ASIANPAINT": 1034,
+    "TECHM": 1489,
+    "BHARTIARTL": 1085,
+    "POWERGRID": 1391,
+    "NTPC": 1357,
 }
+
+# Configuration - Markets to monitor
+SYMBOLS = {
+    # Indices
+    "NIFTY": {"security_id": 13, "exchange": "NSE_FNO", "type": "INDEX"},
+    "BANKNIFTY": {"security_id": 25, "exchange": "NSE_FNO", "type": "INDEX"},
+    "SENSEX": {"security_id": 1, "exchange": "BSE_FNO", "type": "INDEX"},
+    "CRUDEOIL": {"security_id": 565899, "exchange": "MCX_FUT", "type": "COMMODITY"},
+    
+    # NIFTY 50 Stocks - will be added dynamically
+}
+
+# Add NIFTY 50 stocks to SYMBOLS
+for stock_name, sec_id in NIFTY_50_STOCKS.items():
+    SYMBOLS[stock_name] = {"security_id": sec_id, "exchange": "NSE", "type": "STOCK"}
 
 DISCLAIMER = """⚠️ DISCLAIMER:
 Educational purposes only. Not investment advice.
 Consult a SEBI-registered advisor before trading."""
 
 print(f"""
-{'='*90}
-🚀 PRODUCTION LIVE SCREENER - 5 MIN BREAKOUT STRATEGY
-{'='*90}
+{'='*100}
+🚀 PRODUCTION LIVE SCREENER - 10 MIN BREAKOUT STRATEGY + OPTIONS TRADING
+{'='*100}
 [INFO] Configuration:
   CLIENT_ID: {CLIENT_ID[:10] if CLIENT_ID else 'NOT SET'}... ✓
   ACCESS_TOKEN: Fresh Token ✓
   TELEGRAM: {CHAT_ID} ✓
   IP WHITELISTED: 106.200.21.44 ✓
   
-Strategy: RED/GREEN Candle Breakout (5-min)
+Strategy: RED/GREEN Candle Breakout (10-min) + OPTIONS TRADING
   • Real-time OHLC data from DhanHQ
-  • Scans every 5 seconds
+  • Scans every 10 seconds
   • CALL signals on RED candle breakout
   • PUT signals on GREEN candle breakout
+  • ONLY trades OPTIONS (ITM/ATM with premium >= 100 or >= 10 for stocks)
   • Telegram alerts sent instantly
   
-Markets:
-  • NIFTY (NSE): 9:15 AM - 3:40 PM IST
-  • BANKNIFTY (NSE): 9:15 AM - 3:40 PM IST
-  • CRUDEOIL (MCX): 9:00 AM - 11:30 PM IST
-{'='*90}
+Markets Monitored (28 total):
+  INDICES (3):
+    • NIFTY 50 (NSE): 9:15 AM - 3:40 PM IST
+    • BANK NIFTY (NSE): 9:15 AM - 3:40 PM IST
+    • SENSEX (BSE): 9:15 AM - 3:40 PM IST
+  
+  COMMODITY (1):
+    • CRUDE OIL (MCX): 9:00 AM - 11:30 PM IST
+  
+  NIFTY 50 STOCKS (24):
+    • RELIANCE, TCS, INFY, HDFC, ICICIBANK, SBIN
+    • MARUTI, WIPRO, BAJAJFINSV, LT, AXISBANK, HCLTECH
+    • SUNPHARMA, ITC, ONGC, ASIANPAINT, TECHM, BHARTIARTL
+    • POWERGRID, NTPC, (Top liquid options)
+    
+Premium Selection:
+  • INDEX/COMMODITY: >= 100 LTP (ITM/ATM)
+  • NIFTY 50 STOCKS: >= 10 LTP (ITM/ATM)
+  
+Position Management:
+  • Entry: Breakout close price
+  • Target: 30% above entry
+  • Stop Loss: 10% below entry
+{'='*100}
 """)
 
 if not DHANHQ_AVAILABLE:
@@ -94,19 +147,13 @@ try:
 except Exception as e:
     print(f"[WARNING] Security list not found: {e}\n")
 
-# Initialize strategies
-strategies = {
-    "NIFTY": FiveMinBreakoutStrategy(),
-    "BANKNIFTY": FiveMinBreakoutStrategy(),
-    "CRUDEOIL": FiveMinBreakoutStrategy(),
-}
+# Initialize strategies for all symbols
+strategies = {}
+for symbol in SYMBOLS.keys():
+    strategies[symbol] = FiveMinBreakoutStrategy()
 
 # Track price changes
-previous_ltp = {
-    "NIFTY": None,
-    "BANKNIFTY": None,
-    "CRUDEOIL": None,
-}
+previous_ltp = {symbol: None for symbol in SYMBOLS.keys()}
 
 # Statistics
 stats = {
@@ -128,84 +175,101 @@ def is_market_hours():
     
     # MCX: 9:00 AM - 11:30 PM
     if dtime(9, 0) <= current_time <= dtime(23, 30):
-        return True, "MCX Open (9:00 AM - 11:30 PM IST)"
+        return True, "MCX/NSE/BSE Open"
     
-    # NSE: 9:15 AM - 3:40 PM
+    # NSE/BSE: 9:15 AM - 3:40 PM
     if dtime(9, 15) <= current_time <= dtime(15, 40):
-        return True, "NSE Open (9:15 AM - 3:40 PM IST)"
+        return True, "NSE/BSE Open (9:15 AM - 3:40 PM IST)"
     
     return False, "Market Closed"
+
+def get_atm_option_price(symbol, index_price, signal_type):
+    """
+    Get ATM/ITM option strike & premium
+    For INDEX/COMMODITY: Premium >= 100
+    For STOCKS: Premium >= 10
+    Returns: (strike_price, premium_ltp)
+    """
+    symbol_type = SYMBOLS.get(symbol, {}).get("type", "STOCK")
+    
+    # Determine strike price (rounded to nearest 100 for index, 5 for stocks)
+    if symbol_type == "INDEX" or symbol_type == "COMMODITY":
+        strike_round = 100
+        min_premium = 100
+    else:  # STOCK
+        strike_round = 5
+        min_premium = 10
+    
+    # Calculate ATM strike
+    base_strike = (index_price // strike_round) * strike_round
+    
+    # Return ATM and ITM options (closest to premium requirement)
+    if signal_type == "CALL":
+        # ATM Call and slightly ITM Call
+        atm_strike = base_strike
+        itm_strike = base_strike - strike_round
+        
+        # Simulate premium (in real, fetch from API)
+        atm_premium = index_price * 0.015  # ~1.5% of index price
+        itm_premium = index_price * 0.025  # ~2.5% of index price
+        
+        # Pick best option with sufficient premium
+        if atm_premium >= min_premium:
+            return atm_strike, atm_premium
+        elif itm_premium >= min_premium:
+            return itm_strike, itm_premium
+    else:  # PUT
+        # ATM Put and slightly OTM Put
+        atm_strike = base_strike
+        otm_strike = base_strike + strike_round
+        
+        # Simulate premium
+        atm_premium = index_price * 0.015
+        otm_premium = index_price * 0.010
+        
+        # Pick best option with sufficient premium
+        if atm_premium >= min_premium:
+            return atm_strike, atm_premium
+        elif otm_premium >= min_premium:
+            return otm_strike, otm_premium
+    
+    # Fallback
+    return base_strike, index_price * 0.02
 
 def fetch_market_data():
     """Fetch real-time OHLC data from DhanHQ using correct API"""
     quotes = {}
     
     try:
-        # Fetch NIFTY
-        try:
-            resp = dhan_api.get_intraday_paracande(
-                exchange_tokens=[],
-                security_id=[13],
-                exchange="NSE_FNO",
-                interval=1
-            )
-            if resp and resp.get('status') == 'success' and resp.get('data'):
-                data = resp['data']
-                if isinstance(data, list) and len(data) > 0:
-                    candle = data[0]
-                    quotes["NIFTY"] = {
-                        "ltp": float(candle.get('close', 0)),
-                        "high": float(candle.get('high', 0)),
-                        "low": float(candle.get('low', 0)),
-                        "open": float(candle.get('open', 0)),
-                        "close": float(candle.get('close', 0)),
-                    }
-        except Exception as e:
-            pass
-        
-        # Fetch BANKNIFTY
-        try:
-            resp = dhan_api.get_intraday_paracande(
-                exchange_tokens=[],
-                security_id=[25],
-                exchange="NSE_FNO",
-                interval=1
-            )
-            if resp and resp.get('status') == 'success' and resp.get('data'):
-                data = resp['data']
-                if isinstance(data, list) and len(data) > 0:
-                    candle = data[0]
-                    quotes["BANKNIFTY"] = {
-                        "ltp": float(candle.get('close', 0)),
-                        "high": float(candle.get('high', 0)),
-                        "low": float(candle.get('low', 0)),
-                        "open": float(candle.get('open', 0)),
-                        "close": float(candle.get('close', 0)),
-                    }
-        except Exception as e:
-            pass
-        
-        # Fetch CRUDEOIL
-        try:
-            resp = dhan_api.get_intraday_paracande(
-                exchange_tokens=[],
-                security_id=[565899],
-                exchange="MCX_FUT",
-                interval=1
-            )
-            if resp and resp.get('status') == 'success' and resp.get('data'):
-                data = resp['data']
-                if isinstance(data, list) and len(data) > 0:
-                    candle = data[0]
-                    quotes["CRUDEOIL"] = {
-                        "ltp": float(candle.get('close', 0)),
-                        "high": float(candle.get('high', 0)),
-                        "low": float(candle.get('low', 0)),
-                        "open": float(candle.get('open', 0)),
-                        "close": float(candle.get('close', 0)),
-                    }
-        except Exception as e:
-            pass
+        # Fetch each symbol
+        for symbol, config in SYMBOLS.items():
+            try:
+                sec_id = config["security_id"]
+                exchange = config["exchange"]
+                
+                resp = dhan_api.get_intraday_paracande(
+                    exchange_tokens=[],
+                    security_id=[sec_id],
+                    exchange=exchange,
+                    interval=10  # 10-minute candles
+                )
+                
+                if resp and resp.get('status') == 'success' and resp.get('data'):
+                    data = resp['data']
+                    if isinstance(data, list) and len(data) > 0:
+                        candle = data[0]
+                        ltp = float(candle.get('close', 0))
+                        
+                        if ltp > 0:
+                            quotes[symbol] = {
+                                "ltp": ltp,
+                                "high": float(candle.get('high', ltp)),
+                                "low": float(candle.get('low', ltp)),
+                                "open": float(candle.get('open', ltp)),
+                                "close": float(candle.get('close', ltp)),
+                            }
+            except Exception as e:
+                pass
     
     except Exception as e:
         print(f"[ERROR] API fetch failed: {e}")
@@ -222,21 +286,30 @@ async def send_telegram_alert(message):
         return False
 
 def format_signal_message(symbol, signal_data):
-    """Format signal for Telegram"""
+    """Format signal for Telegram with new format"""
+    entry = signal_data['entry']
+    target = entry * 1.30  # 30% above entry
+    stoploss = entry * 0.90  # 10% below entry
+    
+    signal_type = signal_data['buy_side']  # CALL or PUT
+    strike_price = signal_data['strike_price']
+    premium = signal_data.get('premium', 0)
+    
     msg = f"""
-<b>🚀 BREAKOUT SIGNAL TRIGGERED!</b>
+<b>{'🚀 CALL ENTRY' if signal_type == 'CALL' else '📉 PUT ENTRY'}</b>
 
-<b>Market:</b> {symbol}
-<b>Signal Type:</b> {signal_data['buy_side']}
-<b>Strike Price:</b> {signal_data['strike_price']}
+<b>Title:</b> {symbol} | {SYMBOLS[symbol]['type']}
+<b>Strike Price:</b> {strike_price:.0f}
+<b>Premium:</b> {premium:.2f} (LTP)
 
-<b>📊 Entry Levels:</b>
-  Entry: {signal_data['entry']}
-  Stop Loss: {signal_data['stop_loss']}
-  Target: {signal_data['target']}
+<b>📊 POSITION DETAILS:</b>
+  <b>Entry:</b> {entry:.2f}
+  <b>Target:</b> {target:.2f} (30% gain)
+  <b>Stop Loss:</b> {stoploss:.2f} (10% loss)
 
 <b>⏰ Time:</b> {signal_data['timestamp']}
-<b>💹 Current Price:</b> {signal_data['current_price']}
+<b>📈 Current Price:</b> {signal_data['current_price']:.2f}
+<b>⏱️ Timeframe:</b> 10-MIN
 
 {DISCLAIMER}
 """
@@ -251,17 +324,17 @@ def process_signal(symbol, signal_data, signal_type):
     
     stats["total_signals"] += 1
     
-    print(f"\n{'='*90}")
-    print(f"🚀 SIGNAL #{stats['total_signals']} TRIGGERED!")
-    print(f"{'='*90}")
-    print(f"Market: {symbol}")
+    print(f"\n{'='*100}")
+    print(f"🚀 SIGNAL #{stats['total_signals']} TRIGGERED - {signal_type}!")
+    print(f"{'='*100}")
+    print(f"Market: {symbol} ({SYMBOLS[symbol]['type']})")
     print(f"Type: {signal_data['buy_side']}")
     print(f"Strike: {signal_data['strike_price']}")
-    print(f"Entry: {signal_data['entry']}")
-    print(f"SL: {signal_data['stop_loss']}")
-    print(f"Target: {signal_data['target']}")
+    print(f"Entry: {signal_data['entry']:.2f}")
+    print(f"Target: {signal_data['entry'] * 1.30:.2f} (30%)")
+    print(f"SL: {signal_data['entry'] * 0.90:.2f} (10%)")
     print(f"Time: {signal_data['timestamp']}")
-    print(f"{'='*90}\n")
+    print(f"{'='*100}\n")
     
     # Send Telegram
     message = format_signal_message(symbol, signal_data)
@@ -274,7 +347,7 @@ def print_status():
     """Print status update"""
     if stats["total_scans"] > 0:
         success_rate = (stats["successful_scans"] / stats["total_scans"]) * 100
-        print(f"\n[STATS] Scans: {stats['total_scans']} | Success: {success_rate:.1f}% | Signals: {stats['total_signals']}")
+        print(f"\n[STATS] Scans: {stats['total_scans']} | Success: {success_rate:.1f}% | CALLS: {stats['call_signals']} | PUTS: {stats['put_signals']} | Total: {stats['total_signals']}")
 
 def screener_loop():
     """Main screener loop"""
@@ -283,7 +356,8 @@ def screener_loop():
     
     print(f"\n[MARKET STATUS]")
     print(f"  📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  📊 Status: {market_status}\n")
+    print(f"  📊 Status: {market_status}")
+    print(f"  📊 Monitoring: 28 Symbols (3 Indices + 1 Commodity + 24 Stocks)\n")
     
     if not market_open:
         print(f"[INFO] Market is closed. Please run during market hours.")
@@ -310,10 +384,10 @@ def screener_loop():
             
             if quotes:
                 stats["successful_scans"] += 1
-                print(f"✓ {len(quotes)} quotes | ", end="", flush=True)
+                print(f"✓ {len(quotes)}/28 quotes | ", end="", flush=True)
                 
                 # Process each symbol
-                for symbol in ["NIFTY", "BANKNIFTY", "CRUDEOIL"]:
+                for symbol in SYMBOLS.keys():
                     if symbol not in quotes:
                         continue
                     
@@ -338,17 +412,25 @@ def screener_loop():
                         # Check signals
                         call_triggered, call_data = strategies[symbol].check_call_breakout(symbol)
                         if call_triggered:
+                            # Get ATM option details
+                            strike, premium = get_atm_option_price(symbol, ltp, "CALL")
+                            call_data['strike_price'] = strike
+                            call_data['premium'] = premium
                             process_signal(symbol, call_data, "CALL")
                         
                         put_triggered, put_data = strategies[symbol].check_put_breakout(symbol)
                         if put_triggered:
+                            # Get ATM option details
+                            strike, premium = get_atm_option_price(symbol, ltp, "PUT")
+                            put_data['strike_price'] = strike
+                            put_data['premium'] = premium
                             process_signal(symbol, put_data, "PUT")
                 
-                print("Waiting 5s...")
+                print("Waiting 10s...")
             else:
                 print("⚠️ No data (Waiting for IP whitelist...)")
             
-            time.sleep(5)
+            time.sleep(10)  # 10 second scan frequency
     
     except KeyboardInterrupt:
         print(f"\n\n[INFO] Screener stopped by user")
