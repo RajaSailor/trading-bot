@@ -14,6 +14,7 @@ import time
 from datetime import datetime, time as dtime
 from strategy import FiveMinBreakoutStrategy
 import pandas as pd
+import requests
 
 # Import DhanHQ
 try:
@@ -30,6 +31,21 @@ CLIENT_ID = os.getenv("API_KEY")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+# ============================================================================
+# DETECT RENDER'S PUBLIC IP (CRITICAL FOR DHANHQ WHITELISTING)
+# ============================================================================
+
+def detect_public_ip():
+    """Detect and return the service's public IP address"""
+    try:
+        response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        public_ip = response.json()['ip']
+        return public_ip
+    except Exception as e:
+        return "UNKNOWN"
+
+PUBLIC_IP = detect_public_ip()
 
 # NIFTY 50 STOCKS (Top liquid stocks for options trading)
 NIFTY_50_STOCKS = {
@@ -79,6 +95,8 @@ print(f"""
   ACCESS_TOKEN: Fresh Token ✓
   TELEGRAM: {CHAT_ID} ✓
   IP WHITELISTED: 106.200.21.44 ✓
+  
+🌍 RENDER SERVICE PUBLIC IP: {PUBLIC_IP} ⭐ (Use this for DhanHQ after Sept 8!)
   
 Strategy: RED/GREEN Candle Breakout (10-min) + OPTIONS TRADING
   • Real-time OHLC data from DhanHQ
