@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramHandler:
@@ -132,23 +136,48 @@ class TelegramHandler:
 
     def _send_message(self, chat_id: int, message: str) -> bool:
         if not self.token:
+            logger.warning("Telegram token not configured, cannot send message")
             return False
+        
         try:
             if self._bot is None:
                 from telegram import Bot
-
                 self._bot = Bot(token=self.token)
+                logger.info("Telegram bot initialized")
             
-            coroutine = self._bot.send_message(chat_id=chat_id, text=message)
+            logger.info(f"Attempting to send message to chat_id={chat_id}")
             
+            # Try synchronous send first
+            import asyncio
             try:
                 loop = asyncio.get_running_loop()
-                # If loop is running, we can't block, so schedule and return success
-                loop.create_task(coroutine)
-                return True  # ✅ FIXED: Return True instead of False
-            except RuntimeError:
-                # No event loop running, create one
-                asyncio.run(coroutine)
+                logger.debug("Event loop detected, using async send")
+                # Schedule the coroutine
+                task = loop.create_task(self._send_async(chat_id, message))
+                logger.debug(f"Task scheduled: {task}")
                 return True
+            except RuntimeError:
+                logger.debug("No event loop, using synchronous send")
+                # No event loop, run synchronously
+                asyncio.run(self._send_message_sync(chat_id, message))
+                return True
+                
         except Exception as e:
+            logger.error(f"Telegram send failed: {type(e).__name__}: {e}")
             return False
+    
+    async def _send_async(self, chat_id: int, message: str) -> None:
+        try:
+            logger.info(f"Sending async message to {chat_id}")
+            await self._bot.send_message(chat_id=chat_id, text=message)
+            logger.info(f"Message sent successfully to {chat_id}")
+        except Exception as e:
+            logger.error(f"Async send failed: {type(e).__name__}: {e}")
+    
+    async def _send_message_sync(self, chat_id: int, message: str) -> None:
+        try:
+            logger.info(f"Sending sync message to {chat_id}")
+            await self._bot.send_message(chat_id=chat_id, text=message)
+            logger.info(f"Message sent successfully to {chat_id}")
+        except Exception as e:
+            logger.error(f"Sync send failed: {type(e).__name__}: {e}")
