@@ -16,6 +16,7 @@ import pandas as pd
 import requests
 from telegram import Bot
 import asyncio
+import pytz
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv(dotenv_path="./.env", override=True)
+
+# ============================================================================
+# TIMEZONE CONFIGURATION - INDIA STANDARD TIME (IST)
+# ============================================================================
+IST = pytz.timezone('Asia/Kolkata')
 
 # ============================================================================
 # API CREDENTIALS
@@ -198,6 +204,12 @@ def detect_public_ip():
         logger.error(f"IP detection failed: {e}")
         return "UNKNOWN"
 
+def get_ist_time():
+    """Get current time in India Standard Time (IST)"""
+    utc_now = datetime.now(pytz.UTC)
+    ist_now = utc_now.astimezone(IST)
+    return ist_now
+
 def get_channel_for_symbol(symbol):
     """
     Determine which channel a signal should go to based on symbol
@@ -234,9 +246,11 @@ def initialize():
     PUBLIC_IP = detect_public_ip()
     screener_state["public_ip"] = PUBLIC_IP
     
+    ist_time = get_ist_time()
     logger.info("=" * 80)
     logger.info("🚀 INITIALIZING PRODUCTION SCREENER (MULTI-BOT VERSION)")
     logger.info("=" * 80)
+    logger.info(f"🌍 Server Time (IST): {ist_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"Public IP: {PUBLIC_IP}")
     logger.info(f"Monitoring Symbols: {len(ALL_SYMBOLS)} total")
     logger.info(f"  ├─ Index F&O: {len(INDEX_SYMBOLS) + len(INDEX_SYMBOLS_SPOT)}")
@@ -310,23 +324,34 @@ def initialize():
     logger.info("=" * 80)
 
 def is_market_hours():
-    """Check if market is open (NSE: 9:15-15:30, MCX: 9:00-23:30)"""
-    now = datetime.now()
-    current_time = now.time()
-    day = now.weekday()
+    """Check if market is open (NSE: 9:15-15:30, MCX: 9:00-23:30) - IST TIMEZONE"""
+    # Get current time in IST (India Standard Time)
+    ist_now = get_ist_time()
+    current_time = ist_now.time()
+    day = ist_now.weekday()
     
-    # Weekend check
+    # Weekend check (Saturday=5, Sunday=6)
     if day >= 5:
+        logger.debug(f"❌ Weekend (Day {day}) - Market closed")
         return False
     
-    # NSE trading hours (9:15 - 15:30)
-    if dtime(9, 15) <= current_time <= dtime(15, 30):
+    # NSE trading hours (9:15 AM - 3:30 PM IST)
+    nse_open = dtime(9, 15)
+    nse_close = dtime(15, 30)
+    
+    if nse_open <= current_time <= nse_close:
+        logger.debug(f"✅ NSE market open (IST: {current_time})")
         return True
     
-    # MCX trading hours (9:00 - 23:30)
-    if dtime(9, 0) <= current_time <= dtime(23, 30):
+    # MCX trading hours (9:00 AM - 11:30 PM IST)
+    mcx_open = dtime(9, 0)
+    mcx_close = dtime(23, 30)
+    
+    if mcx_open <= current_time <= mcx_close:
+        logger.debug(f"✅ MCX market open (IST: {current_time})")
         return True
     
+    logger.debug(f"❌ Market closed (IST: {current_time})")
     return False
 
 def fetch_market_data():
@@ -430,6 +455,10 @@ def format_signal_message(symbol, signal_data, bot_type):
     strike_price = signal_data['strike_price']
     option_type = "CE" if signal_type == "CALL" else "PE"
     
+    # Get IST time for alert
+    ist_time = get_ist_time()
+    alert_time = ist_time.strftime('%H:%M:%S %Z')
+    
     channel_name = {
         "INDEX": "📊 INDEX F&O",
         "NIFTY50_STOCKS": "📈 NIFTY 50 STOCKS",
@@ -452,7 +481,7 @@ def format_signal_message(symbol, signal_data, bot_type):
   <b>Target:</b> {target_premium:.2f} (30% gain)
   <b>Stop Loss:</b> {stoploss_premium:.2f} (10% loss)
 
-<b>⏰ Time:</b> {signal_data['timestamp']}
+<b>⏰ Time (IST):</b> {alert_time}
 <b>🕐 Timeframe:</b> 10-MINUTE BREAKOUT
 <b>📈 Current Price:</b> {entry_premium:.2f}
 
@@ -481,9 +510,10 @@ def process_signal(symbol, signal_data, signal_type):
     screener_state["total_signals"] += 1
     
     entry_premium = signal_data.get('premium', signal_data['entry'])
+    ist_time = get_ist_time()
     logger.info(f"\n{'='*80}")
     logger.info(f"🚀 SIGNAL #{screener_state['total_signals']} TRIGGERED - {signal_type}!")
-    logger.info(f"Market: {symbol} | Channel: {bot_type} | Entry: {entry_premium:.2f}")
+    logger.info(f"Time (IST): {ist_time.strftime('%H:%M:%S')} | Market: {symbol} | Channel: {bot_type} | Entry: {entry_premium:.2f}")
     logger.info(f"{'='*80}\n")
     
     # Format message
@@ -511,7 +541,9 @@ def process_signal(symbol, signal_data, signal_type):
 def screener_loop():
     """Main screener loop - runs in background thread"""
     
+    ist_time = get_ist_time()
     logger.info("🚀 SCREENER BACKGROUND THREAD STARTED")
+    logger.info(f"🌍 Current Time (IST): {ist_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"Monitoring {len(ALL_SYMBOLS)} symbols across 6 channels")
     logger.info(f"10-minute candle breakout strategy")
     
@@ -523,14 +555,16 @@ def screener_loop():
             screener_state["total_scans"] += 1
             market_open = is_market_hours()
             screener_state["market_open"] = market_open
-            screener_state["last_scan_time"] = datetime.now().isoformat()
+            
+            ist_time = get_ist_time()
+            screener_state["last_scan_time"] = ist_time.isoformat()
             
             # Skip if market closed
             if not market_open:
                 time.sleep(5)
                 continue
             
-            current_time = datetime.now().strftime("%H:%M:%S")
+            current_time = ist_time.strftime("%H:%M:%S")
             scan_count += 1
             
             # Fetch real-time data
