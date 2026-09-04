@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import threading
@@ -37,8 +36,8 @@ def _ist_now() -> datetime:
     return datetime.now(pytz.UTC).astimezone(IST)
 
 
-def _is_within_market_hours(now: datetime, start, end) -> bool:
-    if now.weekday() >= 5:
+def _is_within_market_hours(now: datetime, start, end, weekdays_only: bool = True) -> bool:
+    if weekdays_only and now.weekday() >= 5:
         return False
     current = now.time()
     return start <= current <= end
@@ -163,6 +162,7 @@ class MultiTimeframeScreener:
             "side": side,
             "entry_time": _ist_now().isoformat(),
             "position_id": f"{symbol_key}:{side}:{breakout['breakout_time']}",
+            "chat_id": chat_id,
         }
 
         if config.get("asset_class") != "CRYPTO":
@@ -189,9 +189,9 @@ class MultiTimeframeScreener:
                 self._send_message(chat_id, f"🚨 SL MISSED for {event['position_id']}")
                 screener_state["sl_missed_alerts"] += 1
 
-    def _scan_group(self, job_name: str, interval_seconds: int, interval_minutes: int, start, end, instruments: Dict[str, dict], chat_selector) -> None:
+    def _scan_group(self, job_name: str, interval_seconds: int, interval_minutes: int, start, end, instruments: Dict[str, dict], chat_selector, weekdays_only: bool = True) -> None:
         now = _ist_now()
-        if not _is_within_market_hours(now, start, end):
+        if not _is_within_market_hours(now, start, end, weekdays_only=weekdays_only):
             return
 
         last_scan = self.last_scan_by_job.get(job_name, 0)
@@ -274,6 +274,7 @@ class MultiTimeframeScreener:
                     end=self.scanner_crypto.market_close,
                     instruments=self.scanner_crypto.instruments(),
                     chat_selector=lambda _: self.scanner_crypto.channel_id,
+                    weekdays_only=False,
                 )
 
                 screener_state["market_open"] = True
@@ -281,6 +282,19 @@ class MultiTimeframeScreener:
                 screener_state["errors"].append(str(exc))
                 logger.error("Screener loop error: %s", exc)
             time.sleep(1)
+
+    def confirm_next_position(self) -> bool:
+        confirmed_signal = self.positions.confirm_pending_signal()
+        if not confirmed_signal:
+            return False
+        sent = self._send_signal(confirmed_signal, confirmed_signal["chat_id"])
+        if sent:
+            screener_state["total_signals"] += 1
+            if confirmed_signal["side"] == "CALL":
+                screener_state["call_signals"] += 1
+            else:
+                screener_state["put_signals"] += 1
+        return sent
 
 
 screener_state = {
@@ -302,16 +316,27 @@ screener_state = {
 }
 
 _screener_instance: Optional[MultiTimeframeScreener] = None
+_screener_thread: Optional[threading.Thread] = None
+_thread_lock = threading.Lock()
 
 
 def start_screener():
-    global _screener_instance
-    if _screener_instance is None:
-        _screener_instance = MultiTimeframeScreener()
+    global _screener_instance, _screener_thread
+    with _thread_lock:
+        if _screener_thread is not None and _screener_thread.is_alive():
+            if screener_state["running"]:
+                return _screener_thread
+            _screener_thread.join(timeout=2)
+            if _screener_thread.is_alive():
+                screener_state["running"] = True
+                return _screener_thread
 
-    thread = threading.Thread(target=_screener_instance.loop, daemon=True)
-    thread.start()
-    return thread
+        if _screener_instance is None:
+            _screener_instance = MultiTimeframeScreener()
+
+        _screener_thread = threading.Thread(target=_screener_instance.loop, daemon=True)
+        _screener_thread.start()
+        return _screener_thread
 
 
 def stop_screener():
@@ -321,4 +346,4 @@ def stop_screener():
 def confirm_next_position() -> bool:
     if not _screener_instance:
         return False
-    return _screener_instance.positions.confirm_pending_position()
+    return _screener_instance.confirm_next_position()

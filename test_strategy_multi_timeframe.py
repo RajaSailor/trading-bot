@@ -30,6 +30,15 @@ class TestStrategyMultiTimeframe(unittest.TestCase):
         self.assertEqual(call["stop_loss"], 108)
         self.assertEqual(call["target_1"], 122)
 
+    def test_put_uses_same_red_breakout_rule(self):
+        self._add(200, 205, 195, 198, "11:00")  # red
+        self._add(198, 206, 197, 202, "11:05")  # breakout above red high
+        put = self.strategy.check_breakout(self.symbol_key, "PUT")
+        self.assertIsNotNone(put)
+        self.assertEqual(put["entry"], 205)
+        self.assertEqual(put["stop_loss"], 195)
+        self.assertEqual(put["target_3"], 235)
+
     def test_no_breakout_after_5_following_candles(self):
         self._add(100, 105, 95, 99, "R")  # red reference
         for i in range(1, 7):

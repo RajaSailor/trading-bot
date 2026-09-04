@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import datetime
 
 from flask import Flask, jsonify
@@ -7,13 +8,20 @@ from screener_background import confirm_next_position, screener_state, start_scr
 
 app = Flask(__name__)
 _screener_thread = None
+_startup_lock = threading.Lock()
+_auto_start_on_request = os.getenv("AUTO_START_ON_REQUEST", "true").lower() == "true"
 
 
 @app.before_request
 def startup():
     global _screener_thread
-    if _screener_thread is None:
-        _screener_thread = start_screener()
+    if not _auto_start_on_request:
+        return
+    if _screener_thread is not None and _screener_thread.is_alive():
+        return
+    with _startup_lock:
+        if _screener_thread is None or not _screener_thread.is_alive():
+            _screener_thread = start_screener()
 
 
 @app.route("/health", methods=["GET"])
@@ -113,4 +121,7 @@ def home():
 
 
 if __name__ == "__main__":
+    if os.getenv("AUTO_START_SCREENER", "false").lower() == "true":
+        with _startup_lock:
+            _screener_thread = start_screener()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False, use_reloader=False)
