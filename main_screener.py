@@ -13,6 +13,8 @@ from screener_15min import FifteenMinuteScreener
 from screener_30min import ThirtyMinuteScreener
 from screener_5min import FiveMinuteScreener
 from telegram_handler import TelegramHandler
+from webhook_handler import TradingViewWebhookHandler
+from webhook_store import webhook_store
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,12 @@ class ScreenerController:
         self.data_manager = DataManager()
         self.telegram_handler = TelegramHandler()
         self.position_manager = PositionManager(max_positions=5)
+        self.webhook_handler = TradingViewWebhookHandler(
+            self.telegram_handler,
+            self.position_manager,
+            self.data_manager,
+            store=webhook_store,
+        )
         self.scanner_5 = FiveMinuteScreener(self.data_manager, self.telegram_handler, self.position_manager)
         self.scanner_15 = FifteenMinuteScreener(self.data_manager, self.telegram_handler, self.position_manager)
         self.scanner_30 = ThirtyMinuteScreener(self.data_manager, self.telegram_handler, self.position_manager)
@@ -37,6 +45,7 @@ class ScreenerController:
             "total_alerts": 0,
             "last_scan_time": None,
             "errors": [],
+            "last_webhook_health_check": None,
         }
         self._state_file = Path(__file__).with_name("screener_state.json")
         self._load_state()
@@ -89,6 +98,26 @@ class ScreenerController:
     def get_alerts(self, limit: int = 50):
         return self.telegram_handler.get_alert_history(limit=limit)
 
+    def process_tradingview_webhook(
+        self,
+        payload: dict,
+        headers: Dict[str, str] | None = None,
+        remote_addr: str | None = None,
+        test_mode: bool = False,
+    ) -> dict:
+        return self.webhook_handler.process_tradingview_alert(
+            payload,
+            headers=headers,
+            remote_addr=remote_addr,
+            test_mode=test_mode,
+        )
+
+    def get_webhook_history(self, limit: int = 50):
+        return webhook_store.get_webhook_history(limit=limit)
+
+    def get_webhook_health(self) -> Dict[str, object]:
+        return self.webhook_handler.get_health()
+
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             if self._paused:
@@ -102,6 +131,7 @@ class ScreenerController:
                 self._stats["total_scans"] += 1
                 self._stats["total_alerts"] += alerts
                 self._stats["last_scan_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                self._maybe_log_webhook_health()
                 if self._stats["total_scans"] % 5 == 0:
                     self._persist_state()
             except Exception as exc:
@@ -116,6 +146,13 @@ class ScreenerController:
             "positions": self.position_manager.get_open_positions(),
         }
         self._state_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _maybe_log_webhook_health(self) -> None:
+        now = time.localtime()
+        check_key = time.strftime("%Y-%m-%d", now)
+        if now.tm_hour == 5 and self._stats.get("last_webhook_health_check") != check_key:
+            self._stats["last_webhook_health_check"] = check_key
+            logger.info("Daily webhook health check: %s", self.get_webhook_health())
 
     def _load_state(self) -> None:
         if not self._state_file.exists():

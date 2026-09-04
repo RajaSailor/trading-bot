@@ -71,25 +71,62 @@ class TelegramHandler:
     def format_signal_message(self, category: str, signal_data: dict, option_data: dict) -> str:
         icon = "🚀 CALL ENTRY" if signal_data["signal"] == "CALL" else "📉 PUT ENTRY"
         targets = signal_data["targets"]
+        source = signal_data.get("source")
+        timeframe_label = signal_data.get("timeframe", "")
+        symbol_line = (
+            f"Symbol: {signal_data['symbol']} | {timeframe_label}\n"
+            if timeframe_label.endswith("BREAKOUT")
+            else f"Symbol: {signal_data['symbol']} | {timeframe_label} Breakout\n"
+        )
+        source_banner = "[FROM TRADINGVIEW WEBHOOK]\n\n" if source == "TRADINGVIEW WEBHOOK" else ""
+        breakout_line = (
+            f"Breakout at: {signal_data['breakout_timestamp']} at {signal_data['breakout_price']}\n"
+            if source == "TRADINGVIEW WEBHOOK"
+            else f"Breakout Candle: {signal_data['breakout_timestamp']} "
+            f"(#{signal_data['breakout_candle_after']} after reference)\n"
+        )
+        entry_label = (
+            f"{signal_data['entry']} ({signal_data['reference_color']} HIGH)"
+            if source == "TRADINGVIEW WEBHOOK" and signal_data["signal"] == "CALL"
+            else f"{signal_data['entry']} ({signal_data['reference_color']} LOW)"
+            if source == "TRADINGVIEW WEBHOOK"
+            else f"{signal_data['entry']}"
+        )
+        target_distances = [
+            abs(round(float(target) - float(signal_data["entry"]), 2))
+            for target in targets
+        ]
+        stop_loss_label = (
+            f"{signal_data['stop_loss']} ({signal_data['reference_color']} LOW)"
+            if source == "TRADINGVIEW WEBHOOK" and signal_data["signal"] == "CALL"
+            else f"{signal_data['stop_loss']} ({signal_data['reference_color']} HIGH)"
+            if source == "TRADINGVIEW WEBHOOK"
+            else f"{signal_data['stop_loss']}"
+        )
+        target_labels = [
+            f"{distance:.2f}".rstrip("0").rstrip(".")
+            for distance in target_distances
+        ]
         return (
-            f"{icon}\n\n"
-            f"Symbol: {signal_data['symbol']} | {signal_data.get('timeframe', '')} Breakout\n"
+            f"{icon}\n"
+            f"{source_banner}"
+            f"{symbol_line}"
             f"Previous {signal_data['reference_color']} Candle: {signal_data['reference_timestamp']} "
             f"High: {signal_data['reference_high']} Low: {signal_data['reference_low']}\n"
-            f"Breakout Candle: {signal_data['breakout_timestamp']} "
-            f"(#{signal_data['breakout_candle_after']} after reference)\n"
+            f"{breakout_line}"
             f"Strike: {option_data['call_strike']} CE / {option_data['put_strike']} PE\n"
             f"Premium (LTP): ₹{option_data['call_premium'] if signal_data['signal'] == 'CALL' else option_data['put_premium']}\n\n"
             f"📊 POSITION DETAILS:\n"
-            f"Entry: {signal_data['entry']}\n"
-            f"Target 1: {targets[0]}\n"
-            f"Target 2: {targets[1]}\n"
-            f"Target 3: {targets[2]}\n"
-            f"Stop Loss: {signal_data['stop_loss']}\n\n"
-            f"⏰ Time (IST): {datetime.now().strftime('%H:%M:%S')}\n"
+            f"Entry: {entry_label}\n"
+            f"Target 1: {targets[0]} ({target_labels[0]} points)\n"
+            f"Target 2: {targets[1]} ({target_labels[1]} points)\n"
+            f"Target 3: {targets[2]} ({target_labels[2]} points)\n"
+            f"Stop Loss: {stop_loss_label}\n\n"
+            f"⏰ Signal Time (IST): {signal_data.get('signal_time_ist', datetime.now().strftime('%H:%M:%S'))}\n"
             f"🕐 Timeframe: {signal_data.get('timeframe', '')}\n"
-            f"Channel: {category}\n\n"
-            "📢 DISCLAIMER: Educational purposes only. Not SEBI registered."
+            f"📡 Source: {source or 'SCREENER'}\n"
+            f"Channel: {category.replace('_', ' ').upper()}\n\n"
+            "📢 DISCLAIMER: Educational purposes only."
         )
 
     def _send_message(self, chat_id: int, message: str) -> bool:
