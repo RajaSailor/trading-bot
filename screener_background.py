@@ -9,6 +9,7 @@ import os
 import time
 import threading
 import logging
+import html
 from datetime import datetime, time as dtime
 from dotenv import load_dotenv
 from strategy import FiveMinBreakoutStrategy
@@ -141,7 +142,7 @@ NIFTY_50_STOCKS = {
     "SUNPHARMA": 3351,
     "TCS": 11536,
     "TECHM": 13538,
-    "TMPV": 3456,
+    "TATAMOTORS": 3456,
     "TATASTEEL": 3499,
     "TATACONSUM": 3432,
     "TRENT": 1964,
@@ -460,6 +461,7 @@ def format_signal_message(symbol, signal_data, bot_type):
     signal_type = signal_data['buy_side']
     strike_price = signal_data['strike_price']
     option_type = "CE" if signal_type == "CALL" else "PE"
+    safe_symbol = html.escape(symbol)
     
     # Get IST time for alert
     ist_time = get_ist_time()
@@ -483,22 +485,25 @@ def format_signal_message(symbol, signal_data, bot_type):
             f"L:{candle['low']:.2f} C:{candle['close']:.2f}"
         )
     compared_text = "\n".join(compared_lines) if compared_lines else "  No candles available"
+    safe_compared_text = html.escape(compared_text)
 
     pattern_line = signal_data.get(
         "breakout_reason",
         f"{signal_type} breakout detected"
     )
+    safe_pattern_line = html.escape(pattern_line)
+    safe_symbol_type = html.escape(ALL_SYMBOLS[symbol]['type'])
      
     msg = f"""
 <b>{'🚀 CALL ENTRY' if signal_type == 'CALL' else '📉 PUT ENTRY'}</b>
 
 <b>Channel:</b> {channel_name.get(bot_type, bot_type)}
-<b>Symbol:</b> {symbol} | {ALL_SYMBOLS[symbol]['type']}
+<b>Symbol:</b> {safe_symbol} | {safe_symbol_type}
 <b>Strike Price:</b> {strike_price:.0f} {option_type}
 <b>ATM CE/PE:</b> {signal_data.get('call_strike', strike_price):.0f}CE / {signal_data.get('put_strike', strike_price):.0f}PE
 <b>Premium (LTP):</b> {entry_premium:.2f}
 <b>Premium %:</b> {signal_data.get('premium_percent', 1.5):.2f}%
-<b>Pattern:</b> {pattern_line}
+<b>Pattern:</b> {safe_pattern_line}
 
 <b>📊 POSITION DETAILS:</b>
   <b>Entry:</b> {entry_premium:.2f}
@@ -509,7 +514,7 @@ def format_signal_message(symbol, signal_data, bot_type):
 <b>🕐 Timeframe:</b> 5-MINUTE BREAKOUT
 <b>📈 Current Price:</b> {entry_premium:.2f}
 <b>🔎 Compared Candles (Last 5):</b>
-{compared_text}
+{safe_compared_text}
 
 <b>📢 DISCLAIMER</b>
 This is NOT SEBI-registered advice. For educational purposes only.

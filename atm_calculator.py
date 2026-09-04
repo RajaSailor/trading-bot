@@ -1,6 +1,7 @@
 """
 ATM strike calculation utilities.
 """
+from decimal import Decimal, ROUND_HALF_UP
 
 INDEX_STRIKE_STEP = 100
 STOCK_STRIKE_STEP = 50
@@ -18,7 +19,9 @@ def round_to_step(value, step):
     """Round numeric value to nearest strike step."""
     if value is None or value <= 0 or step <= 0:
         return None
-    return int(round(float(value) / step) * step)
+    scaled = Decimal(str(value)) / Decimal(str(step))
+    rounded = scaled.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return int(rounded * Decimal(str(step)))
 
 
 def calculate_atm_strikes(symbol, ltp):

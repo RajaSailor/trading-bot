@@ -114,10 +114,8 @@ class FiveMinBreakoutStrategy:
 
         compared_candles = self._build_compared_candles(previous_candles)
         trigger_ltp = ltp if ltp and ltp > 0 else current["close"]
-        atm_data = calculate_atm_strikes(symbol, trigger_ltp)
-        if not atm_data:
-            return False, None
 
+        matched_candidates = []
         for candle_number, red_candle in enumerate(reversed(previous_candles), start=1):
             if red_candle["is_bullish"]:
                 continue
@@ -128,45 +126,61 @@ class FiveMinBreakoutStrategy:
                 continue
 
             # Breakout condition: current candle breaks above high of a red candle
-            if current["close"] > breakout_level and current["high"] >= breakout_level:
-                self.last_triggered[signal_key] = True
+            current_high = max(current["high"], trigger_ltp)
+            if trigger_ltp > breakout_level and current_high >= breakout_level:
+                matched_candidates.append((candle_number, red_candle, breakout_level, signal_key))
 
-                entry = current["close"]
-                candle_range = breakout_level - red_candle["low"]
-                target = entry + (candle_range * 1.5)
-                stop_loss = red_candle["low"]
+        if not matched_candidates:
+            return False, None
 
-                volatility_percent = self._calculate_volatility_percent(previous_candles + [current])
-                premium, premium_percent = self.calculate_premium(trigger_ltp, volatility_percent)
+        candle_number, red_candle, breakout_level, signal_key = min(matched_candidates, key=lambda c: c[0])
+        atm_data = calculate_atm_strikes(symbol, trigger_ltp)
+        if not atm_data:
+            return False, None
+        self.last_triggered[signal_key] = True
 
-                signal_data = {
-                    "symbol": symbol,
-                    "buy_side": "CALL",
-                    "strike_price": atm_data["call_strike"],
-                    "atm_strike": atm_data["atm_strike"],
-                    "call_strike": atm_data["call_strike"],
-                    "put_strike": atm_data["put_strike"],
-                    "strike_step": atm_data["step"],
-                    "premium": premium,
-                    "premium_percent": premium_percent,
-                    "entry": round(entry, 2),
-                    "target": round(target, 2),
-                    "stop_loss": round(stop_loss, 2),
-                    "current_price": round(current["close"], 2),
-                    "timestamp": current["timestamp"],
-                    "candle_range": round(candle_range, 2),
-                    "breakout_level": round(breakout_level, 2),
-                    "breakout_candle_number": candle_number,
-                    "breakout_candle_color": "RED",
-                    "breakout_candle_timestamp": red_candle["timestamp"],
-                    "breakout_type": "RED_TO_GREEN",
-                    "breakout_reason": (
-                        f"Current candle closed above high of {candle_number} previous RED candle"
-                    ),
-                    "compared_candles": compared_candles,
-                    "timeframe": "5-MIN"
-                }
-                return True, signal_data
+        entry = trigger_ltp
+        candle_range = breakout_level - red_candle["low"]
+        target = entry + (candle_range * 1.5)
+        stop_loss = red_candle["low"]
+
+        current_snapshot = {
+            **current,
+            "close": trigger_ltp,
+            "high": max(current["high"], trigger_ltp),
+            "low": min(current["low"], trigger_ltp),
+        }
+        volatility_percent = self._calculate_volatility_percent(previous_candles + [current_snapshot])
+        premium, premium_percent = self.calculate_premium(trigger_ltp, volatility_percent)
+
+        signal_data = {
+            "symbol": symbol,
+            "buy_side": "CALL",
+            "strike_price": atm_data["call_strike"],
+            "atm_strike": atm_data["atm_strike"],
+            "call_strike": atm_data["call_strike"],
+            "put_strike": atm_data["put_strike"],
+            "strike_step": atm_data["step"],
+            "premium": premium,
+            "premium_percent": premium_percent,
+            "entry": round(entry, 2),
+            "target": round(target, 2),
+            "stop_loss": round(stop_loss, 2),
+            "current_price": round(trigger_ltp, 2),
+            "timestamp": current["timestamp"],
+            "candle_range": round(candle_range, 2),
+            "breakout_level": round(breakout_level, 2),
+            "breakout_candle_number": candle_number,
+            "breakout_candle_color": "RED",
+            "breakout_candle_timestamp": red_candle["timestamp"],
+            "breakout_type": "RED_TO_GREEN",
+            "breakout_reason": (
+                f"Current candle closed above high of {candle_number} previous RED candle"
+            ),
+            "compared_candles": compared_candles,
+            "timeframe": "5-MIN"
+        }
+        return True, signal_data
         
         return False, None
     
@@ -188,10 +202,8 @@ class FiveMinBreakoutStrategy:
 
         compared_candles = self._build_compared_candles(previous_candles)
         trigger_ltp = ltp if ltp and ltp > 0 else current["close"]
-        atm_data = calculate_atm_strikes(symbol, trigger_ltp)
-        if not atm_data:
-            return False, None
 
+        matched_candidates = []
         for candle_number, green_candle in enumerate(reversed(previous_candles), start=1):
             if not green_candle["is_bullish"]:
                 continue
@@ -202,45 +214,61 @@ class FiveMinBreakoutStrategy:
                 continue
 
             # Breakdown condition: current candle breaks below low of a green candle
-            if current["close"] < breakout_level and current["low"] <= breakout_level:
-                self.last_triggered[signal_key] = True
+            current_low = min(current["low"], trigger_ltp)
+            if trigger_ltp < breakout_level and current_low <= breakout_level:
+                matched_candidates.append((candle_number, green_candle, breakout_level, signal_key))
 
-                entry = current["close"]
-                candle_range = green_candle["high"] - breakout_level
-                target = entry - (candle_range * 1.5)
-                stop_loss = green_candle["high"]
+        if not matched_candidates:
+            return False, None
 
-                volatility_percent = self._calculate_volatility_percent(previous_candles + [current])
-                premium, premium_percent = self.calculate_premium(trigger_ltp, volatility_percent)
+        candle_number, green_candle, breakout_level, signal_key = min(matched_candidates, key=lambda c: c[0])
+        atm_data = calculate_atm_strikes(symbol, trigger_ltp)
+        if not atm_data:
+            return False, None
+        self.last_triggered[signal_key] = True
 
-                signal_data = {
-                    "symbol": symbol,
-                    "buy_side": "PUT",
-                    "strike_price": atm_data["put_strike"],
-                    "atm_strike": atm_data["atm_strike"],
-                    "call_strike": atm_data["call_strike"],
-                    "put_strike": atm_data["put_strike"],
-                    "strike_step": atm_data["step"],
-                    "premium": premium,
-                    "premium_percent": premium_percent,
-                    "entry": round(entry, 2),
-                    "target": round(target, 2),
-                    "stop_loss": round(stop_loss, 2),
-                    "current_price": round(current["close"], 2),
-                    "timestamp": current["timestamp"],
-                    "candle_range": round(candle_range, 2),
-                    "breakout_level": round(breakout_level, 2),
-                    "breakout_candle_number": candle_number,
-                    "breakout_candle_color": "GREEN",
-                    "breakout_candle_timestamp": green_candle["timestamp"],
-                    "breakout_type": "GREEN_TO_RED",
-                    "breakout_reason": (
-                        f"Current candle closed below low of {candle_number} previous GREEN candle"
-                    ),
-                    "compared_candles": compared_candles,
-                    "timeframe": "5-MIN"
-                }
-                return True, signal_data
+        entry = trigger_ltp
+        candle_range = green_candle["high"] - breakout_level
+        target = entry - (candle_range * 1.5)
+        stop_loss = green_candle["high"]
+
+        current_snapshot = {
+            **current,
+            "close": trigger_ltp,
+            "high": max(current["high"], trigger_ltp),
+            "low": min(current["low"], trigger_ltp),
+        }
+        volatility_percent = self._calculate_volatility_percent(previous_candles + [current_snapshot])
+        premium, premium_percent = self.calculate_premium(trigger_ltp, volatility_percent)
+
+        signal_data = {
+            "symbol": symbol,
+            "buy_side": "PUT",
+            "strike_price": atm_data["put_strike"],
+            "atm_strike": atm_data["atm_strike"],
+            "call_strike": atm_data["call_strike"],
+            "put_strike": atm_data["put_strike"],
+            "strike_step": atm_data["step"],
+            "premium": premium,
+            "premium_percent": premium_percent,
+            "entry": round(entry, 2),
+            "target": round(target, 2),
+            "stop_loss": round(stop_loss, 2),
+            "current_price": round(trigger_ltp, 2),
+            "timestamp": current["timestamp"],
+            "candle_range": round(candle_range, 2),
+            "breakout_level": round(breakout_level, 2),
+            "breakout_candle_number": candle_number,
+            "breakout_candle_color": "GREEN",
+            "breakout_candle_timestamp": green_candle["timestamp"],
+            "breakout_type": "GREEN_TO_RED",
+            "breakout_reason": (
+                f"Current candle closed below low of {candle_number} previous GREEN candle"
+            ),
+            "compared_candles": compared_candles,
+            "timeframe": "5-MIN"
+        }
+        return True, signal_data
         
         return False, None
     
