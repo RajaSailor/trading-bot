@@ -101,8 +101,14 @@ class TelegramHandler:
 
                 self._bot = Bot(token=self.token)
             import asyncio
-
-            asyncio.run(self._bot.send_message(chat_id=chat_id, text=message))
+            coroutine = self._bot.send_message(chat_id=chat_id, text=message)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(coroutine)
+            else:
+                loop.create_task(coroutine)
+                return False
             return True
         except Exception:
             return False

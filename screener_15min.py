@@ -51,7 +51,7 @@ class FifteenMinuteScreener:
                 continue
             signals = self.engine.evaluate(instrument.symbol, strategy_group)
             for signal in signals:
-                option_data = calculate_option_details(latest["close"], "INDEX")
+                option_data = calculate_option_details(latest["close"], self._instrument_type(instrument.category))
                 signal["timeframe"] = "15-MINUTE"
                 accepted = self.position_manager.add_position(
                     symbol=instrument.symbol,
@@ -67,3 +67,7 @@ class FifteenMinuteScreener:
     @staticmethod
     def _in_window(now: dt_time, start: dt_time, end: dt_time) -> bool:
         return start <= now <= end
+
+    @staticmethod
+    def _instrument_type(category: str) -> str:
+        return "STOCK" if "stock" in category or "intraday" in category or "pay_later" in category else "INDEX"

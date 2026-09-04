@@ -94,7 +94,7 @@ class StrategyEngine:
             if signal_put:
                 signal_put["option_side"] = "PE"
                 signals.append(signal_put)
-        else:
+        elif strategy_group == self.GROUP_2:
             signal_call = self._evaluate_direction(symbol, "call", "red", "above", current)
             if signal_call:
                 signal_call["option_side"] = "CE"
@@ -103,6 +103,8 @@ class StrategyEngine:
             if signal_put:
                 signal_put["option_side"] = "PE"
                 signals.append(signal_put)
+        else:
+            raise ValueError(f"Unsupported strategy group: {strategy_group}")
 
         return signals
 

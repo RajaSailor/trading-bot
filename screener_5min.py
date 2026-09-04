@@ -68,6 +68,8 @@ class FiveMinuteScreener:
         return alerts
 
     def _instrument_type(self, category: str) -> str:
+        if category == "crypto":
+            return "CRYPTO"
         return "STOCK" if "stock" in category else "INDEX"
 
     @staticmethod

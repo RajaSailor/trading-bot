@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 
 from flask import Flask, jsonify
@@ -43,12 +44,18 @@ def api_alerts():
 
 @app.route('/api/control/start', methods=['POST'])
 def api_start():
-    return jsonify({"started": screener_controller.start()}), 200
+    started = screener_controller.start()
+    if not started:
+        return jsonify({"started": False, "error": "screener already running"}), 409
+    return jsonify({"started": True}), 200
 
 
 @app.route('/api/control/stop', methods=['POST'])
 def api_stop():
-    return jsonify({"stopped": screener_controller.stop()}), 200
+    stopped = screener_controller.stop()
+    if not stopped:
+        return jsonify({"stopped": False, "error": "screener not running"}), 409
+    return jsonify({"stopped": True}), 200
 
 
 @app.route('/api/control/pause', methods=['POST'])
@@ -72,4 +79,4 @@ def not_found(_):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", "5000")))

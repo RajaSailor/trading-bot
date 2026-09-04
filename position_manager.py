@@ -78,20 +78,20 @@ class PositionManager:
                 elif position.side == "PUT" and price <= target:
                     position.targets_hit.append(target)
 
+        if not position.sl_miss_alerted:
+            sl_missed = (position.side == "CALL" and price < position.stop_loss) or (
+                position.side == "PUT" and price > position.stop_loss
+            )
+            if sl_missed:
+                position.sl_miss_alerted = True
+                if sl_miss_callback:
+                    sl_miss_callback(position, price)
+
         sl_hit = (position.side == "CALL" and price <= position.stop_loss) or (
             position.side == "PUT" and price >= position.stop_loss
         )
         if sl_hit:
             position.sl_triggered = True
-
-        if not position.sl_triggered and not position.sl_miss_alerted:
-            sl_breached = (position.side == "CALL" and price < position.stop_loss) or (
-                position.side == "PUT" and price > position.stop_loss
-            )
-            if sl_breached:
-                position.sl_miss_alerted = True
-                if sl_miss_callback:
-                    sl_miss_callback(position, price)
 
         return position
 

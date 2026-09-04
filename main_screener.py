@@ -52,9 +52,16 @@ class ScreenerController:
         return True
 
     def stop(self) -> bool:
+        if not self._thread or not self._thread.is_alive():
+            self._stats["running"] = False
+            return False
         self._stop_event.set()
+        self._thread.join(timeout=3)
+        if self._thread.is_alive():
+            return False
         self._stats["running"] = False
         self._persist_state()
+        self._thread = None
         return True
 
     def pause(self) -> bool:
