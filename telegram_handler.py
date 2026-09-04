@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -137,15 +138,17 @@ class TelegramHandler:
                 from telegram import Bot
 
                 self._bot = Bot(token=self.token)
-            import asyncio
+            
             coroutine = self._bot.send_message(chat_id=chat_id, text=message)
+            
             try:
                 loop = asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.run(coroutine)
-            else:
+                # If loop is running, we can't block, so schedule and return success
                 loop.create_task(coroutine)
-                return False
-            return True
-        except Exception:
+                return True  # ✅ FIXED: Return True instead of False
+            except RuntimeError:
+                # No event loop running, create one
+                asyncio.run(coroutine)
+                return True
+        except Exception as e:
             return False
