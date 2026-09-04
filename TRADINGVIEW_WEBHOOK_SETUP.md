@@ -21,7 +21,7 @@ https://your-render-app.com/webhook/tradingview
 
 1. Open a TradingView chart.
 2. Open **Pine Editor**.
-3. Copy the contents of `/home/runner/work/trading-bot/trading-bot/pine_script_template.txt`.
+3. Copy the contents of `pine_script_template.txt` from this repository.
 4. Update `signal_category` and `signal_timeframe` if needed.
 5. Click **Add to chart**.
 
@@ -32,6 +32,7 @@ https://your-render-app.com/webhook/tradingview
 3. Enable **Webhook URL** and paste your Render URL.
 4. Use the script-generated JSON alert message.
 5. If `WEBHOOK_SECRET` is enabled, add `"secret":"<value>"` to the JSON body.
+6. Group 1 categories in the provided template intentionally allow both CALL and PUT alerts from the same RED-high breakout because that matches the repository's current strategy logic. If you want a conventional bearish PUT trigger, customize the `put_breakout` rule before going live.
 
 ## 4. Test the integration
 
@@ -39,14 +40,20 @@ Use the built-in test endpoint:
 
 ```bash
 curl -X POST https://your-render-app.com/api/webhook/test \
-  -H "Content-Type: application/json"
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: <your-secret>"
 ```
 
 Check:
 
 - `GET /health/webhook`
-- `GET /api/webhook/history`
+- `curl -H "X-Webhook-Secret: <your-secret>" https://your-render-app.com/api/webhook/history`
 - Telegram channel delivery
+
+Notes:
+
+- In production, `/api/webhook/test` and `/api/webhook/history` require `WEBHOOK_SECRET`.
+- In non-production environments, those admin endpoints stay closed unless you explicitly set `ENABLE_UNAUTHENTICATED_WEBHOOK_ADMIN=true` for local testing.
 
 ## 5. Troubleshooting
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hmac
 import logging
 import os
+import threading
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -43,6 +45,10 @@ INSTRUMENT_TYPE_BY_CATEGORY = {
 }
 
 
+class WebhookValidationError(ValueError):
+    pass
+
+
 class TradingViewWebhookHandler:
     def __init__(self, telegram_handler, position_manager, data_manager, store=webhook_store) -> None:
         self.telegram_handler = telegram_handler
@@ -50,6 +56,9 @@ class TradingViewWebhookHandler:
         self.data_manager = data_manager
         self.store = store
         self._rate_limit_window = deque()
+        self._rate_limit_lock = threading.Lock()
+        self._request_count = 0
+        self._last_request_at: Optional[str] = None
         self._received_count = 0
         self._duplicate_count = 0
         self._failure_count = 0
@@ -64,62 +73,36 @@ class TradingViewWebhookHandler:
         test_mode: bool = False,
     ) -> dict:
         try:
+            self._request_count += 1
+            self._last_request_at = datetime.now(timezone.utc).isoformat()
             self.validate_webhook_payload(payload, headers=headers, remote_addr=remote_addr)
             signal = self.extract_signal_data(payload)
-            duplicate = self.store.check_duplicate_signal(
-                signal["ticker"],
-                signal["entry_price"],
-                signal["signal_type"],
-                self.store.duplicate_window_seconds,
-            )
-            if duplicate:
-                self._duplicate_count += 1
-                logger.info("Duplicate TradingView webhook ignored for %s %s", signal["ticker"], signal["signal_type"])
-                return {
-                    "success": True,
-                    "duplicate": True,
-                    "signal_id": duplicate["signal_id"],
-                    "message": "duplicate signal ignored",
-                    "status_code": 200,
-                }
-
             option_data = calculate_option_details(
                 signal["current_price"],
                 INSTRUMENT_TYPE_BY_CATEGORY[signal["category"]],
             )
-            telegram_sent = False
-            position_id = None
-
             if not test_mode:
-                position = self.position_manager.add_position(
-                    symbol=signal["symbol"],
-                    side=signal["signal"],
-                    entry_price=signal["entry"],
-                    stop_loss=signal["stop_loss"],
-                    targets=signal["targets"],
+                stored_signal = self.store.store_webhook_signal(
+                    {
+                        **signal,
+                        "ticker": signal["symbol"],
+                        "signal_type": signal["signal"],
+                        "entry_price": signal["entry"],
+                        "current_price": signal["current_price"],
+                        "_created_epoch": time.time(),
+                    }
                 )
-                if position is None:
-                    raise ValueError("position limit reached or position rejected")
-                position_id = position.position_id
-                telegram_sent = self.route_to_telegram(signal, option_data)
+                if stored_signal.get("duplicate"):
+                    self._duplicate_count += 1
+                    logger.info("Duplicate TradingView webhook ignored for %s %s", signal["symbol"], signal["signal"])
+                    return {
+                        "success": True,
+                        "duplicate": True,
+                        "signal_id": stored_signal["signal_id"],
+                        "message": "duplicate signal ignored",
+                        "status_code": 200,
+                    }
 
-            stored_signal = self.store.store_webhook_signal(
-                {
-                    **signal,
-                    "ticker": signal["symbol"],
-                    "signal_type": signal["signal"],
-                    "entry_price": signal["entry"],
-                    "current_price": signal["current_price"],
-                    "position_id": position_id,
-                    "telegram_sent": telegram_sent,
-                    "test_mode": test_mode,
-                    "_created_epoch": time.time(),
-                }
-            )
-            self.data_manager.record_webhook_signal(stored_signal)
-            self._received_count += 1
-            self._last_received_at = datetime.now(timezone.utc).isoformat()
-            self._last_error = None
             logger.info(
                 "TradingView webhook processed ticker=%s signal=%s source=%s test_mode=%s",
                 signal["symbol"],
@@ -127,12 +110,49 @@ class TradingViewWebhookHandler:
                 signal["source"],
                 test_mode,
             )
+            if test_mode:
+                self._received_count += 1
+                self._last_received_at = datetime.now(timezone.utc).isoformat()
+                return {
+                    "success": True,
+                    "duplicate": False,
+                    "telegram_sent": False,
+                    "test_mode": True,
+                    "preview": {
+                        "category": signal["category"],
+                        "signal": signal,
+                        "option_data": option_data,
+                    },
+                    "status_code": 200,
+                }
+
+            position = self.position_manager.add_position(
+                symbol=signal["symbol"],
+                side=signal["signal"],
+                entry_price=signal["entry"],
+                stop_loss=signal["stop_loss"],
+                targets=signal["targets"],
+            )
+            if position is None:
+                stored_signal["fallback_eligible"] = True
+                stored_signal["position_rejected"] = True
+                self.data_manager.record_webhook_signal(stored_signal)
+                raise RuntimeError("position limit reached or position rejected")
+            telegram_sent = self.route_to_telegram(signal, option_data)
+            stored_signal["position_id"] = position.position_id
+            stored_signal["telegram_sent"] = telegram_sent
+            stored_signal["test_mode"] = False
+            stored_signal["fallback_eligible"] = True
+            self.data_manager.record_webhook_signal(stored_signal)
+            self._received_count += 1
+            self._last_received_at = datetime.now(timezone.utc).isoformat()
+            self._last_error = None
             return {
                 "success": True,
                 "duplicate": False,
                 "signal_id": stored_signal["signal_id"],
                 "telegram_sent": telegram_sent,
-                "test_mode": test_mode,
+                "test_mode": False,
                 "status_code": 200,
             }
         except Exception as exc:
@@ -145,9 +165,9 @@ class TradingViewWebhookHandler:
         remote_addr: Optional[str] = None,
     ) -> None:
         if os.getenv("ENABLE_TRADINGVIEW_WEBHOOK", "true").lower() != "true":
-            raise ValueError("TradingView webhook is disabled")
+            raise WebhookValidationError("TradingView webhook is disabled")
         if not isinstance(payload, dict):
-            raise ValueError("Webhook payload must be a JSON object")
+            raise WebhookValidationError("Webhook payload must be a JSON object")
 
         self._enforce_rate_limit()
         self._validate_secret(payload, headers or {})
@@ -171,14 +191,15 @@ class TradingViewWebhookHandler:
         }
         missing = sorted(field for field in required_fields if field not in payload)
         if missing:
-            raise ValueError(f"Missing required webhook fields: {', '.join(missing)}")
+            raise WebhookValidationError(f"Missing required webhook fields: {', '.join(missing)}")
 
         if str(payload["signal_type"]).upper() not in {"CALL", "PUT"}:
-            raise ValueError("signal_type must be CALL or PUT")
+            raise WebhookValidationError("signal_type must be CALL or PUT")
 
         category = CATEGORY_MAP.get(str(payload["category"]).upper())
         if category is None:
-            raise ValueError("Unsupported TradingView category")
+            allowed = ", ".join(sorted(CATEGORY_MAP))
+            raise WebhookValidationError(f"Unsupported TradingView category. Allowed values: {allowed}")
 
         for field in (
             "entry_price",
@@ -190,7 +211,10 @@ class TradingViewWebhookHandler:
             "previous_candle_low",
             "current_price",
         ):
-            float(payload[field])
+            try:
+                float(payload[field])
+            except (TypeError, ValueError) as exc:
+                raise WebhookValidationError(f"{field} must be numeric") from exc
 
     def extract_signal_data(self, payload: dict) -> dict:
         category = CATEGORY_MAP[str(payload["category"]).upper()]
@@ -239,16 +263,19 @@ class TradingViewWebhookHandler:
         self._failure_count += 1
         self._last_error = str(error)
         logger.exception("TradingView webhook processing failed")
+        is_validation_error = isinstance(error, WebhookValidationError)
         return {
             "success": False,
-            "error": str(error),
-            "status_code": 400,
+            "error": error.args[0] if is_validation_error and error.args else "internal webhook processing error",
+            "status_code": 400 if is_validation_error else 500,
         }
 
     def get_health(self) -> dict:
         return {
             "status": "healthy" if self._last_error is None else "degraded",
             "enabled": os.getenv("ENABLE_TRADINGVIEW_WEBHOOK", "true").lower() == "true",
+            "request_count": self._request_count,
+            "last_request_at": self._last_request_at,
             "received_count": self._received_count,
             "duplicate_count": self._duplicate_count,
             "failure_count": self._failure_count,
@@ -258,21 +285,23 @@ class TradingViewWebhookHandler:
         }
 
     def _enforce_rate_limit(self) -> None:
-        now = time.time()
-        while self._rate_limit_window and now - self._rate_limit_window[0] > 60:
-            self._rate_limit_window.popleft()
-        if len(self._rate_limit_window) >= 100:
-            raise ValueError("TradingView webhook rate limit exceeded")
-        self._rate_limit_window.append(now)
+        with self._rate_limit_lock:
+            now = time.time()
+            while self._rate_limit_window and now - self._rate_limit_window[0] > 60:
+                self._rate_limit_window.popleft()
+            if len(self._rate_limit_window) >= 100:
+                raise WebhookValidationError("TradingView webhook rate limit exceeded")
+            self._rate_limit_window.append(now)
 
     @staticmethod
     def _validate_secret(payload: dict, headers: Dict[str, str]) -> None:
         expected_secret = os.getenv("WEBHOOK_SECRET")
         if not expected_secret:
             return
-        provided_secret = payload.get("secret") or headers.get("X-Webhook-Secret")
-        if provided_secret != expected_secret:
-            raise ValueError("Invalid webhook secret")
+        normalized_headers = {str(key).lower(): value for key, value in headers.items()}
+        provided_secret = payload.get("secret") or normalized_headers.get("x-webhook-secret")
+        if not isinstance(provided_secret, str) or not hmac.compare_digest(provided_secret, expected_secret):
+            raise WebhookValidationError("Invalid webhook secret")
 
     @staticmethod
     def _validate_ip_whitelist(remote_addr: Optional[str]) -> None:
@@ -280,7 +309,7 @@ class TradingViewWebhookHandler:
         if not allowed:
             return
         if remote_addr not in {value.strip() for value in allowed.split(",") if value.strip()}:
-            raise ValueError("Webhook IP not allowed")
+            raise WebhookValidationError("Webhook IP not allowed")
 
     @staticmethod
     def _display_timeframe(timeframe: str) -> str:

@@ -17,7 +17,7 @@ class WebhookStore:
         self.duplicate_window_seconds = duplicate_window_seconds
         self.retention_days = retention_days
         self._signals: List[dict] = []
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def store_webhook_signal(self, signal: dict) -> dict:
         with self._lock:
@@ -29,12 +29,13 @@ class WebhookStore:
                 self.duplicate_window_seconds,
             )
             if duplicate:
-                return duplicate
+                return {**duplicate, "duplicate": True}
 
             stored = {
                 **signal,
-                "signal_id": signal.get("signal_id") or f"tv-{int(time.time() * 1000)}",
+                "signal_id": signal.get("signal_id") or f"tv-{time.time_ns()}",
                 "stored_at": signal.get("stored_at") or datetime.now(timezone.utc).isoformat(),
+                "duplicate": False,
             }
             self._signals.append(stored)
             self._signals = self._signals[-max(self.history_limit, 200):]
@@ -52,31 +53,33 @@ class WebhookStore:
         signal_type: str,
         time_window: int = 60,
     ) -> Optional[dict]:
-        now = time.time()
-        entry_value = round(float(entry_price), 2)
-        signal_name = signal_type.upper()
+        with self._lock:
+            now = time.time()
+            entry_value = round(float(entry_price), 2)
+            signal_name = signal_type.upper()
 
-        for signal in reversed(self._signals):
-            if signal.get("ticker") != ticker:
-                continue
-            if round(float(signal.get("entry_price", 0.0)), 2) != entry_value:
-                continue
-            if signal.get("signal_type") != signal_name:
-                continue
-            created_at = signal.get("_created_epoch")
-            if created_at is None:
-                continue
-            if now - float(created_at) <= time_window:
-                return signal
+            for signal in reversed(self._signals):
+                if signal.get("ticker") != ticker:
+                    continue
+                if round(float(signal.get("entry_price", 0.0)), 2) != entry_value:
+                    continue
+                if signal.get("signal_type") != signal_name:
+                    continue
+                created_at = signal.get("_created_epoch")
+                if created_at is None:
+                    continue
+                if now - float(created_at) <= time_window:
+                    return signal
         return None
 
     def cleanup_old_signals(self, days: int = 7) -> None:
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
-        self._signals = [
-            signal
-            for signal in self._signals
-            if self._parse_datetime(signal.get("stored_at")) >= cutoff
-        ]
+        with self._lock:
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+            self._signals = [
+                signal
+                for signal in self._signals
+                if self._parse_datetime(signal.get("stored_at")) >= cutoff
+            ]
 
     @staticmethod
     def _parse_datetime(value: Optional[str]) -> datetime:

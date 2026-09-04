@@ -92,6 +92,10 @@ class TelegramHandler:
             if source == "TRADINGVIEW WEBHOOK"
             else f"{signal_data['entry']}"
         )
+        target_distances = [
+            abs(round(float(target) - float(signal_data["entry"]), 2))
+            for target in targets
+        ]
         stop_loss_label = (
             f"{signal_data['stop_loss']} ({signal_data['reference_color']} LOW)"
             if source == "TRADINGVIEW WEBHOOK" and signal_data["signal"] == "CALL"
@@ -99,6 +103,10 @@ class TelegramHandler:
             if source == "TRADINGVIEW WEBHOOK"
             else f"{signal_data['stop_loss']}"
         )
+        target_labels = [
+            f"{distance:.2f}".rstrip("0").rstrip(".")
+            for distance in target_distances
+        ]
         return (
             f"{icon}\n"
             f"{source_banner}"
@@ -110,9 +118,9 @@ class TelegramHandler:
             f"Premium (LTP): ₹{option_data['call_premium'] if signal_data['signal'] == 'CALL' else option_data['put_premium']}\n\n"
             f"📊 POSITION DETAILS:\n"
             f"Entry: {entry_label}\n"
-            f"Target 1: {targets[0]} ({targets[0] - signal_data['entry']:+.0f} points)\n"
-            f"Target 2: {targets[1]} ({targets[1] - signal_data['entry']:+.0f} points)\n"
-            f"Target 3: {targets[2]} ({targets[2] - signal_data['entry']:+.0f} points)\n"
+            f"Target 1: {targets[0]} ({target_labels[0]} points)\n"
+            f"Target 2: {targets[1]} ({target_labels[1]} points)\n"
+            f"Target 3: {targets[2]} ({target_labels[2]} points)\n"
             f"Stop Loss: {stop_loss_label}\n\n"
             f"⏰ Signal Time (IST): {signal_data.get('signal_time_ist', datetime.now().strftime('%H:%M:%S'))}\n"
             f"🕐 Timeframe: {signal_data.get('timeframe', '')}\n"

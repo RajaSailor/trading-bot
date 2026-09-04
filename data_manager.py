@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -56,7 +57,8 @@ class DataManager:
     def __init__(self, cache_ttl_seconds: int = 8) -> None:
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cache: Dict[Tuple[str, str], dict] = {}
-        self._webhook_cache: Dict[str, dict] = {}
+        self._webhook_cache: Dict[Tuple[str, str], dict] = {}
+        self._webhook_lock = threading.Lock()
         self._tv = None
         self._tv_interval = None
         self._dhan_client = None
@@ -73,13 +75,13 @@ class DataManager:
 
         instrument = self._lookup_instrument(symbol)
         if not instrument or instrument.security_id is None:
-            return self._get_webhook_candle_fallback(symbol, interval)
+            return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
 
         try:
             if self._dhan_client is None:
                 self._dhan_client = self._create_dhan_client()
             if self._dhan_client is None:
-                return self._get_webhook_candle_fallback(symbol, interval)
+                return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
 
             interval_value = int(interval.replace("min", ""))
             response = self._dhan_client.get_intraday_paracande(
@@ -90,12 +92,12 @@ class DataManager:
             )
             candles = self._normalize_dhan_response(response)
             if not candles:
-                return self._get_webhook_candle_fallback(symbol, interval)
+                return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
             self._write_cache(cache_key, candles)
             return candles
         except Exception as exc:
             logger.warning("DhanHQ fetch failed for %s (%s). Checking TradingView webhook fallback.", symbol, exc)
-            return self._get_webhook_candle_fallback(symbol, interval)
+            return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
 
     def fetch_tradingview_candles(self, symbol: str, interval: str, account: Optional[str] = None) -> List[dict]:
         cache_key = (f"tv:{symbol}", interval)
@@ -148,53 +150,100 @@ class DataManager:
         candles = self.fetch_tradingview_candles(symbol, interval, os.getenv("TV_USERNAME", "Sailor_raja12390"))
         if candles:
             return candles
-        return self._get_webhook_candle_fallback(symbol, interval)
+        return self._get_webhook_candle_fallback(symbol, interval, cache_key=(f"tv:{symbol}", interval))
 
     def record_webhook_signal(self, signal: dict) -> None:
         symbol = str(signal.get("ticker") or signal.get("symbol") or "").upper()
         if not symbol:
             return
-        self._webhook_cache[symbol] = {
-            "ts": time.time(),
-            "signal": signal,
-            "interval": str(signal.get("timeframe_code") or signal.get("timeframe") or ""),
-            "candles": [
-                {
-                    "open": float(signal.get("entry_price", signal.get("entry", 0.0))),
-                    "high": float(signal.get("current_price", signal.get("reference_high", 0.0))),
-                    "low": float(signal.get("stop_loss", signal.get("reference_low", 0.0))),
-                    "close": float(signal.get("current_price", signal.get("entry_price", 0.0))),
-                    "timestamp": str(
-                        signal.get("stored_at")
-                        or signal.get("breakout_timestamp")
-                        or datetime.now(timezone.utc).isoformat()
-                    ),
-                }
-            ],
-        }
+        entry_price = float(signal.get("entry_price", signal.get("entry", 0.0)))
+        current_price = float(signal.get("current_price", signal.get("reference_high", entry_price)))
+        stop_loss = float(signal.get("stop_loss", signal.get("reference_low", entry_price)))
+        high = max(entry_price, current_price, stop_loss)
+        low = min(entry_price, current_price, stop_loss)
+        interval = self._normalize_interval_label(str(signal.get("timeframe_code") or signal.get("timeframe") or ""))
+        if not interval:
+            return
+        with self._webhook_lock:
+            self._webhook_cache[(symbol, interval)] = {
+                "ts": time.time(),
+                "signal": signal,
+                "interval": interval,
+                "candles": [
+                    {
+                        "open": entry_price,
+                        "high": high,
+                        "low": low,
+                        "close": current_price,
+                        "timestamp": str(
+                            signal.get("stored_at")
+                            or signal.get("breakout_timestamp")
+                            or datetime.now(timezone.utc).isoformat()
+                        ),
+                    }
+                ],
+            }
 
-    def get_webhook_data_for_symbol(self, symbol: str, max_age_seconds: int = 1800) -> Optional[dict]:
-        entry = self._webhook_cache.get(symbol.upper())
-        if not entry:
-            return None
-        if time.time() - entry["ts"] > max_age_seconds:
-            self._webhook_cache.pop(symbol.upper(), None)
-            return None
-        return entry
+    def get_webhook_data_for_symbol(
+        self,
+        symbol: str,
+        max_age_seconds: int = 1800,
+        interval: Optional[str] = None,
+    ) -> Optional[dict]:
+        normalized_symbol = symbol.upper()
+        normalized_interval = self._normalize_interval_label(interval or "")
+        with self._webhook_lock:
+            candidates = [
+                (key, value)
+                for key, value in self._webhook_cache.items()
+                if key[0] == normalized_symbol and (not normalized_interval or key[1] == normalized_interval)
+            ]
+            if not candidates:
+                return None
+            candidates.sort(key=lambda item: item[1]["ts"], reverse=True)
+            cache_key, entry = candidates[0]
+            if time.time() - entry["ts"] > max_age_seconds:
+                self._webhook_cache.pop(cache_key, None)
+                return None
+            return dict(entry)
 
     def is_tradingview_available(self, symbol: Optional[str] = None) -> bool:
         if symbol:
             return self.get_webhook_data_for_symbol(symbol) is not None
-        return any(self.get_webhook_data_for_symbol(key) is not None for key in list(self._webhook_cache))
+        with self._webhook_lock:
+            keys = list(self._webhook_cache)
+        return any(self.get_webhook_data_for_symbol(symbol_key, interval=interval_key) is not None for symbol_key, interval_key in keys)
 
-    def _get_webhook_candle_fallback(self, symbol: str, interval: str) -> List[dict]:
-        entry = self.get_webhook_data_for_symbol(symbol)
+    def _get_webhook_candle_fallback(
+        self,
+        symbol: str,
+        interval: str,
+        cache_key: Optional[Tuple[str, str]] = None,
+    ) -> List[dict]:
+        entry = self.get_webhook_data_for_symbol(symbol, interval=interval)
         if not entry:
             return []
         logger.info("Using TradingView webhook fallback for %s on %s", symbol, interval)
         candles = entry["candles"]
-        self._write_cache((f"webhook:{symbol}", interval), candles)
+        if cache_key is not None:
+            self._write_cache(cache_key, candles)
         return candles
+
+    @staticmethod
+    def _normalize_interval_label(interval: str) -> str:
+        normalized = str(interval).strip().lower()
+        mapping = {
+            "5-min": "5min",
+            "5-minute breakout": "5min",
+            "5-minute": "5min",
+            "15-min": "15min",
+            "15-minute breakout": "15min",
+            "15-minute": "15min",
+            "30-min": "30min",
+            "30-minute breakout": "30min",
+            "30-minute": "30min",
+        }
+        return mapping.get(normalized, normalized)
 
     def _build_instrument_universe(self) -> Dict[str, List[Instrument]]:
         stock_ids = self._load_nifty_stock_ids()

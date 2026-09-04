@@ -38,9 +38,12 @@ for idx = 1 to lookback_period
 group_two = signal_category == "INTRADAY_5X" or signal_category == "PAY_LATER" or signal_category == "CRYPTO"
 
 call_breakout = not na(ref_red_high) and close > ref_red_high + breakout_buffer
+// Repository Group 1 strategy intentionally emits both CALL and PUT alerts on the same RED-high breakout.
+// That means a single bullish RED-high breakout can create opposite-direction alerts, so customize this line
+// if you prefer a conventional bearish PUT trigger instead of mirroring the repository strategy.
 put_breakout = group_two
      ? (not na(ref_green_low) and close < ref_green_low - breakout_buffer)
-     : (not na(ref_red_high) and close > ref_red_high + breakout_buffer)
+     : (not na(ref_red_high) and high >= ref_red_high + breakout_buffer and close >= ref_red_high)
 
 call_payload = str.format('{{"ticker":"{0}","signal_type":"CALL","entry_price":{1},"stop_loss":{2},"target_1":{3},"target_2":{4},"target_3":{5},"timeframe":"{6}","category":"{7}","reference_candle":"RED","breakout_candle_time":"{8}","previous_candle_high":{9},"previous_candle_low":{10},"current_price":{11}}}',
     syminfo.ticker,
@@ -61,14 +64,17 @@ put_high = group_two ? ref_green_high : ref_red_high
 put_low = group_two ? ref_green_low : ref_red_low
 put_entry = group_two ? ref_green_low : ref_red_high
 put_stop = group_two ? ref_green_high : ref_red_low
+put_target_1 = group_two ? put_entry - 10 : put_entry + 10
+put_target_2 = group_two ? put_entry - 20 : put_entry + 20
+put_target_3 = group_two ? put_entry - 30 : put_entry + 30
 
 put_payload = str.format('{{"ticker":"{0}","signal_type":"PUT","entry_price":{1},"stop_loss":{2},"target_1":{3},"target_2":{4},"target_3":{5},"timeframe":"{6}","category":"{7}","reference_candle":"{8}","breakout_candle_time":"{9}","previous_candle_high":{10},"previous_candle_low":{11},"current_price":{12}}}',
     syminfo.ticker,
     put_entry,
     put_stop,
-    put_entry - 10,
-    put_entry - 20,
-    put_entry - 30,
+    put_target_1,
+    put_target_2,
+    put_target_3,
     signal_timeframe,
     signal_category,
     put_reference,
