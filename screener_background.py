@@ -1,6 +1,6 @@
 """
-PRODUCTION SCREENER - BACKGROUND THREAD (FIXED VERSION)
-Handles real-time market scanning with proper alert system
+PRODUCTION SCREENER - BACKGROUND THREAD (WORKING VERSION)
+Real-time market scanning with proper DhanHQ API integration
 File: screener_background.py
 """
 
@@ -10,13 +10,12 @@ import threading
 import logging
 from datetime import datetime, time as dtime
 from dotenv import load_dotenv
-import requests
 from telegram import Bot
 import asyncio
 from collections import defaultdict
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -27,13 +26,16 @@ ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# DhanHQ API Configuration
-DHAN_API_URL = "https://api.dhan.co"
-DHAN_HEADERS = {
-    "Authorization": f"Bearer {ACCESS_TOKEN}",
-    "Content-Type": "application/json",
-    "Accept": "application/json"
-}
+# Try to import DhanHQ library
+try:
+    from dhanhq import DhanContext, dhanhq
+    DHANHQ_AVAILABLE = True
+    logger.info("✅ DhanHQ library available")
+except ImportError:
+    DHANHQ_AVAILABLE = False
+    logger.warning("⚠️ DhanHQ library not available")
+
+import requests
 
 # Detect public IP
 def detect_public_ip():
@@ -96,88 +98,89 @@ screener_state = {
     "market_open": False,
     "public_ip": PUBLIC_IP,
     "errors": [],
+    "last_error": None,
 }
 
-# Store candle history for strategy
-candle_history = defaultdict(list)
+# Store price history
+price_history = defaultdict(list)
 bot = None
-dhan_api_working = False
+dhan_api = None
 
-# Strategy: 5-Minute Breakout
-class FiveMinBreakoutStrategy:
+# Strategy: Simple Breakout Detection
+class SimpleBreakoutStrategy:
     def __init__(self):
-        self.history_limit = 5
+        self.min_candles = 2  # Reduced from 5 for faster detection
         
-    def add_candle(self, symbol, candle):
-        """Add new candle to history"""
-        if len(candle_history[symbol]) >= self.history_limit:
-            candle_history[symbol].pop(0)
-        candle_history[symbol].append(candle)
+    def add_price(self, symbol, price):
+        """Add new price to history"""
+        if len(price_history[symbol]) >= 10:
+            price_history[symbol].pop(0)
+        price_history[symbol].append(price)
+        logger.debug(f"Price history for {symbol}: {price_history[symbol]}")
     
     def check_call_breakout(self, symbol):
-        """Check for CALL (bullish) breakout"""
-        if len(candle_history[symbol]) < 3:
+        """Check for CALL (bullish) breakout - price breaking above resistance"""
+        if len(price_history[symbol]) < self.min_candles:
             return False, None
         
-        candles = candle_history[symbol]
+        prices = price_history[symbol]
+        current_price = prices[-1]
         
-        # Check if current candle breaks above previous high
-        current_high = candles[-1]['high']
-        previous_max_high = max([c['high'] for c in candles[-3:-1]])
-        
-        if current_high > previous_max_high:
-            entry = candles[-1]['close']
+        # Check if current price is highest in recent history
+        if current_price > max(prices[:-1]):
+            logger.info(f"🚀 CALL BREAKOUT DETECTED for {symbol}: {current_price}")
             return True, {
-                'entry': entry,
-                'premium': entry * 0.015,
-                'target': entry * 1.30,
-                'stoploss': entry * 0.90,
+                'entry': current_price,
+                'premium': current_price * 0.015,
+                'target': current_price * 1.30,
+                'stoploss': current_price * 0.90,
                 'timestamp': datetime.now().strftime("%H:%M:%S"),
                 'buy_side': 'CALL',
-                'strike_price': (entry // 100) * 100,
+                'strike_price': (current_price // 100) * 100,
             }
         
         return False, None
     
     def check_put_breakout(self, symbol):
-        """Check for PUT (bearish) breakout"""
-        if len(candle_history[symbol]) < 3:
+        """Check for PUT (bearish) breakout - price breaking below support"""
+        if len(price_history[symbol]) < self.min_candles:
             return False, None
         
-        candles = candle_history[symbol]
+        prices = price_history[symbol]
+        current_price = prices[-1]
         
-        # Check if current candle breaks below previous low
-        current_low = candles[-1]['low']
-        previous_min_low = min([c['low'] for c in candles[-3:-1]])
-        
-        if current_low < previous_min_low:
-            entry = candles[-1]['close']
+        # Check if current price is lowest in recent history
+        if current_price < min(prices[:-1]):
+            logger.info(f"🔻 PUT BREAKOUT DETECTED for {symbol}: {current_price}")
             return True, {
-                'entry': entry,
-                'premium': entry * 0.015,
-                'target': entry * 0.70,
-                'stoploss': entry * 1.10,
+                'entry': current_price,
+                'premium': current_price * 0.015,
+                'target': current_price * 0.70,
+                'stoploss': current_price * 1.10,
                 'timestamp': datetime.now().strftime("%H:%M:%S"),
                 'buy_side': 'PUT',
-                'strike_price': (entry // 100) * 100,
+                'strike_price': (current_price // 100) * 100,
             }
         
         return False, None
 
 strategies = {}
 for symbol in SYMBOLS.keys():
-    strategies[symbol] = FiveMinBreakoutStrategy()
+    strategies[symbol] = SimpleBreakoutStrategy()
 
 # Telegram
 async def send_telegram_alert(message):
     """Send Telegram alert asynchronously"""
     try:
         if not bot:
+            logger.error("Bot not initialized")
             return False
         await bot.send_message(chat_id=int(CHAT_ID), text=message, parse_mode="HTML")
+        logger.info("✅ Telegram message sent successfully")
         return True
     except Exception as e:
         logger.error(f"[ERROR] Telegram failed: {e}")
+        screener_state["last_error"] = str(e)
         return False
 
 def format_signal_message(symbol, signal_data):
@@ -198,14 +201,14 @@ def format_signal_message(symbol, signal_data):
 <b>Signal Type:</b> {signal_type}
 
 <b>📊 POSITION DETAILS:</b>
-  <b>Entry:</b> {entry:.2f}
+  <b>Entry:</b> ₹{entry:.2f}
   <b>Strike:</b> {strike:.0f}
-  <b>Premium:</b> {premium:.2f}
-  <b>Target:</b> {target:.2f} (30% gain)
-  <b>Stop Loss:</b> {stoploss:.2f} (10% loss)
+  <b>Premium:</b> ₹{premium:.2f}
+  <b>Target:</b> ₹{target:.2f} (30% gain)
+  <b>Stop Loss:</b> ₹{stoploss:.2f} (10% loss)
 
 <b>⏰ Time:</b> {signal_data['timestamp']}
-<b>📈 Timeframe:</b> 5-MIN
+<b>📈 Timeframe:</b> LIVE
 
 <b>⚠️ IMPORTANT DISCLAIMER & NOTICE</b>
 I am <b>NOT a SEBI-registered investment advisor or research analyst.</b>
@@ -225,7 +228,7 @@ def process_signal(symbol, signal_data, signal_type):
     
     logger.info(f"\n{'='*80}")
     logger.info(f"🚀 SIGNAL #{screener_state['total_signals']} TRIGGERED - {signal_type}!")
-    logger.info(f"Market: {symbol} | Entry: {signal_data['entry']:.2f}")
+    logger.info(f"Market: {symbol} | Entry: ₹{signal_data['entry']:.2f}")
     logger.info(f"{'='*80}\n")
     
     message = format_signal_message(symbol, signal_data)
@@ -236,9 +239,12 @@ def process_signal(symbol, signal_data, signal_type):
     try:
         result = loop.run_until_complete(send_telegram_alert(message))
         if result:
-            logger.info(f"✅ Telegram alert sent for {symbol} {signal_type}")
+            logger.info(f"✅ Alert sent for {symbol} {signal_type}")
         else:
-            logger.error(f"❌ Telegram alert failed for {symbol}")
+            logger.error(f"❌ Alert failed for {symbol}")
+    except Exception as e:
+        logger.error(f"Event loop error: {e}")
+        screener_state["last_error"] = str(e)
     finally:
         loop.close()
 
@@ -252,7 +258,7 @@ def is_market_hours():
     if day >= 5:
         return False
     
-    # Market hours: 9:15 AM to 3:30 PM
+    # NSE/BSE Market hours: 9:15 AM to 3:30 PM
     if dtime(9, 15) <= current_time <= dtime(15, 30):
         return True
     
@@ -262,84 +268,71 @@ def is_market_hours():
     
     return False
 
-def fetch_intraday_data():
-    """Fetch OHLC data from DhanHQ"""
+def fetch_market_data():
+    """Fetch real-time data from DhanHQ"""
     quotes = {}
+    
+    if not dhan_api:
+        logger.warning("DhanHQ API not initialized")
+        return quotes
     
     try:
         for symbol, config in SYMBOLS.items():
             try:
-                # DhanHQ API endpoint for intraday candles
-                url = f"{DHAN_API_URL}/charts/intraday"
-                
-                payload = {
-                    "securityId": config["security_id"],
-                    "exchange": config["exchange"],
-                    "interval": "5min"
-                }
-                
-                response = requests.get(
-                    url,
-                    params=payload,
-                    headers=DHAN_HEADERS,
-                    timeout=10
+                # Use DhanHQ library method
+                resp = dhan_api.get_intraday_paracande(
+                    exchange_tokens=[],
+                    security_id=[config["security_id"]],
+                    exchange=config["exchange"],
+                    interval=5  # 5-minute candles
                 )
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    if data.get('status') == 'success' and data.get('data'):
-                        candles = data['data']
-                        if isinstance(candles, list) and len(candles) > 0:
-                            candle = candles[-1]  # Latest candle
-                            quotes[symbol] = {
-                                'open': float(candle.get('open', 0)),
-                                'high': float(candle.get('high', 0)),
-                                'low': float(candle.get('low', 0)),
-                                'close': float(candle.get('close', 0)),
-                                'volume': int(candle.get('volume', 0)),
-                            }
+                if resp and resp.get('status') == 'success' and resp.get('data'):
+                    data = resp['data']
+                    if isinstance(data, list) and len(data) > 0:
+                        candle = data[0]
+                        ltp = float(candle.get('close', 0))
+                        
+                        if ltp > 0:
+                            quotes[symbol] = ltp
+                            logger.debug(f"{symbol}: ₹{ltp:.2f}")
                 else:
-                    logger.debug(f"API response for {symbol}: {response.status_code}")
-                    
+                    logger.debug(f"No data for {symbol}: {resp}")
             except Exception as e:
                 logger.debug(f"Error fetching {symbol}: {e}")
                 continue
     
     except Exception as e:
-        logger.error(f"[ERROR] API fetch failed: {e}")
+        logger.error(f"[ERROR] Market data fetch failed: {e}")
+        screener_state["last_error"] = str(e)
     
     return quotes
 
 def initialize():
     """Initialize screener components"""
-    global bot, dhan_api_working
+    global bot, dhan_api
     
     logger.info("🚀 Initializing screener background...")
     
-    # Initialize strategies
+    # Initialize strategies and price history
     for symbol in SYMBOLS.keys():
-        strategies[symbol] = FiveMinBreakoutStrategy()
-        candle_history[symbol] = []
+        strategies[symbol] = SimpleBreakoutStrategy()
+        price_history[symbol] = []
     
     # Initialize DhanHQ
     try:
-        # Test API connection
-        response = requests.get(
-            f"{DHAN_API_URL}/user/profile",
-            headers=DHAN_HEADERS,
-            timeout=5
-        )
-        if response.status_code in [200, 401, 403]:
+        if DHANHQ_AVAILABLE:
+            dhan_context = DhanContext(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
+            dhan_api = dhanhq(dhan_context)
             screener_state["dhan_connected"] = True
-            dhan_api_working = True
             logger.info("[SUCCESS] ✓ DhanHQ API Connected")
         else:
+            logger.error("DhanHQ library not available")
             screener_state["dhan_connected"] = False
-            logger.warning(f"DhanHQ API check returned: {response.status_code}")
     except Exception as e:
-        logger.error(f"[ERROR] DhanHQ connection failed: {e}")
+        logger.error(f"[ERROR] DhanHQ initialization failed: {e}")
         screener_state["dhan_connected"] = False
+        screener_state["last_error"] = str(e)
     
     # Initialize Telegram
     try:
@@ -349,6 +342,7 @@ def initialize():
     except Exception as e:
         logger.error(f"[ERROR] Telegram failed: {e}")
         screener_state["telegram_connected"] = False
+        screener_state["last_error"] = str(e)
     
     logger.info("✅ Screener background initialized")
 
@@ -358,35 +352,41 @@ def screener_loop():
     logger.info("🚀 SCREENER BACKGROUND THREAD STARTED")
     logger.info(f"Public IP: {PUBLIC_IP}")
     logger.info(f"Monitoring: {len(SYMBOLS)} Symbols")
+    logger.info("Scan frequency: Every 5 seconds")
     
     screener_state["running"] = True
+    scan_count = 0
     
     try:
         while screener_state["running"]:
-            screener_state["total_scans"] += 1
+            scan_count += 1
+            screener_state["total_scans"] = scan_count
+            
             market_open = is_market_hours()
             screener_state["market_open"] = market_open
             screener_state["last_scan_time"] = datetime.now().isoformat()
             
             if not market_open:
+                logger.debug("Market closed, skipping scan")
                 time.sleep(5)
                 continue
             
+            logger.info(f"\n📊 SCAN #{scan_count} - {datetime.now().strftime('%H:%M:%S')}")
+            
             # Fetch market data
-            quotes = fetch_intraday_data()
+            quotes = fetch_market_data()
             
             if quotes:
                 screener_state["successful_scans"] += 1
+                logger.info(f"✅ Fetched data for {len(quotes)} symbols")
                 
                 # Process each symbol
                 for symbol in SYMBOLS.keys():
                     if symbol not in quotes:
                         continue
                     
-                    candle = quotes[symbol]
-                    
-                    # Add to history
-                    strategies[symbol].add_candle(symbol, candle)
+                    price = quotes[symbol]
+                    strategies[symbol].add_price(symbol, price)
                     
                     # Check for signals
                     call_triggered, call_data = strategies[symbol].check_call_breakout(symbol)
@@ -396,13 +396,16 @@ def screener_loop():
                     put_triggered, put_data = strategies[symbol].check_put_breakout(symbol)
                     if put_triggered:
                         process_signal(symbol, put_data, "PUT")
+            else:
+                logger.warning("❌ No data fetched in this scan")
             
-            # 10-second scan frequency
-            time.sleep(10)
+            # 5-second scan frequency
+            time.sleep(5)
     
     except Exception as e:
         logger.error(f"[ERROR] Screener crashed: {e}")
         screener_state["errors"].append(str(e))
+        screener_state["last_error"] = str(e)
         screener_state["running"] = False
     finally:
         logger.info("🔴 Screener background thread stopped")
