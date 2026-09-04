@@ -1,0 +1,91 @@
+//@version=5
+strategy("7-Candle RED Breakout Webhook", overlay=true, initial_capital=100000)
+
+// User inputs
+lookback_period = input.int(7, "Lookback Period", minval=2)
+breakout_buffer = input.float(0.0, "Breakout Buffer", step=0.05)
+signal_category = input.string("INDEX_OPTIONS", "Signal Category", options=["INDEX_OPTIONS", "NIFTY50_STOCK_OPTIONS", "COMMODITY_OPTIONS", "INTRADAY_5X", "PAY_LATER", "CRYPTO"])
+signal_timeframe = input.string("5-MIN", "Webhook Timeframe", options=["5-MIN", "15-MIN", "30-MIN"])
+
+// Find most recent RED and GREEN candles in the lookback window
+is_red(offset) => close[offset] < open[offset]
+is_green(offset) => close[offset] > open[offset]
+
+var float ref_red_high = na
+var float ref_red_low = na
+var int ref_red_offset = na
+var float ref_green_high = na
+var float ref_green_low = na
+var int ref_green_offset = na
+
+ref_red_high := na
+ref_red_low := na
+ref_red_offset := na
+ref_green_high := na
+ref_green_low := na
+ref_green_offset := na
+
+for idx = 1 to lookback_period
+    if na(ref_red_offset) and is_red(idx)
+        ref_red_high := high[idx]
+        ref_red_low := low[idx]
+        ref_red_offset := idx
+    if na(ref_green_offset) and is_green(idx)
+        ref_green_high := high[idx]
+        ref_green_low := low[idx]
+        ref_green_offset := idx
+
+group_two = signal_category == "INTRADAY_5X" or signal_category == "PAY_LATER" or signal_category == "CRYPTO"
+
+call_breakout = not na(ref_red_high) and close > ref_red_high + breakout_buffer
+put_breakout = group_two
+     ? (not na(ref_green_low) and close < ref_green_low - breakout_buffer)
+     : (not na(ref_red_high) and close > ref_red_high + breakout_buffer)
+
+call_payload = str.format('{{"ticker":"{0}","signal_type":"CALL","entry_price":{1},"stop_loss":{2},"target_1":{3},"target_2":{4},"target_3":{5},"timeframe":"{6}","category":"{7}","reference_candle":"RED","breakout_candle_time":"{8}","previous_candle_high":{9},"previous_candle_low":{10},"current_price":{11}}}',
+    syminfo.ticker,
+    ref_red_high,
+    ref_red_low,
+    ref_red_high + 10,
+    ref_red_high + 20,
+    ref_red_high + 30,
+    signal_timeframe,
+    signal_category,
+    str.format("{0,time,HH:mm:ss}", time),
+    ref_red_high,
+    ref_red_low,
+    close)
+
+put_reference = group_two ? "GREEN" : "RED"
+put_high = group_two ? ref_green_high : ref_red_high
+put_low = group_two ? ref_green_low : ref_red_low
+put_entry = group_two ? ref_green_low : ref_red_high
+put_stop = group_two ? ref_green_high : ref_red_low
+
+put_payload = str.format('{{"ticker":"{0}","signal_type":"PUT","entry_price":{1},"stop_loss":{2},"target_1":{3},"target_2":{4},"target_3":{5},"timeframe":"{6}","category":"{7}","reference_candle":"{8}","breakout_candle_time":"{9}","previous_candle_high":{10},"previous_candle_low":{11},"current_price":{12}}}',
+    syminfo.ticker,
+    put_entry,
+    put_stop,
+    put_entry - 10,
+    put_entry - 20,
+    put_entry - 30,
+    signal_timeframe,
+    signal_category,
+    put_reference,
+    str.format("{0,time,HH:mm:ss}", time),
+    put_high,
+    put_low,
+    close)
+
+if call_breakout
+    strategy.entry("CALL", strategy.long)
+    alert(call_payload, alert.freq_once_per_bar_close)
+
+if put_breakout
+    strategy.entry("PUT", strategy.short)
+    alert(put_payload, alert.freq_once_per_bar_close)
+
+plot(ref_red_high, "Red High", color=color.red)
+plot(ref_red_low, "Red Low", color=color.red, style=plot.style_linebr)
+plot(ref_green_high, "Green High", color=color.green)
+plot(ref_green_low, "Green Low", color=color.green, style=plot.style_linebr)
