@@ -203,11 +203,12 @@ def info():
             "channel_id": "-1004321977761",
             "messages": ["Daily 5 AM health check", "Error alerts", "Mobile control commands"]
         },
-        "strategy": "10-MINUTE CANDLE BREAKOUT (RED/GREEN analysis)",
+        "strategy": "5-MINUTE CANDLE BREAKOUT (last 5 candle RED/GREEN analysis + ATM)",
         "markets": ["NSE F&O", "BSE", "MCX", "TradingView Crypto"],
         "capabilities": [
             "Real-time market scanning",
-            "10-minute breakout detection",
+            "5-minute breakout detection",
+            "Last-5 candle comparison details in API/logs",
             "Smart multi-channel routing",
             "CALL/PUT signal generation",
             "Telegram notifications to 6 channels",

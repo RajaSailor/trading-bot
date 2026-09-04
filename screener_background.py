@@ -9,9 +9,11 @@ import os
 import time
 import threading
 import logging
+import html
 from datetime import datetime, time as dtime
 from dotenv import load_dotenv
 from strategy import FiveMinBreakoutStrategy
+from atm_calculator import calculate_atm_strikes
 import pandas as pd
 import requests
 from telegram import Bot
@@ -96,53 +98,57 @@ INDEX_SYMBOLS_SPOT = {
 
 # NIFTY 50 STOCKS (NSE) - ALL 50 STOCKS → Goes to NIFTY50_STOCKS channel
 NIFTY_50_STOCKS = {
-    "RELIANCE": 1333,
-    "TCS": 1374,
-    "INFY": 1274,
-    "HDFC": 1181,
-    "ICICIBANK": 1207,
-    "SBIN": 1424,
-    "MARUTI": 1319,
-    "WIPRO": 1542,
-    "BAJAJFINSV": 1031,
-    "LT": 1310,
-    "AXISBANK": 1044,
-    "HCLTECH": 1181,
-    "SUNPHARMA": 1460,
-    "ITC": 1241,
-    "ONGC": 1363,
-    "ASIANPAINT": 1034,
-    "TECHM": 1489,
-    "BHARTIARTL": 1085,
-    "POWERGRID": 1391,
-    "NTPC": 1357,
-    "COALINDIA": 1233,
-    "BPCL": 1210,
-    "GRASIM": 1247,
-    "ULTRACEMCO": 1435,
-    "BRITANNIA": 1233,
-    "NESTLEIND": 1395,
-    "DRREDDY": 1255,
-    "BAJAJFINSV": 1031,
-    "ADANIENT": 1254,
-    "ADANIPORTS": 1245,
-    "ADANIGREEN": 1242,
-    "ADANIPOWER": 1240,
-    "APOLLOHOSP": 1295,
-    "SHREECEM": 1450,
-    "HINDALCO": 1213,
-    "JSWSTEEL": 1286,
-    "TATASTEEL": 1442,
-    "SAILIND": 1289,
-    "BAJAJ-AUTO": 1021,
-    "HEROMOTOCO": 1213,
-    "EICHERMOT": 1255,
-    "M&M": 1359,
-    "MAHINDRA": 1359,
-    "BOSCHIND": 1241,
-    "MRF": 1366,
-    "MOTHERSON": 1375,
-    "TIINDIA": 1439,
+    "ADANIENT": 25,
+    "ADANIPORTS": 15083,
+    "APOLLOHOSP": 157,
+    "ASIANPAINT": 236,
+    "AXISBANK": 5900,
+    "BAJAJ-AUTO": 16669,
+    "BAJFINANCE": 317,
+    "BAJAJFINSV": 16675,
+    "BEL": 383,
+    "BHARTIARTL": 10604,
+    "BPCL": 526,
+    "BRITANNIA": 547,
+    "CIPLA": 694,
+    "COALINDIA": 20374,
+    "DRREDDY": 881,
+    "EICHERMOT": 910,
+    "GRASIM": 1232,
+    "HCLTECH": 7229,
+    "HDFCBANK": 1333,
+    "HDFCLIFE": 467,
+    "HINDALCO": 1363,
+    "HINDUNILVR": 1394,
+    "ICICIBANK": 4963,
+    "INDIGO": 11195,
+    "INFY": 1594,
+    "ITC": 1660,
+    "JIOFIN": 18143,
+    "JSWSTEEL": 11723,
+    "KOTAKBANK": 1922,
+    "LT": 11483,
+    "M&M": 2031,
+    "MARUTI": 10999,
+    "MAXHEALTH": 22377,
+    "NESTLEIND": 17963,
+    "NTPC": 11630,
+    "ONGC": 2475,
+    "POWERGRID": 14977,
+    "RELIANCE": 2885,
+    "SBILIFE": 21808,
+    "SBIN": 3045,
+    "SHRIRAMFIN": 4306,
+    "SUNPHARMA": 3351,
+    "TCS": 11536,
+    "TECHM": 13538,
+    "TATAMOTORS": 3456,
+    "TATASTEEL": 3499,
+    "TATACONSUM": 3432,
+    "TRENT": 1964,
+    "TITAN": 3506,
+    "ULTRACEMCO": 11532,
+    "WIPRO": 3787,
 }
 
 # COMMODITY F&O (MCX) → Goes to COMMODITY channel
@@ -182,6 +188,7 @@ screener_state = {
     "public_ip": None,
     "errors": [],
     "bot_status": {},  # Track each bot connection
+    "last_signal": None,
 }
 
 strategies = {}
@@ -372,7 +379,7 @@ def fetch_market_data():
                     exchange_tokens=[],
                     security_id=[config["security_id"]],
                     exchange=config["exchange"],
-                    interval=10  # 10-minute candles
+                    interval=5  # 5-minute candles
                 )
                 
                 if resp and resp.get('status') == 'success' and resp.get('data'):
@@ -454,6 +461,7 @@ def format_signal_message(symbol, signal_data, bot_type):
     signal_type = signal_data['buy_side']
     strike_price = signal_data['strike_price']
     option_type = "CE" if signal_type == "CALL" else "PE"
+    safe_symbol = html.escape(symbol)
     
     # Get IST time for alert
     ist_time = get_ist_time()
@@ -467,14 +475,35 @@ def format_signal_message(symbol, signal_data, bot_type):
         "NIFTY50_PAYLATER": "🏦 PAY LATER",
         "CRYPTO": "💰 CRYPTO"
     }
-    
+
+    compared_candles = signal_data.get("compared_candles", [])
+    compared_lines = []
+    for candle in compared_candles:
+        compared_lines.append(
+            f"  #{candle['candle_number']} {candle['color']} "
+            f"O:{candle['open']:.2f} H:{candle['high']:.2f} "
+            f"L:{candle['low']:.2f} C:{candle['close']:.2f}"
+        )
+    compared_text = "\n".join(compared_lines) if compared_lines else "  No candles available"
+    safe_compared_text = html.escape(compared_text)
+
+    pattern_line = signal_data.get(
+        "breakout_reason",
+        f"{signal_type} breakout detected"
+    )
+    safe_pattern_line = html.escape(pattern_line)
+    safe_symbol_type = html.escape(ALL_SYMBOLS[symbol]['type'])
+     
     msg = f"""
 <b>{'🚀 CALL ENTRY' if signal_type == 'CALL' else '📉 PUT ENTRY'}</b>
 
 <b>Channel:</b> {channel_name.get(bot_type, bot_type)}
-<b>Symbol:</b> {symbol} | {ALL_SYMBOLS[symbol]['type']}
+<b>Symbol:</b> {safe_symbol} | {safe_symbol_type}
 <b>Strike Price:</b> {strike_price:.0f} {option_type}
+<b>ATM CE/PE:</b> {signal_data.get('call_strike', strike_price):.0f}CE / {signal_data.get('put_strike', strike_price):.0f}PE
 <b>Premium (LTP):</b> {entry_premium:.2f}
+<b>Premium %:</b> {signal_data.get('premium_percent', 1.5):.2f}%
+<b>Pattern:</b> {safe_pattern_line}
 
 <b>📊 POSITION DETAILS:</b>
   <b>Entry:</b> {entry_premium:.2f}
@@ -482,8 +511,10 @@ def format_signal_message(symbol, signal_data, bot_type):
   <b>Stop Loss:</b> {stoploss_premium:.2f} (10% loss)
 
 <b>⏰ Time (IST):</b> {alert_time}
-<b>🕐 Timeframe:</b> 10-MINUTE BREAKOUT
+<b>🕐 Timeframe:</b> 5-MINUTE BREAKOUT
 <b>📈 Current Price:</b> {entry_premium:.2f}
+<b>🔎 Compared Candles (Last 5):</b>
+{safe_compared_text}
 
 <b>📢 DISCLAIMER</b>
 This is NOT SEBI-registered advice. For educational purposes only.
@@ -508,12 +539,32 @@ def process_signal(symbol, signal_data, signal_type):
         screener_state["put_signals"] += 1
     
     screener_state["total_signals"] += 1
+    ist_time = get_ist_time()
+    screener_state["last_signal"] = {
+        "symbol": symbol,
+        "type": signal_type,
+        "timestamp": ist_time.isoformat(),
+        "atm_strike": signal_data.get("atm_strike", signal_data.get("strike_price")),
+        "breakout_reason": signal_data.get("breakout_reason"),
+        "breakout_candle_number": signal_data.get("breakout_candle_number"),
+        "compared_candles": signal_data.get("compared_candles", []),
+    }
     
     entry_premium = signal_data.get('premium', signal_data['entry'])
-    ist_time = get_ist_time()
     logger.info(f"\n{'='*80}")
     logger.info(f"🚀 SIGNAL #{screener_state['total_signals']} TRIGGERED - {signal_type}!")
     logger.info(f"Time (IST): {ist_time.strftime('%H:%M:%S')} | Market: {symbol} | Channel: {bot_type} | Entry: {entry_premium:.2f}")
+    logger.info(
+        f"ATM {signal_data.get('atm_strike', signal_data.get('strike_price'))} | "
+        f"Breakout Candle #{signal_data.get('breakout_candle_number', 'N/A')} | "
+        f"Reason: {signal_data.get('breakout_reason', 'N/A')}"
+    )
+    for candle in signal_data.get("compared_candles", []):
+        logger.info(
+            f"Compared #{candle['candle_number']} {candle['color']} "
+            f"O:{candle['open']:.2f} H:{candle['high']:.2f} "
+            f"L:{candle['low']:.2f} C:{candle['close']:.2f}"
+        )
     logger.info(f"{'='*80}\n")
     
     # Format message
@@ -599,22 +650,22 @@ def screener_loop():
                             timestamp=current_time
                         )
                         
-                        # Check for CALL breakout (previous RED candle → higher close)
-                        call_triggered, call_data = strategies[symbol].check_call_breakout(symbol)
+                        atm_data = calculate_atm_strikes(symbol, ltp)
+                        if not atm_data:
+                            continue
+
+                        # Check for CALL breakout (break above high of any RED candle in last 5)
+                        call_triggered, call_data = strategies[symbol].check_call_breakout(symbol, ltp=ltp)
                         if call_triggered:
-                            strike = (ltp // 100) * 100
-                            premium = ltp * 0.015
-                            call_data['strike_price'] = strike
-                            call_data['premium'] = premium
+                            if not call_data.get("strike_price"):
+                                call_data["strike_price"] = atm_data["call_strike"]
                             process_signal(symbol, call_data, "CALL")
-                        
-                        # Check for PUT breakout (previous GREEN candle → lower close)
-                        put_triggered, put_data = strategies[symbol].check_put_breakout(symbol)
+                         
+                        # Check for PUT breakout (break below low of any GREEN candle in last 5)
+                        put_triggered, put_data = strategies[symbol].check_put_breakout(symbol, ltp=ltp)
                         if put_triggered:
-                            strike = (ltp // 100) * 100
-                            premium = ltp * 0.015
-                            put_data['strike_price'] = strike
-                            put_data['premium'] = premium
+                            if not put_data.get("strike_price"):
+                                put_data["strike_price"] = atm_data["put_strike"]
                             process_signal(symbol, put_data, "PUT")
             
             # Log every 100 scans
@@ -653,4 +704,3 @@ def stop_screener():
     """Stop screener gracefully"""
     screener_state["running"] = False
     logger.info("🛑 Screener stop signal sent")
-
