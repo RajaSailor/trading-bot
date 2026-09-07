@@ -83,12 +83,12 @@ class DataManager:
             if self._dhan_client is None:
                 return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
 
-            interval_value = int(interval.replace("min", ""))
-            response = self._dhan_client.get_intraday_paracande(
+            # Use quote_data to get live LTP (latest price)
+            # quote_data returns: open, high, low, close, volume, etc.
+            response = self._dhan_client.quote_data(
+                mode="LTP",
                 security_id=[instrument.security_id],
                 exchange=instrument.exchange,
-                exchange_tokens=[],
-                interval=interval_value,
             )
             candles = self._normalize_dhan_response(response)
             if not candles:
