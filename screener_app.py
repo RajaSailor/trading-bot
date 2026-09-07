@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import os
+import threading
+import time
 from datetime import datetime
 
 from flask import Flask, jsonify, request
 
 from main_screener import screener_controller
+from market_calendar import MarketCalendar
 
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
+
+# Market monitor thread
+_market_monitor_thread = None
+_market_monitor_stop = threading.Event()
 
 
 def _authorize_webhook_admin(payload: dict | None = None) -> bool:
@@ -35,11 +44,53 @@ def _sanitize_webhook_response(result: dict) -> tuple[dict, int]:
     return payload, status_code
 
 
+def _start_market_monitor() -> None:
+    """Monitor market hours and auto-start/stop screener"""
+    global _market_monitor_thread
+    
+    def monitor_loop():
+        last_status = None
+        while not _market_monitor_stop.is_set():
+            try:
+                market_status = MarketCalendar.get_market_status()
+                current_status = market_status["is_market_open"]
+                
+                # Market just opened
+                if current_status and last_status != True:
+                    logger.info("🟢 Market opened - Starting screener")
+                    screener_controller.start()
+                    last_status = True
+                
+                # Market just closed
+                elif not current_status and last_status == True:
+                    logger.info("🔴 Market closed - Stopping screener")
+                    screener_controller.stop()
+                    last_status = False
+                
+                # Screener health check
+                if current_status:
+                    status = screener_controller.get_status()
+                    if not status.get("running"):
+                        logger.warning("⚠️ Screener not running during market hours - restarting")
+                        screener_controller.start()
+                
+            except Exception as e:
+                logger.error(f"Market monitor error: {e}")
+            
+            time.sleep(30)  # Check every 30 seconds
+    
+    _market_monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+    _market_monitor_thread.start()
+    logger.info("✅ Market monitor started")
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
+        "market": MarketCalendar.get_market_status(),
+        "screener": screener_controller.get_status(),
     }), 200
 
 
@@ -47,6 +98,7 @@ def health_check():
 def api_status():
     return jsonify({
         "status": screener_controller.get_status(),
+        "market": MarketCalendar.get_market_status(),
         "timestamp": datetime.utcnow().isoformat(),
     }), 200
 
@@ -155,6 +207,12 @@ def api_resume():
     return jsonify({"resumed": screener_controller.resume()}), 200
 
 
+@app.route('/api/market/status', methods=['GET'])
+def api_market_status():
+    """Get detailed market status"""
+    return jsonify(MarketCalendar.get_market_status()), 200
+
+
 @app.route('/api/control/mobile', methods=['POST'])
 def api_mobile_control():
     return jsonify({"message": "Use /api/control/start|stop|pause|resume endpoints"}), 200
@@ -166,4 +224,15 @@ def not_found(_):
 
 
 if __name__ == '__main__':
+    # Start market monitor
+    _start_market_monitor()
+    
+    # If market is currently open, start screener
+    if MarketCalendar.is_market_open():
+        logger.info("🟢 Market is open - Auto-starting screener")
+        screener_controller.start()
+    else:
+        market_status = MarketCalendar.get_market_status()
+        logger.info(f"🔴 Market is closed - Screener on standby\n{market_status}")
+    
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", "5000")))
