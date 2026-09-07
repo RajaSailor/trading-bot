@@ -1,8 +1,9 @@
 """
 Market Calendar - Manages when screener runs based on market hours
-Supports Indian market hours (9:15 AM - 3:39 PM IST)
-Monday-Friday only (weekends closed)
-Includes SEBI holiday calendar for 2026
+Supports multiple market types:
+- NSE Equity: 9:15 AM - 3:40 PM IST (Mon-Fri)
+- MCX Commodities: 9:15 AM - 11:30 PM IST (Mon-Fri)
+- TradingView Crypto: 24/7 (no time restrictions)
 """
 
 import logging
@@ -16,13 +17,21 @@ IST = ZoneInfo("Asia/Kolkata")
 class MarketCalendar:
     """Market trading hours and calendar management"""
     
-    # Market hours in IST
-    MARKET_OPEN = time(9, 15)      # 9:15 AM
-    MARKET_CLOSE = time(15, 39)    # 3:39 PM
+    # NSE Equity Market hours
+    NSE_OPEN = time(9, 15)       # 9:15 AM
+    NSE_CLOSE = time(15, 40)     # 3:40 PM
     
-    # Pre-market and post-market
+    # MCX Commodity Market hours
+    MCX_OPEN = time(9, 15)       # 9:15 AM
+    MCX_CLOSE = time(23, 30)     # 11:30 PM
+    
+    # TradingView Crypto (24/7)
+    CRYPTO_OPEN = time(0, 0)     # 12:00 AM
+    CRYPTO_CLOSE = time(23, 59)  # 11:59 PM
+    
+    # Pre-market and post-market for alerts
     PRE_MARKET_OPEN = time(9, 0)   # 9:00 AM
-    POST_MARKET_CLOSE = time(16, 0) # 4:00 PM (allow alerts till 4 PM)
+    POST_MARKET_CLOSE = time(23, 59) # 11:59 PM
     
     # Weekdays (0=Monday, 6=Sunday)
     TRADING_DAYS = {0, 1, 2, 3, 4}  # Mon-Fri
@@ -56,28 +65,71 @@ class MarketCalendar:
         return check_date in MarketCalendar.SEBI_HOLIDAYS_2026
     
     @staticmethod
-    def is_market_open() -> bool:
-        """Check if market is currently open (9:15 AM - 3:39 PM IST, Mon-Fri, excluding SEBI holidays)"""
+    def is_nse_open() -> bool:
+        """
+        Check if NSE equity market is currently open
+        Hours: 9:15 AM - 3:40 PM IST, Mon-Fri, excluding SEBI holidays
+        """
         now = datetime.now(IST)
         today = now.date()
         
         # Check if SEBI holiday
         if MarketCalendar.is_sebi_holiday(today):
-            logger.debug(f"Market closed: SEBI Holiday ({today})")
+            logger.debug(f"NSE closed: SEBI Holiday ({today})")
             return False
         
         # Check if weekday (Mon-Fri)
         if now.weekday() not in MarketCalendar.TRADING_DAYS:
-            logger.debug(f"Market closed: Weekend ({now.strftime('%A')})")
+            logger.debug(f"NSE closed: Weekend ({now.strftime('%A')})")
             return False
         
-        # Check if within market hours
+        # Check if within NSE market hours
         current_time = now.time()
-        if MarketCalendar.MARKET_OPEN <= current_time <= MarketCalendar.MARKET_CLOSE:
+        if MarketCalendar.NSE_OPEN <= current_time <= MarketCalendar.NSE_CLOSE:
             return True
         
-        logger.debug(f"Market closed: Outside hours (Current: {current_time})")
+        logger.debug(f"NSE closed: Outside hours (Current: {current_time})")
         return False
+    
+    @staticmethod
+    def is_mcx_open() -> bool:
+        """
+        Check if MCX commodity market is currently open
+        Hours: 9:15 AM - 11:30 PM IST, Mon-Fri, excluding SEBI holidays
+        """
+        now = datetime.now(IST)
+        today = now.date()
+        
+        # Check if SEBI holiday
+        if MarketCalendar.is_sebi_holiday(today):
+            logger.debug(f"MCX closed: SEBI Holiday ({today})")
+            return False
+        
+        # Check if weekday (Mon-Fri)
+        if now.weekday() not in MarketCalendar.TRADING_DAYS:
+            logger.debug(f"MCX closed: Weekend ({now.strftime('%A')})")
+            return False
+        
+        # Check if within MCX market hours
+        current_time = now.time()
+        if MarketCalendar.MCX_OPEN <= current_time <= MarketCalendar.MCX_CLOSE:
+            return True
+        
+        logger.debug(f"MCX closed: Outside hours (Current: {current_time})")
+        return False
+    
+    @staticmethod
+    def is_crypto_open() -> bool:
+        """
+        Check if crypto market is available (TradingView - 24/7)
+        No time restrictions, always open
+        """
+        return True
+    
+    @staticmethod
+    def is_market_open() -> bool:
+        """Check if ANY market is open (NSE equity)"""
+        return MarketCalendar.is_nse_open()
     
     @staticmethod
     def is_trading_day(check_date: date = None) -> bool:
@@ -103,7 +155,7 @@ class MarketCalendar:
     
     @staticmethod
     def can_send_alerts() -> bool:
-        """Check if we can send alerts (9 AM - 4 PM IST, Mon-Fri, excluding SEBI holidays)"""
+        """Check if we can send alerts (ANY market open, Mon-Fri, excluding SEBI holidays)"""
         now = datetime.now(IST)
         today = now.date()
         
@@ -115,13 +167,12 @@ class MarketCalendar:
         if now.weekday() not in MarketCalendar.TRADING_DAYS:
             return False
         
-        # Check if within alert window
-        current_time = now.time()
-        return MarketCalendar.PRE_MARKET_OPEN <= current_time <= MarketCalendar.POST_MARKET_CLOSE
+        # Can send alerts anytime if any market is open
+        return True
     
     @staticmethod
     def get_market_status() -> dict:
-        """Get current market status with IST timezone"""
+        """Get current market status for all markets with IST timezone"""
         now = datetime.now(IST)
         today = now.date()
         day_name = now.strftime("%A")
@@ -129,22 +180,41 @@ class MarketCalendar:
         
         is_holiday = MarketCalendar.is_sebi_holiday(today)
         is_trading_day = now.weekday() in MarketCalendar.TRADING_DAYS and not is_holiday
-        is_open = MarketCalendar.is_market_open()
+        is_nse_open = MarketCalendar.is_nse_open()
+        is_mcx_open = MarketCalendar.is_mcx_open()
+        is_crypto_open = MarketCalendar.is_crypto_open()
         can_alert = MarketCalendar.can_send_alerts()
         
         return {
             "timestamp": now.isoformat(),
             "date": today.isoformat(),
             "day": day_name,
-            "current_time_12h": now.strftime("%I:%M:%S %p"),  # 12-hour format (01:26:00 PM)
-            "current_time_24h": current_time,                  # 24-hour format (13:26:00)
+            "current_time_12h": now.strftime("%I:%M:%S %p"),
+            "current_time_24h": current_time,
             "is_trading_day": is_trading_day,
             "is_sebi_holiday": is_holiday,
             "is_weekend": now.weekday() >= 5,
-            "is_market_open": is_open,
+            "markets": {
+                "nse_equity": {
+                    "is_open": is_nse_open,
+                    "open_time": "09:15",
+                    "close_time": "15:40",
+                    "status": "🟢 OPEN" if is_nse_open else "🔴 CLOSED"
+                },
+                "mcx_commodity": {
+                    "is_open": is_mcx_open,
+                    "open_time": "09:15",
+                    "close_time": "23:30",
+                    "status": "🟢 OPEN" if is_mcx_open else "🔴 CLOSED"
+                },
+                "tradingview_crypto": {
+                    "is_open": is_crypto_open,
+                    "open_time": "00:00",
+                    "close_time": "23:59",
+                    "status": "🟢 OPEN 24/7"
+                }
+            },
             "can_send_alerts": can_alert,
-            "market_open_time": MarketCalendar.MARKET_OPEN.isoformat(),
-            "market_close_time": MarketCalendar.MARKET_CLOSE.isoformat(),
             "timezone": "Asia/Kolkata (IST, UTC+5:30)",
         }
     
@@ -156,20 +226,26 @@ class MarketCalendar:
         current_weekday = now.weekday()
         current_time = now.time()
         
-        # If market is open now, return today's close
-        if MarketCalendar.is_market_open():
-            return f"Today at {MarketCalendar.MARKET_CLOSE.strftime('%H:%M IST')} ({current_date})"
+        # If NSE market is open now, return today's close
+        if MarketCalendar.is_nse_open():
+            return f"Today at {MarketCalendar.NSE_CLOSE.strftime('%H:%M IST')} ({current_date})"
         
-        # Find next trading day
-        days_ahead = 1
-        while days_ahead <= 365:
-            check_date = current_date + __import__('datetime').timedelta(days=days_ahead)
-            if MarketCalendar.is_trading_day(check_date):
-                if days_ahead == 1:
-                    return f"Tomorrow at {MarketCalendar.MARKET_OPEN.strftime('%H:%M IST')} ({check_date})"
-                else:
-                    return f"In {days_ahead} days at {MarketCalendar.MARKET_OPEN.strftime('%H:%M IST')} ({check_date})"
-            days_ahead += 1
+        # If MCX is open, return MCX close
+        if MarketCalendar.is_mcx_open():
+            return f"Today at {MarketCalendar.MCX_CLOSE.strftime('%H:%M IST')} ({current_date})"
+        
+        # If crypto is open (always), return next MCX open
+        if MarketCalendar.is_crypto_open():
+            # Find next trading day
+            days_ahead = 1
+            while days_ahead <= 365:
+                check_date = current_date + __import__('datetime').timedelta(days=days_ahead)
+                if MarketCalendar.is_trading_day(check_date):
+                    if days_ahead == 1:
+                        return f"Tomorrow at {MarketCalendar.MCX_OPEN.strftime('%H:%M IST')} ({check_date})"
+                    else:
+                        return f"In {days_ahead} days at {MarketCalendar.MCX_OPEN.strftime('%H:%M IST')} ({check_date})"
+                days_ahead += 1
         
         return "Next trading day (TBD)"
     
@@ -181,7 +257,7 @@ class MarketCalendar:
         
         return {
             "total_remaining": len(remaining),
-            "holidays": [h.isoformat() for h in remaining[:10]],  # Next 10
+            "holidays": [h.isoformat() for h in remaining[:10]],
         }
 
 
@@ -192,19 +268,21 @@ if __name__ == "__main__":
     print("="*80)
     
     status = MarketCalendar.get_market_status()
-    for key, value in status.items():
-        print(f"{key:.<40} {value}")
+    print(f"Date: {status['date']} ({status['day']})")
+    print(f"Current Time (12h): {status['current_time_12h']}")
+    print(f"Current Time (24h): {status['current_time_24h']}")
+    print(f"Is Trading Day: {status['is_trading_day']}")
+    print(f"Is SEBI Holiday: {status['is_sebi_holiday']}")
+    print(f"Is Weekend: {status['is_weekend']}")
     
-    print("\nMarket Status Summary:")
-    print(f"  Date: {status['date']} ({status['day']})")
-    print(f"  Current Time (12h): {status['current_time_12h']}")
-    print(f"  Current Time (24h): {status['current_time_24h']}")
-    print(f"  Is Trading Day: {status['is_trading_day']}")
-    print(f"  Is SEBI Holiday: {status['is_sebi_holiday']}")
-    print(f"  Is Weekend: {status['is_weekend']}")
-    print(f"  Is Market Open: {status['is_market_open']}")
-    print(f"  Can Send Alerts: {status['can_send_alerts']}")
-    print(f"  Next Market Opens: {MarketCalendar.get_next_market_open()}")
+    print("\n📊 MARKET STATUS:")
+    for market, details in status['markets'].items():
+        print(f"  {market}:")
+        print(f"    Status: {details['status']}")
+        print(f"    Hours: {details['open_time']} - {details['close_time']}")
+    
+    print(f"\n✅ Can Send Alerts: {status['can_send_alerts']}")
+    print(f"Next Market Opens: {MarketCalendar.get_next_market_open()}")
     
     print("\nRemaining SEBI Holidays (2026):")
     holidays = MarketCalendar.get_holidays_remaining()
