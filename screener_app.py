@@ -55,34 +55,75 @@ def _sanitize_webhook_response(result: dict) -> tuple[dict, int]:
 
 
 def _start_market_monitor() -> None:
-    """Monitor market hours and auto-start/stop screener"""
+    """
+    Monitor market hours and auto-start/stop screener
+    
+    Monitoring logic:
+    - CRYPTO (TradingView): Always running 24/7
+    - COMMODITY (MCX): 9:15 AM - 11:30 PM IST (Mon-Fri)
+    - EQUITY (NSE): 9:15 AM - 3:40 PM IST (Mon-Fri)
+    """
     global _market_monitor_thread
     
     def monitor_loop():
-        last_status = None
+        crypto_running = False
+        commodity_running = False
+        equity_running = False
+        
         while not _market_monitor_stop.is_set():
             try:
                 market_status = MarketCalendar.get_market_status()
-                current_status = market_status["is_market_open"]
                 
-                # Market just opened
-                if current_status and last_status != True:
-                    logger.info("🟢 Market opened - Starting screener")
+                # Check individual market status
+                nse_open = market_status["markets"]["nse_equity"]["is_open"]
+                mcx_open = market_status["markets"]["mcx_commodity"]["is_open"]
+                crypto_open = market_status["markets"]["tradingview_crypto"]["is_open"]
+                
+                # CRYPTO: Always running (24/7)
+                if crypto_open and not crypto_running:
+                    logger.info("🟢 CRYPTO market available (24/7) - Starting crypto screener")
                     screener_controller.start()
-                    last_status = True
+                    crypto_running = True
                 
-                # Market just closed
-                elif not current_status and last_status == True:
-                    logger.info("🔴 Market closed - Stopping screener")
-                    screener_controller.stop()
-                    last_status = False
-                
-                # Screener health check
-                if current_status:
-                    status = screener_controller.get_status()
-                    if not status.get("running"):
-                        logger.warning("⚠️ Screener not running during market hours - restarting")
+                # COMMODITY: MCX hours (9:15 - 23:30)
+                if mcx_open and not commodity_running:
+                    logger.info("🟢 COMMODITY market opened (MCX 9:15-23:30) - Monitoring gold/silver/crude")
+                    if not crypto_running:
                         screener_controller.start()
+                    commodity_running = True
+                
+                elif not mcx_open and commodity_running:
+                    logger.info("🔴 COMMODITY market closed (MCX closed)")
+                    commodity_running = False
+                    # Only stop if equity also not running
+                    if not equity_running and not crypto_running:
+                        screener_controller.stop()
+                
+                # EQUITY: NSE hours (9:15 - 15:40)
+                if nse_open and not equity_running:
+                    logger.info("🟢 EQUITY market opened (NSE 9:15-15:40) - Starting NIFTY/BANKNIFTY screener")
+                    if not crypto_running and not commodity_running:
+                        screener_controller.start()
+                    equity_running = True
+                
+                elif not nse_open and equity_running:
+                    logger.info("🔴 EQUITY market closed (NSE closed)")
+                    equity_running = False
+                    # Only stop if commodities also not running
+                    if not commodity_running and not crypto_running:
+                        screener_controller.stop()
+                
+                # Screener health check - keep running if ANY market is open
+                status = screener_controller.get_status()
+                should_run = crypto_running or commodity_running or equity_running
+                
+                if should_run and not status.get("running"):
+                    logger.warning("⚠️ Screener not running but market(s) are open - restarting")
+                    screener_controller.start()
+                
+                elif not should_run and status.get("running"):
+                    logger.info("ℹ️ All markets closed - stopping screener")
+                    screener_controller.stop()
                 
             except Exception as e:
                 logger.error(f"Market monitor error: {e}")
@@ -91,7 +132,7 @@ def _start_market_monitor() -> None:
     
     _market_monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
     _market_monitor_thread.start()
-    logger.info("✅ Market monitor started")
+    logger.info("✅ Market monitor started (CRYPTO 24/7, COMMODITY 9:15-23:30, EQUITY 9:15-15:40)")
 
 
 @app.route('/health', methods=['GET'])
@@ -219,7 +260,7 @@ def api_resume():
 
 @app.route('/api/market/status', methods=['GET'])
 def api_market_status():
-    """Get detailed market status"""
+    """Get detailed market status for all markets"""
     return jsonify(MarketCalendar.get_market_status()), 200
 
 
@@ -235,22 +276,33 @@ def not_found(_):
 
 if __name__ == '__main__':
     logger.info("="*80)
-    logger.info("🚀 TRADING BOT SCREENER APP STARTING")
+    logger.info("🚀 TRADING BOT SCREENER APP STARTING (CRYPTO 24/7, COMMODITY 9:15-23:30, EQUITY 9:15-15:40)")
     logger.info("="*80)
     
-    # Start market monitor
+    # Start market monitor (handles all 3 market types)
     _start_market_monitor()
     
-    # If market is currently open, start screener
-    if MarketCalendar.is_market_open():
-        logger.info("🟢 Market is open - Auto-starting screener")
+    # Get market status
+    market_status = MarketCalendar.get_market_status()
+    markets = market_status["markets"]
+    
+    # Log market status
+    logger.info("\n📊 CURRENT MARKET STATUS:")
+    logger.info(f"  Date: {market_status['date']} ({market_status['day']})")
+    logger.info(f"  Time: {market_status['current_time_12h']}")
+    logger.info(f"\n  🔹 NSE EQUITY: {markets['nse_equity']['status']}")
+    logger.info(f"  🔹 MCX COMMODITY: {markets['mcx_commodity']['status']}")
+    logger.info(f"  🔹 TRADINGVIEW CRYPTO: {markets['tradingview_crypto']['status']}")
+    
+    # Start screener if ANY market is open
+    if markets['nse_equity']['is_open'] or markets['mcx_commodity']['is_open'] or markets['tradingview_crypto']['is_open']:
+        logger.info("\n🟢 Market(s) are OPEN - Auto-starting screener")
         screener_controller.start()
     else:
-        market_status = MarketCalendar.get_market_status()
-        logger.info(f"🔴 Market is closed - Screener on standby\n{market_status}")
+        logger.info("\n🔴 All markets are CLOSED - Screener on standby")
     
     logger.info("="*80)
     logger.info("✅ APP INITIALIZATION COMPLETE - Flask server starting...")
-    logger.info("="*80)
+    logger.info("="*80 + "\n")
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", "5000")))
