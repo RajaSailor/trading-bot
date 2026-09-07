@@ -22,9 +22,9 @@ class Instrument:
     Fields:
     - symbol: Trading symbol (e.g., "NIFTY", "GOLD", "RELIANCE")
     - security_id: Dhan security ID for this instrument
-    - exchange: Exchange code (NSE_FNO, NSE_EQ, MCX_FUT, BSE_FNO, etc.)
-    - exchange_segment: Full exchange segment for API (e.g., "NSE_FNO", "MCX")
-    - instrument_type: Type for historical data API (NSE_EQ, NSE_FNO, MCX_FUT, BSE_FNO)
+    - exchange: Exchange code (NSE_FNO, NSE_EQ, MCX, BSE_FNO, etc.)
+    - exchange_segment: Full exchange segment for API (NSE_FNO, NSE_EQ, MCX, BSE_FNO, etc.)
+    - instrument_type: Type for API calls - "EQUITY", "FUT", "OPT" (NOT exchange codes!)
     - category: Internal category for grouping (index_options, commodity_options, etc.)
     - data_source: Where to fetch from (dhan_primary, tradingview_primary)
     - tradingview_symbol: Symbol on TradingView (if applicable)
@@ -33,7 +33,7 @@ class Instrument:
     security_id: Optional[int]
     exchange: str
     exchange_segment: str
-    instrument_type: str
+    instrument_type: str  # ✅ CRITICAL: "EQUITY", "FUT", "OPT" only!
     category: str
     data_source: str
     tradingview_symbol: Optional[str] = None
@@ -87,8 +87,10 @@ class DataManager:
         Fetch intraday candles from DhanHQ using correct API method.
         Uses intraday_minute_data (historical endpoint) for same-day candles.
         
-        DhanHQ API: GET /v2/historical/intraday-minute-data
+        DhanHQ API: GET /v2/charts/intraday
         Required params: security_id, exchange_segment, instrument_type, from_date, to_date, interval
+        
+        CRITICAL: instrument_type must be "EQUITY", "FUT", or "OPT" - NOT exchange codes!
         """
         cache_key = (f"dhan:{symbol}", interval)
         cached = self._read_cache(cache_key)
@@ -113,9 +115,9 @@ class DataManager:
             # Get today's date for intraday fetching
             today = datetime.now().strftime("%Y-%m-%d")
             
-            # ✅ CORRECT DhanHQ v2 API call with ALL required parameters
-            # API: GET /v2/historical/intraday-minute-data
-            # Required: security_id, exchange_segment, instrument_type, from_date, to_date, interval
+            # ✅ CORRECT DhanHQ v2 API call with CORRECT instrument_type values
+            # API: GET /v2/charts/intraday
+            # CRITICAL: instrument_type must be "EQUITY", "FUT", or "OPT"
             logger.debug(
                 f"Fetching DhanHQ candles: symbol={symbol}, sec_id={instrument.security_id}, "
                 f"exchange_seg={instrument.exchange_segment}, instrument_type={instrument.instrument_type}, "
@@ -123,9 +125,9 @@ class DataManager:
             )
             
             response = self._dhan_client.intraday_minute_data(
-                security_id=instrument.security_id,
-                exchange_segment=instrument.exchange_segment,  # NSE_FNO, NSE_EQ, MCX_FUT, BSE_FNO
-                instrument_type=instrument.instrument_type,     # ✅ CRITICAL: Must match exchange_segment
+                security_id=str(instrument.security_id),  # Must be string
+                exchange_segment=instrument.exchange_segment,  # NSE_FNO, NSE_EQ, MCX, BSE_FNO
+                instrument_type=instrument.instrument_type,     # ✅ "EQUITY", "FUT", or "OPT" ONLY!
                 from_date=today,
                 to_date=today,
                 interval=interval_value,  # 1, 5, 15, 25, 60
@@ -163,9 +165,10 @@ class DataManager:
                 return None
 
             # ✅ CORRECT DhanHQ v2 API for live OHLC
-            response = self._dhan_client.marketfeed_ohlc(
+            response = self._dhan_client.get_quote_data(
+                mode="OHLC",
+                security_id=[str(instrument.security_id)],
                 exchange_segment=instrument.exchange_segment,
-                security_id=[instrument.security_id],
             )
             
             if response and isinstance(response, dict) and "data" in response:
@@ -207,9 +210,10 @@ class DataManager:
                 return None
 
             # ✅ CORRECT DhanHQ v2 API for live LTP
-            response = self._dhan_client.marketfeed_ltp(
+            response = self._dhan_client.get_quote_data(
+                mode="LTP",
+                security_id=[str(instrument.security_id)],
                 exchange_segment=instrument.exchange_segment,
-                security_id=[instrument.security_id],
             )
             
             if response and isinstance(response, dict) and "data" in response:
@@ -380,9 +384,9 @@ class DataManager:
                 Instrument(
                     symbol=symbol,
                     security_id=stock_ids.get(symbol),
-                    exchange="NSE",
-                    exchange_segment="NSE",  # ✅ For equity stocks
-                    instrument_type="NSE_EQ",  # ✅ Stock type
+                    exchange="NSE_EQ",
+                    exchange_segment="NSE_EQ",
+                    instrument_type="EQUITY",  # ✅ CRITICAL: "EQUITY" not "NSE_EQ"
                     category=category,
                     data_source=source,
                 )
@@ -395,8 +399,8 @@ class DataManager:
                     symbol="NIFTY",
                     security_id=13,
                     exchange="NSE_FNO",
-                    exchange_segment="NSE_FNO",  # ✅ F&O segment
-                    instrument_type="NSE_FNO",   # ✅ F&O type
+                    exchange_segment="NSE_FNO",
+                    instrument_type="FUT",  # ✅ CRITICAL: "FUT" not "NSE_FNO"
                     category="index_options",
                     data_source="dhan_primary",
                 ),
@@ -405,7 +409,7 @@ class DataManager:
                     security_id=25,
                     exchange="NSE_FNO",
                     exchange_segment="NSE_FNO",
-                    instrument_type="NSE_FNO",
+                    instrument_type="OPT",  # ✅ CRITICAL: "OPT" not "NSE_FNO"
                     category="index_options",
                     data_source="dhan_primary",
                 ),
@@ -413,8 +417,8 @@ class DataManager:
                     symbol="SENSEX",
                     security_id=1,
                     exchange="BSE_FNO",
-                    exchange_segment="BSE_FNO",  # ✅ BSE F&O
-                    instrument_type="BSE_FNO",   # ✅ BSE F&O type
+                    exchange_segment="BSE_FNO",
+                    instrument_type="OPT",  # ✅ CRITICAL: "OPT" not "BSE_FNO"
                     category="index_options",
                     data_source="dhan_primary",
                 ),
@@ -427,8 +431,8 @@ class DataManager:
                     symbol="GOLD",
                     security_id=565901,
                     exchange="MCX",
-                    exchange_segment="MCX",      # ✅ MCX segment
-                    instrument_type="MCX_FUT",   # ✅ MCX Futures type
+                    exchange_segment="MCX",
+                    instrument_type="FUT",  # ✅ CRITICAL: "FUT" not "MCX_FUT"
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
@@ -437,7 +441,7 @@ class DataManager:
                     security_id=565902,
                     exchange="MCX",
                     exchange_segment="MCX",
-                    instrument_type="MCX_FUT",
+                    instrument_type="FUT",
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
@@ -446,7 +450,7 @@ class DataManager:
                     security_id=565899,
                     exchange="MCX",
                     exchange_segment="MCX",
-                    instrument_type="MCX_FUT",
+                    instrument_type="FUT",
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
@@ -455,7 +459,7 @@ class DataManager:
                     security_id=565900,
                     exchange="MCX",
                     exchange_segment="MCX",
-                    instrument_type="MCX_FUT",
+                    instrument_type="FUT",
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
