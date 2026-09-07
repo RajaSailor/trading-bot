@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +22,9 @@ class Instrument:
     Fields:
     - symbol: Trading symbol (e.g., "NIFTY", "GOLD", "RELIANCE")
     - security_id: Dhan security ID for this instrument
-    - exchange: Exchange code (NSE_FNO, NSE_EQ, MCX, BSE_FNO, etc.)
-    - exchange_segment: Full exchange segment for API (NSE_FNO, NSE_EQ, MCX, BSE_FNO, etc.)
-    - instrument_type: Type for API calls - "EQUITY", "FUT", "OPT" (NOT exchange codes!)
+    - exchange: Exchange code (NSE_FNO, NSE_EQ, MCX_COMM, BSE_FNO, etc.)
+    - exchange_segment: Full exchange segment for API (NSE_FNO, NSE_EQ, MCX_COMM, BSE_FNO, etc.)
+    - instrument_type: Type for API - "EQUITY", "FUTIDX", "FUTCOM", "OPTSTK", etc.
     - category: Internal category for grouping (index_options, commodity_options, etc.)
     - data_source: Where to fetch from (dhan_primary, tradingview_primary)
     - tradingview_symbol: Symbol on TradingView (if applicable)
@@ -33,7 +33,7 @@ class Instrument:
     security_id: Optional[int]
     exchange: str
     exchange_segment: str
-    instrument_type: str  # ✅ CRITICAL: "EQUITY", "FUT", "OPT" only!
+    instrument_type: str
     category: str
     data_source: str
     tradingview_symbol: Optional[str] = None
@@ -84,13 +84,11 @@ class DataManager:
 
     def fetch_dhanhq_candles(self, symbol: str, interval: str) -> List[dict]:
         """
-        Fetch intraday candles from DhanHQ using correct API method.
-        Uses intraday_minute_data (historical endpoint) for same-day candles.
+        Fetch intraday candles from DhanHQ using REST API directly.
+        Uses POST /v2/charts/historical endpoint with correct parameters.
         
-        DhanHQ API: GET /v2/charts/intraday
-        Required params: security_id, exchange_segment, instrument_type, from_date, to_date, interval
-        
-        CRITICAL: instrument_type must be "EQUITY", "FUT", or "OPT" - NOT exchange codes!
+        DhanHQ API: POST /v2/charts/historical
+        Required params: securityId, exchangeSegment, instrument, fromDate, toDate, expiryCode, oi
         """
         cache_key = (f"dhan:{symbol}", interval)
         cached = self._read_cache(cache_key)
@@ -103,132 +101,139 @@ class DataManager:
             return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
 
         try:
-            if self._dhan_client is None:
-                self._dhan_client = self._create_dhan_client()
-            if self._dhan_client is None:
-                logger.warning(f"DhanHQ client not initialized, using fallback for {symbol}")
-                return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
-
             # Convert interval string (e.g., "5min") to numeric value
             interval_value = int(interval.replace("min", ""))
             
-            # Get today's date for intraday fetching
+            # Get today's date for historical data fetching
             today = datetime.now().strftime("%Y-%m-%d")
             
-            # ✅ CORRECT DhanHQ v2 API call with CORRECT instrument_type values
-            # API: GET /v2/charts/intraday
-            # CRITICAL: instrument_type must be "EQUITY", "FUT", or "OPT"
+            # ✅ DIRECT REST API CALL using correct endpoint and parameters
             logger.debug(
                 f"Fetching DhanHQ candles: symbol={symbol}, sec_id={instrument.security_id}, "
-                f"exchange_seg={instrument.exchange_segment}, instrument_type={instrument.instrument_type}, "
+                f"exchange_segment={instrument.exchange_segment}, instrument={instrument.instrument_type}, "
                 f"interval={interval_value}min"
             )
             
-            response = self._dhan_client.intraday_minute_data(
-                security_id=str(instrument.security_id),  # Must be string
-                exchange_segment=instrument.exchange_segment,  # NSE_FNO, NSE_EQ, MCX, BSE_FNO
-                instrument_type=instrument.instrument_type,     # ✅ "EQUITY", "FUT", or "OPT" ONLY!
+            # Make direct REST API call to DhanHQ
+            candles = self._fetch_dhan_historical_data(
+                security_id=str(instrument.security_id),
+                exchange_segment=instrument.exchange_segment,
+                instrument=instrument.instrument_type,
                 from_date=today,
                 to_date=today,
-                interval=interval_value,  # 1, 5, 15, 25, 60
+                expiry_code=-1 if instrument.exchange_segment == "MCX_COMM" else None,
             )
             
-            candles = self._normalize_dhan_response(response)
             if not candles:
-                logger.debug(f"No candles returned from DhanHQ for {symbol}, interval={interval_value}")
+                logger.debug(f"No candles returned from DhanHQ for {symbol}")
                 return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
             
             self._write_cache(cache_key, candles)
-            logger.info(f"✅ DhanHQ fetch successful for {symbol}: {len(candles)} candles ({interval_value}min)")
+            logger.info(f"✅ DhanHQ fetch successful for {symbol}: {len(candles)} candles")
             return candles
             
         except Exception as exc:
             logger.warning(f"DhanHQ fetch failed for {symbol} ({exc}). Checking TradingView webhook fallback.")
             return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
 
-    def fetch_dhanhq_ohlc(self, symbol: str) -> Optional[dict]:
+    def _fetch_dhan_historical_data(
+        self,
+        security_id: str,
+        exchange_segment: str,
+        instrument: str,
+        from_date: str,
+        to_date: str,
+        expiry_code: Optional[int] = None,
+    ) -> List[dict]:
         """
-        Fetch live OHLC snapshot from DhanHQ.
-        Uses marketfeed_ohlc for real-time data.
+        Make REST API call to DhanHQ /v2/charts/historical endpoint
         
-        DhanHQ API: POST /v2/marketfeed/ohlc
-        Returns: open, high, low, close, LTP, timestamp
+        Args:
+            security_id: DhanHQ security ID (e.g., "565901" for GOLD)
+            exchange_segment: NSE_EQ, NSE_FNO, MCX_COMM, BSE_EQ, BSE_FNO, IDX_I
+            instrument: INDEX, EQUITY, FUTIDX, FUTCOM, OPTSTK, OPTIDX, etc.
+            from_date: Start date (YYYY-MM-DD)
+            to_date: End date (YYYY-MM-DD)
+            expiry_code: Expiry code for derivatives (-1 for current month)
+            
+        Returns:
+            List of OHLCV candles
         """
-        instrument = self._lookup_instrument(symbol)
-        if not instrument or instrument.security_id is None:
-            return None
-
         try:
-            if self._dhan_client is None:
-                self._dhan_client = self._create_dhan_client()
-            if self._dhan_client is None:
-                return None
-
-            # ✅ CORRECT DhanHQ v2 API for live OHLC
-            response = self._dhan_client.get_quote_data(
-                mode="OHLC",
-                security_id=[str(instrument.security_id)],
-                exchange_segment=instrument.exchange_segment,
-            )
+            access_token = os.getenv("ACCESS_TOKEN")
+            if not access_token:
+                logger.error("❌ ACCESS_TOKEN not found in environment")
+                return []
             
-            if response and isinstance(response, dict) and "data" in response:
-                data = response["data"]
-                if isinstance(data, list) and len(data) > 0:
-                    ohlc = {
-                        "open": float(data[0].get("open", 0)),
-                        "high": float(data[0].get("high", 0)),
-                        "low": float(data[0].get("low", 0)),
-                        "close": float(data[0].get("close", 0)),
-                        "ltp": float(data[0].get("ltp", data[0].get("close", 0))),
-                        "timestamp": str(data[0].get("timestamp", datetime.utcnow().isoformat())),
-                    }
-                    logger.debug(f"✅ DhanHQ OHLC for {symbol}: {ohlc['close']}")
-                    return ohlc
+            # Prepare request payload
+            payload = {
+                "securityId": security_id,
+                "exchangeSegment": exchange_segment,
+                "instrument": instrument,
+                "fromDate": from_date,
+                "toDate": to_date,
+                "oi": False,
+            }
             
-            return None
+            # Add expiry code if provided (for derivatives)
+            if expiry_code is not None:
+                payload["expiryCode"] = expiry_code
             
-        except Exception as exc:
-            logger.debug(f"DhanHQ OHLC fetch failed for {symbol}: {exc}")
-            return None
-
-    def fetch_dhanhq_ltp(self, symbol: str) -> Optional[float]:
-        """
-        Fetch live LTP (Last Traded Price) from DhanHQ.
-        Uses marketfeed_ltp for real-time price only.
+            # Make API request
+            url = "https://api.dhan.co/v2/charts/historical"
+            headers = {
+                "access-token": access_token,
+                "Content-Type": "application/json",
+            }
+            
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            
+            # Check response status
+            if response.status_code != 200:
+                logger.error(f"❌ DhanHQ API error ({response.status_code}): {response.text}")
+                return []
+            
+            # Parse response
+            data = response.json()
+            
+            if not data or "open" not in data or "close" not in data:
+                logger.warning(f"⚠️ No valid candle data in DhanHQ response")
+                return []
+            
+            # Convert API response to candle format
+            candles = []
+            opens = data.get("open", [])
+            highs = data.get("high", [])
+            lows = data.get("low", [])
+            closes = data.get("close", [])
+            volumes = data.get("volume", [])
+            timestamps = data.get("timestamp", [])
+            
+            for i in range(len(opens)):
+                candle = {
+                    "open": float(opens[i]) if i < len(opens) else 0,
+                    "high": float(highs[i]) if i < len(highs) else 0,
+                    "low": float(lows[i]) if i < len(lows) else 0,
+                    "close": float(closes[i]) if i < len(closes) else 0,
+                    "volume": float(volumes[i]) if i < len(volumes) else 0,
+                    "timestamp": timestamps[i] if i < len(timestamps) else 0,
+                }
+                
+                # Validate OHLC logic
+                if (candle["high"] >= candle["low"] >= 0 and 
+                    candle["high"] >= candle["open"] >= candle["low"] >= 0 and
+                    candle["high"] >= candle["close"] >= candle["low"] >= 0):
+                    candles.append(candle)
+            
+            logger.info(f"✅ Fetched {len(candles)} candles from DhanHQ")
+            return candles
         
-        DhanHQ API: POST /v2/marketfeed/ltp
-        Returns: last_price
-        """
-        instrument = self._lookup_instrument(symbol)
-        if not instrument or instrument.security_id is None:
-            return None
-
-        try:
-            if self._dhan_client is None:
-                self._dhan_client = self._create_dhan_client()
-            if self._dhan_client is None:
-                return None
-
-            # ✅ CORRECT DhanHQ v2 API for live LTP
-            response = self._dhan_client.get_quote_data(
-                mode="LTP",
-                security_id=[str(instrument.security_id)],
-                exchange_segment=instrument.exchange_segment,
-            )
-            
-            if response and isinstance(response, dict) and "data" in response:
-                data = response["data"]
-                if isinstance(data, list) and len(data) > 0:
-                    ltp = float(data[0].get("last_price", 0))
-                    if ltp > 0:
-                        logger.debug(f"✅ DhanHQ LTP for {symbol}: {ltp}")
-                        return ltp
-            
-            return None
-            
-        except Exception as exc:
-            logger.debug(f"DhanHQ LTP fetch failed for {symbol}: {exc}")
-            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Network error: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"❌ Error fetching DhanHQ data: {e}")
+            return []
 
     def fetch_tradingview_candles(self, symbol: str, interval: str, account: Optional[str] = None) -> List[dict]:
         cache_key = (f"tv:{symbol}", interval)
@@ -386,7 +391,7 @@ class DataManager:
                     security_id=stock_ids.get(symbol),
                     exchange="NSE_EQ",
                     exchange_segment="NSE_EQ",
-                    instrument_type="EQUITY",  # ✅ CRITICAL: "EQUITY" not "NSE_EQ"
+                    instrument_type="EQUITY",
                     category=category,
                     data_source=source,
                 )
@@ -400,7 +405,7 @@ class DataManager:
                     security_id=13,
                     exchange="NSE_FNO",
                     exchange_segment="NSE_FNO",
-                    instrument_type="FUT",  # ✅ CRITICAL: "FUT" not "NSE_FNO"
+                    instrument_type="FUTIDX",
                     category="index_options",
                     data_source="dhan_primary",
                 ),
@@ -409,7 +414,7 @@ class DataManager:
                     security_id=25,
                     exchange="NSE_FNO",
                     exchange_segment="NSE_FNO",
-                    instrument_type="OPT",  # ✅ CRITICAL: "OPT" not "NSE_FNO"
+                    instrument_type="OPTIDX",
                     category="index_options",
                     data_source="dhan_primary",
                 ),
@@ -418,7 +423,7 @@ class DataManager:
                     security_id=1,
                     exchange="BSE_FNO",
                     exchange_segment="BSE_FNO",
-                    instrument_type="OPT",  # ✅ CRITICAL: "OPT" not "BSE_FNO"
+                    instrument_type="OPTIDX",
                     category="index_options",
                     data_source="dhan_primary",
                 ),
@@ -430,36 +435,36 @@ class DataManager:
                 Instrument(
                     symbol="GOLD",
                     security_id=565901,
-                    exchange="MCX",
-                    exchange_segment="MCX",
-                    instrument_type="FUT",  # ✅ CRITICAL: "FUT" not "MCX_FUT"
+                    exchange="MCX_COMM",
+                    exchange_segment="MCX_COMM",
+                    instrument_type="FUTCOM",
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
                 Instrument(
                     symbol="SILVER",
                     security_id=565902,
-                    exchange="MCX",
-                    exchange_segment="MCX",
-                    instrument_type="FUT",
+                    exchange="MCX_COMM",
+                    exchange_segment="MCX_COMM",
+                    instrument_type="FUTCOM",
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
                 Instrument(
                     symbol="CRUDE OIL",
                     security_id=565899,
-                    exchange="MCX",
-                    exchange_segment="MCX",
-                    instrument_type="FUT",
+                    exchange="MCX_COMM",
+                    exchange_segment="MCX_COMM",
+                    instrument_type="FUTCOM",
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
                 Instrument(
                     symbol="NATURAL GAS",
                     security_id=565900,
-                    exchange="MCX",
-                    exchange_segment="MCX",
-                    instrument_type="FUT",
+                    exchange="MCX_COMM",
+                    exchange_segment="MCX_COMM",
+                    instrument_type="FUTCOM",
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
@@ -530,23 +535,6 @@ class DataManager:
     def _write_cache(self, key: Tuple[str, str], candles: List[dict]) -> None:
         self._cache[key] = {"ts": time.time(), "candles": candles}
 
-    def _create_dhan_client(self):
-        try:
-            from dhanhq import DhanContext, dhanhq
-
-            client_id = os.getenv("API_KEY")
-            access_token = os.getenv("ACCESS_TOKEN")
-            if not client_id or not access_token:
-                logger.warning("DhanHQ credentials not found in environment")
-                return None
-            context = DhanContext(client_id=client_id, access_token=access_token)
-            client = dhanhq(context)
-            logger.info("✅ DhanHQ client initialized successfully")
-            return client
-        except Exception as e:
-            logger.error(f"Failed to create DhanHQ client: {e}")
-            return None
-
     def _create_tv_client(self, account: Optional[str]):
         try:
             from tvDatafeed import Interval, TvDatafeed
@@ -562,36 +550,3 @@ class DataManager:
             return tv, interval_map
         except Exception:
             return None, None
-
-    def _normalize_dhan_response(self, response: dict) -> List[dict]:
-        """
-        Normalize DhanHQ API response to standard candle format.
-        Handles both historical intraday_minute_data and live OHLC responses.
-        """
-        data = response.get("data") if isinstance(response, dict) else []
-        if not isinstance(data, list):
-            return []
-        
-        candles = []
-        # Take last 30 candles for analysis
-        for row in data[-30:]:
-            try:
-                candle = {
-                    "open": float(row.get("open", 0.0)),
-                    "high": float(row.get("high", 0.0)),
-                    "low": float(row.get("low", 0.0)),
-                    "close": float(row.get("close", 0.0)),
-                    "timestamp": str(row.get("timestamp") or row.get("created_at") or datetime.utcnow().isoformat()),
-                }
-                
-                # Validate candle OHLC logic
-                if (candle["high"] >= candle["low"] >= 0 and 
-                    candle["high"] >= candle["open"] >= candle["low"] >= 0):
-                    candles.append(candle)
-                else:
-                    logger.debug(f"Invalid candle logic - skipping: {candle}")
-            except (ValueError, KeyError) as e:
-                logger.debug(f"Skipping invalid candle: {e}")
-                continue
-        
-        return candles
