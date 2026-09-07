@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -68,6 +68,10 @@ class DataManager:
         return self._instrument_universe
 
     def fetch_dhanhq_candles(self, symbol: str, interval: str) -> List[dict]:
+        """
+        Fetch candles from DhanHQ using correct API method.
+        Uses intraday_minute_data for historical candles within the same day.
+        """
         cache_key = (f"dhan:{symbol}", interval)
         cached = self._read_cache(cache_key)
         if cached is not None:
@@ -83,21 +87,71 @@ class DataManager:
             if self._dhan_client is None:
                 return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
 
-            # Use quote_data to get live LTP (latest price)
-            # quote_data returns: open, high, low, close, volume, etc.
-            response = self._dhan_client.quote_data(
-                mode="LTP",
-                security_id=[instrument.security_id],
-                exchange=instrument.exchange,
+            # Convert interval string (e.g., "5min") to numeric value
+            interval_value = int(interval.replace("min", ""))
+            
+            # Get today's date for intraday fetching
+            today = datetime.now().strftime("%Y-%m-%d")
+            
+            # Use intraday_minute_data for live/recent candles
+            # API: GET /v2/historical/intraday/minute
+            response = self._dhan_client.intraday_minute_data(
+                security_id=instrument.security_id,
+                exchange_segment=instrument.exchange,
+                from_date=today,
+                to_date=today,
+                interval=interval_value,
             )
+            
             candles = self._normalize_dhan_response(response)
             if not candles:
+                logger.warning(f"No candles returned for {symbol} - trying fallback")
                 return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
+            
             self._write_cache(cache_key, candles)
+            logger.info(f"✅ DhanHQ fetch successful for {symbol}: {len(candles)} candles")
             return candles
+            
         except Exception as exc:
             logger.warning("DhanHQ fetch failed for %s (%s). Checking TradingView webhook fallback.", symbol, exc)
             return self._get_webhook_candle_fallback(symbol, interval, cache_key=cache_key)
+
+    def fetch_dhanhq_ltp(self, symbol: str) -> Optional[float]:
+        """
+        Fetch live LTP (Last Traded Price) from DhanHQ.
+        Uses marketfeed/ltp endpoint for real-time snapshot data.
+        """
+        instrument = self._lookup_instrument(symbol)
+        if not instrument or instrument.security_id is None:
+            return None
+
+        try:
+            if self._dhan_client is None:
+                self._dhan_client = self._create_dhan_client()
+            if self._dhan_client is None:
+                return None
+
+            # Use get_quote_data for LTP snapshot
+            # API: POST /v2/marketfeed/ltp
+            response = self._dhan_client.get_quote_data(
+                mode="LTP",
+                security_id=[instrument.security_id],
+                exchange_segment=instrument.exchange,
+            )
+            
+            if response and isinstance(response, dict) and "data" in response:
+                data = response["data"]
+                if isinstance(data, list) and len(data) > 0:
+                    ltp = float(data[0].get("last_price", 0))
+                    if ltp > 0:
+                        logger.debug(f"✅ DhanHQ LTP for {symbol}: {ltp}")
+                        return ltp
+            
+            return None
+            
+        except Exception as exc:
+            logger.debug(f"DhanHQ LTP fetch failed for {symbol}: {exc}")
+            return None
 
     def fetch_tradingview_candles(self, symbol: str, interval: str, account: Optional[str] = None) -> List[dict]:
         cache_key = (f"tv:{symbol}", interval)
@@ -330,10 +384,14 @@ class DataManager:
             client_id = os.getenv("API_KEY")
             access_token = os.getenv("ACCESS_TOKEN")
             if not client_id or not access_token:
+                logger.warning("DhanHQ credentials not found in environment")
                 return None
             context = DhanContext(client_id=client_id, access_token=access_token)
-            return dhanhq(context)
-        except Exception:
+            client = dhanhq(context)
+            logger.info("✅ DhanHQ client initialized successfully")
+            return client
+        except Exception as e:
+            logger.error(f"Failed to create DhanHQ client: {e}")
             return None
 
     def _create_tv_client(self, account: Optional[str]):
@@ -353,18 +411,30 @@ class DataManager:
             return None, None
 
     def _normalize_dhan_response(self, response: dict) -> List[dict]:
+        """
+        Normalize DhanHQ API response to standard candle format.
+        Handles both historical and quote data responses.
+        """
         data = response.get("data") if isinstance(response, dict) else []
         if not isinstance(data, list):
             return []
+        
         candles = []
+        # Take last 30 candles for analysis
         for row in data[-30:]:
-            candles.append(
-                {
+            try:
+                candle = {
                     "open": float(row.get("open", 0.0)),
                     "high": float(row.get("high", 0.0)),
                     "low": float(row.get("low", 0.0)),
                     "close": float(row.get("close", 0.0)),
-                    "timestamp": str(row.get("timestamp") or datetime.utcnow().isoformat()),
+                    "timestamp": str(row.get("timestamp") or row.get("created_at") or datetime.utcnow().isoformat()),
                 }
-            )
+                # Validate candle data
+                if candle["high"] >= candle["low"] >= 0 and candle["high"] >= candle["open"] >= candle["low"] >= 0:
+                    candles.append(candle)
+            except (ValueError, KeyError) as e:
+                logger.debug(f"Skipping invalid candle: {e}")
+                continue
+        
         return candles
