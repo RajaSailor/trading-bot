@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import sys
 import threading
 import time
 from datetime import datetime
@@ -13,8 +14,17 @@ from main_screener import screener_controller
 from market_calendar import MarketCalendar
 
 
+# Force Python to not use cached bytecode
+sys.dont_write_bytecode = True
+
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
+
+# Configure logging to show all levels
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 # Market monitor thread
 _market_monitor_thread = None
@@ -224,6 +234,10 @@ def not_found(_):
 
 
 if __name__ == '__main__':
+    logger.info("="*80)
+    logger.info("🚀 TRADING BOT SCREENER APP STARTING")
+    logger.info("="*80)
+    
     # Start market monitor
     _start_market_monitor()
     
@@ -234,5 +248,9 @@ if __name__ == '__main__':
     else:
         market_status = MarketCalendar.get_market_status()
         logger.info(f"🔴 Market is closed - Screener on standby\n{market_status}")
+    
+    logger.info("="*80)
+    logger.info("✅ APP INITIALIZATION COMPLETE - Flask server starting...")
+    logger.info("="*80)
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", "5000")))
