@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -55,14 +56,14 @@ class SignalProcessor:
     MCX_SECURITIES = {
         "CRUDEOIL": {
             "security_id": "565899",
-            "exchange_segment": "MCX",
+            "exchange_segment": "MCX",  # ✅ FIXED: Changed from MCX_COMM to MCX
             "instrument": "FUTCOM",
             "description": "Crude Oil Futures",
             "lot_size": 100
         },
         "GOLD": {
             "security_id": "567647",
-            "exchange_segment": "MCX",
+            "exchange_segment": "MCX",  # ✅ FIXED: Changed from MCX_COMM to MCX
             "instrument": "FUTCOM",
             "description": "Gold Futures",
             "lot_size": 100
@@ -74,6 +75,8 @@ class SignalProcessor:
         self.last_signal_time: Dict[str, float] = {}
         self.min_signal_interval = 60
         self.candle_cache: Dict[str, List[dict]] = {}
+        self.last_api_call_time = 0  # Rate limiting
+        self.min_api_interval = 0.5  # 500ms between API calls
         logger.info("✅ SignalProcessor initialized")
     
     def detect_breakout(
@@ -209,6 +212,17 @@ class SignalProcessor:
     def get_commodity_securities(self) -> Dict:
         """Get MCX commodity securities"""
         return self.MCX_SECURITIES
+    
+    def apply_rate_limit(self) -> None:
+        """Apply rate limiting to prevent DH-904 errors"""
+        current_time = time.time()
+        time_since_last = current_time - self.last_api_call_time
+        
+        if time_since_last < self.min_api_interval:
+            sleep_time = self.min_api_interval - time_since_last
+            time.sleep(sleep_time)
+        
+        self.last_api_call_time = time.time()
     
     @staticmethod
     def _timestamp_to_ist(timestamp) -> str:
