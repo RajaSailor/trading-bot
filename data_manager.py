@@ -13,6 +13,27 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Global rate limiter to prevent DH-904 errors
+_api_rate_limiter = {
+    'last_call': 0,
+    'min_interval': 1.0,  # 1 second between API calls
+    'lock': threading.Lock()
+}
+
+
+def _apply_rate_limit() -> None:
+    """Apply rate limiting between API calls to prevent DH-904 errors"""
+    with _api_rate_limiter['lock']:
+        current_time = time.time()
+        time_since_last = current_time - _api_rate_limiter['last_call']
+        
+        if time_since_last < _api_rate_limiter['min_interval']:
+            sleep_time = _api_rate_limiter['min_interval'] - time_since_last
+            logger.debug(f"⏸️  Rate limiting: sleeping {sleep_time:.2f}s")
+            time.sleep(sleep_time)
+        
+        _api_rate_limiter['last_call'] = time.time()
+
 
 @dataclass
 class Instrument:
@@ -251,6 +272,9 @@ class DataManager:
                 f"Fetching DhanHQ candles: symbol={symbol}, "
                 f"security_id={instrument.security_id}, interval={interval_value}min"
             )
+            
+            # Apply rate limiting BEFORE API call
+            _apply_rate_limit()
             
             candles = self._fetch_dhan_historical_data(
                 security_id=str(instrument.security_id),
