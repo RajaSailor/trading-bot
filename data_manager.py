@@ -340,11 +340,11 @@ class DataManager:
                 "interval": interval,                    # ✅ INTEGER (5, 15, 30, 60, etc.)
                 "fromDate": from_date,                   # ✅ "YYYY-MM-DD"
                 "toDate": to_date,                       # ✅ "YYYY-MM-DD"
-                "expiryCode": -1,                        # Optional: for derivatives
+                "expiryCode": 0,                         # Current active derivative contract
                 "oi": False                              # Optional: open interest
             }
             
-            url = "https://api.dhan.co/v2/charts/intraday"
+            url = "https://api.dhan.co/v2/charts/historical"
             headers = {
                 "access-token": access_token,
                 "Content-Type": "application/json",
