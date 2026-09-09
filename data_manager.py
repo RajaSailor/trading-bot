@@ -332,7 +332,7 @@ class DataManager:
             payload = {
                 "securityId": security_id,          # INTEGER, not string
                 "exchangeSegment": exchange_segment,
-                "instrumentType": instrument_type,  # Changed from "instrument"
+                "instrument": instrument_type,      # API expects "instrument" key (not "instrumentType")
                 "fromDate": from_date,
                 "toDate": to_date,
                 "interval": interval,               # INTEGER
