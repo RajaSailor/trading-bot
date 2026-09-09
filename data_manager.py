@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 import threading
@@ -283,6 +284,7 @@ class DataManager:
                 from_date=today,
                 to_date=today,
                 interval=interval_value,
+                symbol=symbol  # Pass symbol for debug logging
             )
             
             if candles:
@@ -320,6 +322,7 @@ class DataManager:
         from_date: str,
         to_date: str,
         interval: int = 5,
+        symbol: str = "UNKNOWN"
     ) -> List[dict]:
         """Fetch intraday data from DhanHQ API v2 /charts/intraday endpoint"""
         try:
@@ -341,45 +344,91 @@ class DataManager:
                 "oi": False                              # Optional: open interest
             }
             
-            url = "https://api.dhan.co/v2/charts/intraday"  # ✅ INTRADAY endpoint (not historical)
+            url = "https://api.dhan.co/v2/charts/intraday"
             headers = {
                 "access-token": access_token,
                 "Content-Type": "application/json",
             }
             
-            logger.debug(f"DhanHQ API request to /charts/intraday: {payload}")
+            logger.debug(f"[{symbol}] DhanHQ API request to /charts/intraday:")
+            logger.debug(f"[{symbol}] Payload: {json.dumps(payload, indent=2)}")
+            
             response = requests.post(url, json=payload, headers=headers, timeout=10)
             
+            logger.debug(f"[{symbol}] Response status: {response.status_code}")
+            logger.debug(f"[{symbol}] Response headers: {dict(response.headers)}")
+            
+            # CRITICAL DEBUG: Print raw response text
+            logger.debug(f"[{symbol}] Raw response body (first 500 chars): {response.text[:500]}")
+            
             if response.status_code != 200:
-                logger.error(f"DhanHQ API error: {response.status_code} - {response.text}")
+                logger.error(f"[{symbol}] DhanHQ API error: {response.status_code} - {response.text}")
                 return []
             
-            data = response.json()
-            if not data or "open" not in data:
-                logger.warning(f"Empty response from DhanHQ API")
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                logger.error(f"[{symbol}] Failed to parse JSON response: {e}")
+                logger.error(f"[{symbol}] Raw response: {response.text}")
+                return []
+            
+            logger.debug(f"[{symbol}] Parsed JSON response structure:")
+            logger.debug(f"[{symbol}] Response keys: {list(data.keys()) if isinstance(data, dict) else 'NOT A DICT'}")
+            
+            # Debug: Check if response is valid
+            if not data:
+                logger.warning(f"[{symbol}] Empty response from DhanHQ API")
+                return []
+            
+            if isinstance(data, dict):
+                logger.debug(f"[{symbol}] Response is dict with {len(data)} keys")
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        logger.debug(f"[{symbol}]   {key}: list with {len(value)} items")
+                    else:
+                        logger.debug(f"[{symbol}]   {key}: {type(value).__name__}")
+            else:
+                logger.warning(f"[{symbol}] Response is not a dict: {type(data).__name__}")
+                return []
+            
+            # Check for expected keys
+            if "open" not in data:
+                logger.warning(f"[{symbol}] No 'open' key in response. Keys available: {list(data.keys())}")
                 return []
             
             candles = []
-            for i in range(len(data.get("open", []))):
+            opens = data.get("open", [])
+            highs = data.get("high", [])
+            lows = data.get("low", [])
+            closes = data.get("close", [])
+            volumes = data.get("volume", [])
+            timestamps = data.get("timestamp", [])
+            
+            logger.debug(f"[{symbol}] Candle arrays sizes: open={len(opens)}, high={len(highs)}, low={len(lows)}, close={len(closes)}, volume={len(volumes)}, timestamp={len(timestamps)}")
+            
+            for i in range(len(opens)):
                 try:
                     candle = {
-                        "open": float(data["open"][i]),
-                        "high": float(data["high"][i]),
-                        "low": float(data["low"][i]),
-                        "close": float(data["close"][i]),
-                        "volume": float(data["volume"][i]),
-                        "timestamp": data["timestamp"][i],
+                        "open": float(opens[i]),
+                        "high": float(highs[i]),
+                        "low": float(lows[i]),
+                        "close": float(closes[i]),
+                        "volume": float(volumes[i]),
+                        "timestamp": timestamps[i],
                     }
                     candles.append(candle)
                 except Exception as e:
-                    logger.debug(f"Error parsing candle {i}: {e}")
+                    logger.debug(f"[{symbol}] Error parsing candle {i}: {e}")
                     continue
             
-            logger.info(f"✅ Fetched {len(candles)} intraday candles from DhanHQ")
+            logger.info(f"[{symbol}] ✅ Successfully parsed {len(candles)} intraday candles from DhanHQ")
+            if candles:
+                logger.debug(f"[{symbol}] First candle: {candles[0]}")
+                logger.debug(f"[{symbol}] Last candle: {candles[-1]}")
             return candles
         
         except Exception as e:
-            logger.error(f"Error fetching intraday data: {e}")
+            logger.error(f"[{symbol}] Error fetching intraday data: {e}", exc_info=True)
             return []
 
     def _build_instrument_universe(self) -> Dict[str, List[Instrument]]:
