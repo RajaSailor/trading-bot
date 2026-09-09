@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 
+try:
+    from dhanhq import DhanContext, dhanhq
+except ImportError:  # pragma: no cover - handled at runtime when SDK is unavailable
+    DhanContext = None
+    dhanhq = None
+
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -496,66 +502,43 @@ class DataManager:
             return self._security_master_cache
 
         try:
+            api_key = os.getenv("API_KEY")
             access_token = os.getenv("ACCESS_TOKEN")
-            if not access_token:
-                logger.error("ACCESS_TOKEN not found for security master fetch")
+            if not api_key or not access_token:
+                logger.error("API_KEY or ACCESS_TOKEN not found")
                 return self._security_master_cache
 
-            headers = {
-                "access-token": access_token,
-                "Content-Type": "application/json",
-            }
-            securities: List[Dict[str, Any]] = []
+            if DhanContext is None or dhanhq is None:
+                logger.error("dhanhq SDK is unavailable for security master fetch")
+                return self._security_master_cache
 
-            logger.debug("Fetching NSE_FNO securities from /v2/instrument/NSE_FNO")
-            try:
-                response_nse = requests.get(
-                    "https://api.dhan.co/v2/instrument/NSE_FNO",
-                    headers=headers,
-                    timeout=15,
-                    allow_redirects=False,
-                )
-                logger.debug(f"NSE_FNO endpoint response: {response_nse.status_code}")
-                if response_nse.status_code == 200:
-                    nse_securities = response_nse.json()
-                    if isinstance(nse_securities, list):
-                        securities.extend(nse_securities)
-                        logger.debug(f"Loaded {len(nse_securities)} NSE_FNO securities")
-                    else:
-                        logger.warning(f"NSE_FNO response is not a list: {type(nse_securities)}")
-                else:
-                    logger.warning(f"NSE_FNO endpoint returned {response_nse.status_code}")
-            except Exception as exc:
-                logger.warning(f"Failed to fetch NSE_FNO securities: {exc}")
+            dhan_context = DhanContext(api_key, access_token)
+            dhan = dhanhq(dhan_context)
 
-            logger.debug("Fetching MCX_COMM securities from /v2/instrument/MCX_COMM")
-            try:
-                response_mcx = requests.get(
-                    "https://api.dhan.co/v2/instrument/MCX_COMM",
-                    headers=headers,
-                    timeout=15,
-                    allow_redirects=False,
-                )
-                logger.debug(f"MCX_COMM endpoint response: {response_mcx.status_code}")
-                if response_mcx.status_code == 200:
-                    mcx_securities = response_mcx.json()
-                    if isinstance(mcx_securities, list):
-                        securities.extend(mcx_securities)
-                        logger.debug(f"Loaded {len(mcx_securities)} MCX_COMM securities")
-                    else:
-                        logger.warning(f"MCX_COMM response is not a list: {type(mcx_securities)}")
-                else:
-                    logger.warning(f"MCX_COMM endpoint returned {response_mcx.status_code}")
-            except Exception as exc:
-                logger.warning(f"Failed to fetch MCX_COMM securities: {exc}")
+            logger.debug("Fetching security master from dhanhq SDK...")
+            fetch_security_list = getattr(dhan, "fetch_security_list", None)
+            if fetch_security_list is None and hasattr(dhan, "security"):
+                fetch_security_list = getattr(dhan.security, "fetch_security_list", None)
+            if fetch_security_list is None:
+                logger.error("dhanhq SDK client does not expose fetch_security_list")
+                return self._security_master_cache
+
+            security_frame = fetch_security_list("compact")
+            if security_frame is None or security_frame.empty:
+                logger.warning("Security list DataFrame is empty")
+                return self._security_master_cache
+
+            logger.debug(f"Security list fetched: {len(security_frame)} records")
+            logger.debug(f"DataFrame columns: {security_frame.columns.tolist()}")
+            securities = security_frame.to_dict("records")
 
             if securities:
                 self._security_master_cache = securities
                 self._security_master_cache_ts = now
-                logger.info(f"✅ Loaded {len(securities)} total securities from Dhan master")
+                logger.info(f"✅ Loaded {len(securities)} total securities from dhanhq SDK")
                 return securities
 
-            logger.error("No securities loaded from either endpoint")
+            logger.error("No securities converted from DataFrame")
             return self._security_master_cache
         except Exception as exc:
             logger.error(f"Failed to fetch security master: {exc}", exc_info=True)
@@ -565,22 +548,49 @@ class DataManager:
     def _find_security_id(self, symbol: str, exchange_segment: str) -> Optional[int]:
         """Find current security ID for a symbol from security master."""
         securities = self._fetch_security_master_with_cache()
+        if not securities:
+            logger.error("No securities in cache for lookup")
+            return None
+
         symbol_upper = symbol.upper()
-        exchange_segment_upper = exchange_segment.upper()
+        normalized_symbol = "".join(ch for ch in symbol_upper if ch.isalnum())
+
+        def matches_exchange(exchange_id: str) -> bool:
+            if exchange_segment == "NSE_FNO":
+                return "NSE" in exchange_id
+            if exchange_segment == "MCX_COMM":
+                return "MCX" in exchange_id
+            return False
+
+        def symbol_match_score(trading_symbol: str) -> int:
+            normalized_trading_symbol = "".join(ch for ch in trading_symbol if ch.isalnum())
+            if normalized_trading_symbol == normalized_symbol:
+                return 3
+            if normalized_trading_symbol.startswith(normalized_symbol):
+                return 2
+            if normalized_symbol in normalized_trading_symbol:
+                return 1
+            return 0
+
+        best_match: Optional[tuple[int, int]] = None
 
         for security in securities:
-            trading_symbol = str(security.get("trading_symbol", "")).upper()
-            segment = str(security.get("segment", "")).upper()
-            if trading_symbol == symbol_upper and segment == exchange_segment_upper:
+            trading_symbol = str(security.get("SM_SYMBOL_NAME", "")).upper()
+            exchange_id = str(security.get("SEM_EXM_EXCH_ID", "")).upper()
+            match_score = symbol_match_score(trading_symbol)
+            if matches_exchange(exchange_id) and match_score:
                 try:
-                    security_id = security.get("security_id")
+                    security_id = security.get("SEM_SMST_SECURITY_ID")
                     if security_id:
-                        logger.debug(
-                            f"Found security_id={security_id} for {symbol} on {exchange_segment}"
-                        )
-                        return int(security_id)
+                        candidate = (match_score, int(security_id))
+                        if best_match is None or candidate[0] > best_match[0]:
+                            best_match = candidate
                 except (ValueError, TypeError):
-                    continue
+                    pass
+
+        if best_match is not None:
+            logger.info(f"✅ Found security_id={best_match[1]} for {symbol} on {exchange_segment}")
+            return best_match[1]
 
         logger.warning(f"Could not find security_id for {symbol} on {exchange_segment}")
         return None

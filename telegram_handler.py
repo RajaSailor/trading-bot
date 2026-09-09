@@ -21,7 +21,14 @@ class TelegramHandler:
     }
 
     def __init__(self, token: Optional[str] = None) -> None:
-        self.token = token or os.getenv("TELEGRAM_TOKEN", "")
+        self.token = token or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN", "")
+        self.default_chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID", "")
+        if not self.token or not self.default_chat_id:
+            logger.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set")
+        else:
+            logger.info(
+                f"✅ Telegram config loaded: token={self.token[:20]}..., chat_id={self.default_chat_id}"
+            )
         self._bot = None
         self._alert_history: List[dict] = []
         self._alert_keys: set[str] = set()
