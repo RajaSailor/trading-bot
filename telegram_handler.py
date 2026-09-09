@@ -5,39 +5,103 @@ import logging
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class TelegramHandler:
-    CHANNELS = {
-        "index_options": -1003966854994,
-        "nifty50_stock_options": -1003804613787,
-        "nifty50_intraday_5x": -1004466883026,
-        "nifty50_pay_later": -1003814243881,
-        "commodity_options": -1004403277287,
-        "crypto": -1004482078964,
+    BOT_CONFIG = {
+        "index_options": {
+            "channel_id": -1003966854994,
+            "channel_env": "CHANNEL_INDEX_ID",
+            "token_env": "BOT_INDEX_TOKEN",
+            "description": "NIFTY/BANKNIFTY Options (9:15-15:40)",
+        },
+        "nifty50_stock_options": {
+            "channel_id": -1003804613787,
+            "channel_env": "CHANNEL_NIFTY50_OPTIONS_ID",
+            "token_env": "BOT_NIFTY50_OPTIONS_TOKEN",
+            "description": "NIFTY50 Stock Options",
+        },
+        "commodity_options": {
+            "channel_id": -1004403277287,
+            "channel_env": "CHANNEL_COMMODITY_ID",
+            "token_env": "BOT_COMMODITY_TOKEN",
+            "description": "GOLD/CRUDE/SILVER/NATURALGAS (MCX)",
+        },
+        "nifty50_intraday_5x": {
+            "channel_id": -1004466883026,
+            "channel_env": "CHANNEL_NIFTY50_5X_ID",
+            "token_env": "BOT_NIFTY50_5X_TOKEN",
+            "description": "NIFTY50 Intraday 5X Leverage",
+        },
+        "nifty50_pay_later": {
+            "channel_id": -1003814243881,
+            "channel_env": "CHANNEL_NIFTY50_PAY_LATER_ID",
+            "token_env": "BOT_NIFTY50_PAY_LATER_TOKEN",
+            "description": "NIFTY50 Pay Later/Margin",
+        },
+        "crypto": {
+            "channel_id": -1004482078964,
+            "channel_env": "CHANNEL_CRYPTO_ID",
+            "token_env": "BOT_CRYPTO_TOKEN",
+            "description": "BTCUSD/ETHUSD Crypto (24/7)",
+        },
     }
+    CHANNELS = {category: config["channel_id"] for category, config in BOT_CONFIG.items()}
 
     def __init__(self, token: Optional[str] = None) -> None:
-        self.token = token or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN", "")
+        self.default_token = token or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN", "")
+        self.token = self.default_token
         self.default_chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID", "")
-        if not self.token or not self.default_chat_id:
-            logger.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set")
+        self._bot_instances: Dict[str, object] = {}
+
+        if not self.default_token:
+            logger.error("❌ No default Telegram token found in environment")
         else:
+            logger.info("✅ Default Telegram token loaded")
+
+        logger.info("=" * 80)
+        logger.info("📱 TELEGRAM BOT CONFIGURATION")
+        logger.info("=" * 80)
+        for category, config in self.BOT_CONFIG.items():
+            category_token = os.getenv(config["token_env"]) or self.default_token
+            configured_channel = os.getenv(config["channel_env"])
+            channel_id = int(configured_channel or config["channel_id"])
+            status = "✅" if category_token else "⚠️ (missing token)"
             logger.info(
-                f"✅ Telegram config loaded: token={self.token[:20]}..., chat_id={self.default_chat_id}"
+                "%s [%s] Channel: %s | %s",
+                status,
+                category.upper(),
+                channel_id,
+                config["description"],
             )
-        self._bot = None
+        logger.info("=" * 80)
+
         self._alert_history: List[dict] = []
         self._alert_keys: set[str] = set()
+
+    def _get_bot_for_category(self, category: str) -> tuple[str, int]:
+        if category not in self.BOT_CONFIG:
+            logger.warning("⚠️ Unknown Telegram category '%s', using default channel", category)
+            fallback_chat = int(self.default_chat_id or os.getenv("CHAT_ID", "-1004321977761"))
+            return self.default_token, fallback_chat
+
+        config = self.BOT_CONFIG[category]
+        category_token = os.getenv(config["token_env"]) or self.default_token
+        configured_channel = os.getenv(config["channel_env"])
+        channel_id = int(configured_channel or config["channel_id"])
+        logger.debug("🔍 [%s] Routed to channel %s", category.upper(), channel_id)
+        return category_token, channel_id
 
     def send_signal_alert(self, category: str, signal_data: dict, option_data: dict) -> bool:
         try:
             logger.debug(
-                "📤 Attempting to send %s alert for %s",
-                category,
+                "📤 [%s] Attempting to send alert for %s",
+                category.upper(),
                 signal_data.get("symbol", "UNKNOWN"),
             )
             key = (
@@ -48,30 +112,40 @@ class TelegramHandler:
                 logger.debug("⚠️ Duplicate alert suppressed: %s", key)
                 return False
 
-            if category not in self.CHANNELS:
-                logger.error("❌ Unknown Telegram category: %s", category)
-                return False
+            bot_token, chat_id = self._get_bot_for_category(category)
 
             message = self.format_signal_message(category, signal_data, option_data)
-            logger.debug("📨 Sending message to '%s' (chat_id=%s)", category, self.CHANNELS[category])
-            sent = self._send_message(self.CHANNELS[category], message)
+            logger.info("📨 [%s] Sending to channel %s", category.upper(), chat_id)
+            sent = self._send_message(chat_id, message, bot_token)
             if sent:
                 self._alert_keys.add(key)
                 self._alert_history.append(
                     {
                         "category": category,
-                        "signal": signal_data,
-                        "option_data": option_data,
-                        "sent_at": datetime.utcnow().isoformat(),
+                        "channel_id": chat_id,
+                        "symbol": signal_data.get("symbol"),
+                        "signal": signal_data.get("signal"),
+                        "sent_at": datetime.now(IST).isoformat(),
                     }
                 )
                 self._alert_history = self._alert_history[-200:]
-                logger.info("✅ Alert queued/sent for '%s': %s", category, signal_data.get("symbol"))
+                logger.info(
+                    "✅ [%s] Alert sent to channel %s for %s %s",
+                    category.upper(),
+                    chat_id,
+                    signal_data.get("symbol"),
+                    signal_data.get("signal", "").upper(),
+                )
             else:
-                logger.warning("⚠️ Failed to deliver alert for '%s': %s", category, signal_data.get("symbol"))
+                logger.warning(
+                    "⚠️ [%s] Failed to deliver alert for %s to channel %s",
+                    category.upper(),
+                    signal_data.get("symbol"),
+                    chat_id,
+                )
             return sent
         except Exception as e:
-            logger.error("❌ Failed to queue/send alert: %s", e, exc_info=True)
+            logger.error("❌ [%s] Failed to send alert: %s", category.upper(), e, exc_info=True)
             return False
 
     def send_confirmation_request(self, user_chat_id: int, signal_details: dict) -> bool:
@@ -82,7 +156,7 @@ class TelegramHandler:
             f"Side: {signal_details['side']}\n"
             f"Entry: {signal_details['entry_price']}"
         )
-        return self._send_message(user_chat_id, message)
+        return self._send_message(user_chat_id, message, self.default_token)
 
     def send_sl_miss_alert(self, category: str, position: dict, current_price: float) -> bool:
         message = (
@@ -93,7 +167,8 @@ class TelegramHandler:
             f"Current Price: {current_price}\n"
             f"Position: {position['position_id']}"
         )
-        return self._send_message(self.CHANNELS[category], message)
+        bot_token, chat_id = self._get_bot_for_category(category)
+        return self._send_message(chat_id, message, bot_token)
 
     def get_alert_history(self, limit: int = 50) -> List[dict]:
         return self._alert_history[-limit:]
@@ -152,57 +227,66 @@ class TelegramHandler:
             f"Target 2: {targets[1]} ({target_labels[1]} points)\n"
             f"Target 3: {targets[2]} ({target_labels[2]} points)\n"
             f"Stop Loss: {stop_loss_label}\n\n"
-            f"⏰ Signal Time (IST): {signal_data.get('signal_time_ist', datetime.now().strftime('%H:%M:%S'))}\n"
+            f"⏰ Signal Time (IST): {signal_data.get('signal_time_ist', datetime.now(IST).strftime('%H:%M:%S'))}\n"
             f"🕐 Timeframe: {signal_data.get('timeframe', '')}\n"
             f"📡 Source: {source or 'SCREENER'}\n"
             f"Channel: {category.replace('_', ' ').upper()}\n\n"
             "📢 DISCLAIMER: Educational purposes only."
         )
 
-    def _send_message(self, chat_id: int, message: str) -> bool:
-        if not self.token:
-            logger.warning("Telegram token not configured, cannot send message")
+    def _send_message(self, chat_id: int, message: str, token: Optional[str] = None) -> bool:
+        token = token or self.default_token
+        if not token:
+            logger.warning("❌ No Telegram token available")
             return False
-        
+
         try:
-            if self._bot is None:
+            if token not in self._bot_instances:
                 from telegram import Bot
-                self._bot = Bot(token=self.token)
-                logger.info("Telegram bot initialized")
-            
-            logger.info(f"Attempting to send message to chat_id={chat_id}")
-            
-            # Try synchronous send first
-            import asyncio
+                self._bot_instances[token] = Bot(token=token)
+                logger.debug("🤖 New bot instance created")
+
+            bot = self._bot_instances[token]
+
             try:
                 loop = asyncio.get_running_loop()
-                logger.debug("Event loop detected, using async send")
-                # Schedule the coroutine
-                task = loop.create_task(self._send_async(chat_id, message))
-                logger.debug(f"Task scheduled: {task}")
+                loop.create_task(bot.send_message(chat_id=chat_id, text=message))
                 return True
             except RuntimeError:
-                logger.debug("No event loop, using synchronous send")
-                # No event loop, run synchronously
-                asyncio.run(self._send_message_sync(chat_id, message))
+                asyncio.run(bot.send_message(chat_id=chat_id, text=message))
                 return True
-                
+
         except Exception as e:
-            logger.error(f"Telegram send failed: {type(e).__name__}: {e}")
+            logger.error("❌ Telegram send failed to %s: %s: %s", chat_id, type(e).__name__, e)
             return False
-    
-    async def _send_async(self, chat_id: int, message: str) -> None:
-        try:
-            logger.info(f"Sending async message to {chat_id}")
-            await self._bot.send_message(chat_id=chat_id, text=message)
-            logger.info(f"Message sent successfully to {chat_id}")
-        except Exception as e:
-            logger.error(f"Async send failed: {type(e).__name__}: {e}")
-    
-    async def _send_message_sync(self, chat_id: int, message: str) -> None:
-        try:
-            logger.info(f"Sending sync message to {chat_id}")
-            await self._bot.send_message(chat_id=chat_id, text=message)
-            logger.info(f"Message sent successfully to {chat_id}")
-        except Exception as e:
-            logger.error(f"Sync send failed: {type(e).__name__}: {e}")
+
+    def test_all_bots(self) -> dict:
+        results = {}
+        logger.info("=" * 80)
+        logger.info("🧪 TESTING ALL TELEGRAM BOTS")
+        logger.info("=" * 80)
+
+        for category, config in self.BOT_CONFIG.items():
+            token, channel_id = self._get_bot_for_category(category)
+            test_message = (
+                f"✅ {config['description'].upper()}\n\n"
+                f"🔔 Channel: {channel_id}\n"
+                f"📱 Bot: {category}\n"
+                f"⏰ Test Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}\n\n"
+                "If you see this message, the bot is working correctly! 🎉"
+            )
+            sent = self._send_message(channel_id, test_message, token)
+            status = "✅ WORKING" if sent else "❌ FAILED"
+            results[category] = {
+                "category": category,
+                "channel_id": channel_id,
+                "token": f"{token[:15]}..." if token else "NONE",
+                "sent": sent,
+                "status": status,
+            }
+            logger.info("%s %s -> %s", status, category, channel_id)
+
+        logger.info("=" * 80)
+        logger.info("🧪 TEST COMPLETE")
+        logger.info("=" * 80)
+        return results

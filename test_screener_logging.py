@@ -147,7 +147,7 @@ class ScreenerLoggingTests(unittest.TestCase):
             "put_premium": 10,
         }
 
-        handler._send_message = lambda chat_id, message: True
+        handler._send_message = lambda chat_id, message, token=None: True
 
         with self.assertLogs("telegram_handler", level="DEBUG") as logs:
             first = handler.send_signal_alert("index_options", signal, option_data)
