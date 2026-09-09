@@ -296,6 +296,22 @@ class DataManager:
             logger.warning(f"Error fetching DhanHQ data: {exc}")
             return []
 
+    def fetch_candles(self, instrument: Instrument, interval: str) -> List[dict]:
+        """Unified candle fetching - routes to correct provider"""
+        # Normalize interval format
+        if interval.endswith("min"):
+            interval_normalized = interval
+        else:
+            interval_normalized = f"{interval}min"
+        
+        # Route based on data source
+        if instrument.data_source == "dhan_primary":
+            return self.fetch_dhanhq_candles(instrument.symbol, interval_normalized)
+        
+        # Default: return empty if no provider configured
+        logger.warning(f"No data source configured for {instrument.symbol}")
+        return []
+
     def _fetch_dhan_historical_data(
         self,
         security_id: str,
