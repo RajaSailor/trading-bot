@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from market_calendar import MarketCalendar
 from screener_5min import FiveMinuteScreener
+from strategy_engine import StrategyEngine
 from telegram_handler import TelegramHandler
 
 
@@ -12,15 +13,17 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 class _FakeDataManager:
-    def __init__(self, candles_by_symbol=None):
+    def __init__(self, candles_by_symbol=None, instruments=None):
         self._candles_by_symbol = candles_by_symbol or {}
-
-    def get_instruments(self):
-        return {
+        self._instruments = instruments or {
             "index_options": [SimpleNamespace(symbol="NIFTY", category="index_options")],
             "nifty50_stock_options": [],
             "crypto": [],
+            "commodity_options": [SimpleNamespace(symbol="GOLD", category="commodity_options")],
         }
+
+    def get_instruments(self):
+        return self._instruments
 
     def fetch_candles(self, instrument, interval):
         return self._candles_by_symbol.get(instrument.symbol, [])
@@ -32,7 +35,11 @@ class _FakePositionManager:
 
 
 class _FakeTelegramHandler:
+    def __init__(self):
+        self.sent_categories = []
+
     def send_signal_alert(self, category, signal_data, option_data):
+        self.sent_categories.append(category)
         return True
 
 
@@ -83,6 +90,40 @@ class ScreenerLoggingTests(unittest.TestCase):
         output = "\n".join(logs.output)
         self.assertIn("🚀 [5MIN] SIGNAL DETECTED: NIFTY CALL", output)
         self.assertIn("✅ [5MIN] Alert sent to Telegram for NIFTY", output)
+
+    def test_run_once_scans_commodities_during_mcx_window(self):
+        screener = FiveMinuteScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
+        calls = []
+
+        def _record_scan(instruments, interval, strategy_group, category=None):
+            calls.append((interval, strategy_group, category))
+            return 0
+
+        screener._scan_group = _record_scan
+        screener.run_once(now=datetime(2026, 9, 9, 20, 0, 0, tzinfo=IST))
+
+        self.assertIn(("15min", screener.engine.GROUP_2, "commodity_options"), calls)
+
+    def test_scan_group_routes_commodity_alert_to_commodity_channel(self):
+        candles = {
+            "GOLD": [
+                {"open": 100, "high": 101, "low": 99, "close": 100, "timestamp": "t1"},
+                {"open": 100, "high": 102, "low": 98, "close": 101, "timestamp": "t2"},
+            ]
+        }
+        telegram = _FakeTelegramHandler()
+        screener = FiveMinuteScreener(_FakeDataManager(candles), telegram, _FakePositionManager())
+        screener.engine = _FakeEngine()
+
+        alerts = screener._scan_group(
+            screener.commodity_instruments,
+            "15min",
+            StrategyEngine.GROUP_2,
+            category="commodity_options",
+        )
+
+        self.assertEqual(1, alerts)
+        self.assertEqual(["commodity_options"], telegram.sent_categories)
 
     def test_telegram_send_signal_alert_logs_duplicate_suppression(self):
         handler = TelegramHandler(token="dummy-token")
