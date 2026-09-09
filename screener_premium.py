@@ -54,23 +54,64 @@ class PremiumScreener:
 
     def _scan_instruments(self, instruments, interval: str) -> int:
         alerts = 0
+        logger.debug("📊 Scanning %s instruments for interval %s", len(instruments), interval)
         for instrument in instruments:
             try:
+                logger.debug(
+                    "📈 [%s] Fetching %s premiums (category=%s)...",
+                    instrument.symbol,
+                    interval,
+                    instrument.category,
+                )
                 ce_candles, ce_option = self.fetcher.fetch_atm_premium_candles(instrument, "CE", interval)
                 pe_candles, pe_option = self.fetcher.fetch_atm_premium_candles(instrument, "PE", interval)
 
                 if ce_candles:
+                    logger.info("✅ [%s] Got %s CE candles", instrument.symbol, len(ce_candles))
+                    logger.debug(
+                        "   First CE: O=%.2f, H=%.2f | Last CE: O=%.2f, H=%.2f",
+                        float(ce_candles[0]["open"]),
+                        float(ce_candles[0]["high"]),
+                        float(ce_candles[-1]["open"]),
+                        float(ce_candles[-1]["high"]),
+                    )
                     for candle in ce_candles:
                         self.engine.add_ce_candle(instrument.symbol, candle)
+                else:
+                    logger.warning("❌ [%s] No CE candles fetched", instrument.symbol)
                 if pe_candles:
+                    logger.info("✅ [%s] Got %s PE candles", instrument.symbol, len(pe_candles))
+                    logger.debug(
+                        "   First PE: O=%.2f, H=%.2f | Last PE: O=%.2f, H=%.2f",
+                        float(pe_candles[0]["open"]),
+                        float(pe_candles[0]["high"]),
+                        float(pe_candles[-1]["open"]),
+                        float(pe_candles[-1]["high"]),
+                    )
                     for candle in pe_candles:
                         self.engine.add_pe_candle(instrument.symbol, candle)
+                else:
+                    logger.warning("❌ [%s] No PE candles fetched", instrument.symbol)
 
+                logger.debug("📊 [%s] Calling engine.evaluate_premiums()...", instrument.symbol)
                 for signal in self.engine.evaluate_premiums(instrument.symbol, instrument.category):
                     option_data = ce_option if signal["option_type"] == "CE" else pe_option
                     if not option_data:
+                        logger.warning(
+                            "⚠️ [%s] Missing option metadata for %s signal",
+                            instrument.symbol,
+                            signal["option_type"],
+                        )
                         continue
 
+                    logger.info(
+                        "🚀 [%s] %s for %s (%s) @ %.2f",
+                        instrument.category,
+                        signal["signal"],
+                        instrument.symbol,
+                        signal["option_type"],
+                        signal["entry_price"],
+                    )
                     signal["timeframe"] = self._display_timeframe(interval)
                     signal["premium_strategy"] = True
                     signal["signal_time_ist"] = datetime.now(IST).strftime("%H:%M:%S")
@@ -93,9 +134,13 @@ class PremiumScreener:
                         "option_type": option_data["option_type"],
                     }
                     if self.telegram_handler.send_signal_alert(instrument.category, signal, telegram_payload):
+                        logger.info("✅ Alert sent for %s %s", instrument.symbol, signal["signal"])
                         alerts += 1
+                    else:
+                        logger.warning("⚠️ Alert rejected/skipped for %s %s", instrument.symbol, signal["signal"])
             except Exception as exc:
                 logger.error("❌ Premium screener failed for %s: %s", instrument.symbol, exc, exc_info=True)
+        logger.debug("📊 Instrument scan complete: %s alerts", alerts)
         return alerts
 
     @staticmethod
