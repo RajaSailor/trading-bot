@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 logger = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # Global rate limiter to prevent DH-904 errors
 _api_rate_limiter = {
@@ -267,7 +268,7 @@ class DataManager:
 
         try:
             interval_value = int(interval.replace("min", ""))
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = datetime.now(IST).strftime("%Y-%m-%d")
             
             logger.debug(
                 f"Fetching DhanHQ candles: symbol={symbol}, "
