@@ -173,10 +173,12 @@ class MarketCalendar:
     @staticmethod
     def get_market_status() -> dict:
         """Get current market status for all markets with IST timezone"""
+        logger.debug("🕐 Checking market status...")
         now = datetime.now(IST)
         today = now.date()
         day_name = now.strftime("%A")
         current_time = now.strftime("%H:%M:%S")
+        logger.debug("  Current: %s", now.strftime("%Y-%m-%d %H:%M:%S %Z"))
         
         is_holiday = MarketCalendar.is_sebi_holiday(today)
         is_trading_day = now.weekday() in MarketCalendar.TRADING_DAYS and not is_holiday
@@ -184,6 +186,16 @@ class MarketCalendar:
         is_mcx_open = MarketCalendar.is_mcx_open()
         is_crypto_open = MarketCalendar.is_crypto_open()
         can_alert = MarketCalendar.can_send_alerts()
+        logger.debug(
+            "  NSE %s-%s → %s | MCX %s-%s → %s | CRYPTO → %s",
+            MarketCalendar.NSE_OPEN.strftime("%H:%M"),
+            MarketCalendar.NSE_CLOSE.strftime("%H:%M"),
+            "OPEN" if is_nse_open else "CLOSED",
+            MarketCalendar.MCX_OPEN.strftime("%H:%M"),
+            MarketCalendar.MCX_CLOSE.strftime("%H:%M"),
+            "OPEN" if is_mcx_open else "CLOSED",
+            "OPEN 24/7" if is_crypto_open else "CLOSED",
+        )
         
         return {
             "timestamp": now.isoformat(),
