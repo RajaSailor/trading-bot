@@ -100,7 +100,7 @@ def _start_market_monitor() -> None:
                 # COMMODITY: MCX hours (9:15 - 23:30)
                 if mcx_open and not commodity_running:
                     logger.info(
-                        "🟢 COMMODITY market opened (MCX 9:15-23:30 @ %s) - Monitoring GOLD/CRUDE/SILVER",
+                        "🟢 COMMODITY market opened (MCX 9:15-23:30 @ %s) - Monitoring GOLD/CRUDE/SILVER/NATURALGAS",
                         current_time,
                     )
                     if not crypto_running:

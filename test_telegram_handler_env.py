@@ -111,6 +111,36 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         self.assertEqual(-4400, mocked_send.call_args.args[0])
         self.assertEqual("commodity-token", mocked_send.call_args.args[2])
 
+    def test_format_signal_message_uses_premium_breakout_layout(self):
+        handler = TelegramHandler(token="default-token")
+
+        message = handler.format_signal_message(
+            "commodity_options",
+            {
+                "symbol": "GOLD",
+                "signal": "CALL",
+                "targets": [137, 147, 157],
+                "entry": 127,
+                "stop_loss": 113,
+                "timeframe": "10-MINUTE BREAKOUT",
+                "premium_strategy": True,
+                "signal_time_ist": "15:30:00",
+                "signal_date_ist": "09:09:2026",
+            },
+            {
+                "option_symbol": "GOLD-24OCT-127-CE",
+                "premium_ltp": 127.48,
+                "option_type": "CE",
+            },
+        )
+
+        self.assertIn("🚀 CALL ENTRY", message)
+        self.assertIn("GOLD | 10-MINUTE BREAKOUT (CE Premium)", message)
+        self.assertIn("⏰ Signal Time: 15:30:00 | 09:09:2026", message)
+        self.assertIn("Strike: GOLD-24OCT-127-CE", message)
+        self.assertIn("Premium (LTP): ₹127.48", message)
+        self.assertIn("Channel: COMMODITY OPTIONS", message)
+
 
 if __name__ == "__main__":
     unittest.main()

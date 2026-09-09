@@ -9,9 +9,7 @@ from typing import Dict
 
 from data_manager import DataManager
 from position_manager import PositionManager
-from screener_15min import FifteenMinuteScreener
-from screener_30min import ThirtyMinuteScreener
-from screener_5min import FiveMinuteScreener
+from screener_premium import PremiumScreener
 from telegram_handler import TelegramHandler
 from webhook_handler import TradingViewWebhookHandler
 from webhook_store import webhook_store
@@ -31,9 +29,7 @@ class ScreenerController:
             self.data_manager,
             store=webhook_store,
         )
-        self.scanner_5 = FiveMinuteScreener(self.data_manager, self.telegram_handler, self.position_manager)
-        self.scanner_15 = FifteenMinuteScreener(self.data_manager, self.telegram_handler, self.position_manager)
-        self.scanner_30 = ThirtyMinuteScreener(self.data_manager, self.telegram_handler, self.position_manager)
+        self.premium_screener = PremiumScreener(self.data_manager, self.telegram_handler, self.position_manager)
 
         self._stop_event = threading.Event()
         self._paused = False
@@ -130,29 +126,17 @@ class ScreenerController:
                 logger.debug("%s", "=" * 80)
                 logger.debug("[SCAN #%s] Starting scan cycle...", scan_count)
 
-                logger.debug("Running 5-minute scanner...")
-                alerts_5 = self.scanner_5.run_once()
-                logger.debug("  → 5-min alerts: %s", alerts_5)
-
-                logger.debug("Running 15-minute scanner...")
-                alerts_15 = self.scanner_15.run_once()
-                logger.debug("  → 15-min alerts: %s", alerts_15)
-
-                logger.debug("Running 30-minute scanner...")
-                alerts_30 = self.scanner_30.run_once()
-                logger.debug("  → 30-min alerts: %s", alerts_30)
-
-                alerts = alerts_5 + alerts_15 + alerts_30
+                logger.debug("Running premium screener...")
+                alerts = self.premium_screener.run_once()
+                logger.debug("  → premium alerts: %s", alerts)
                 self._stats["total_scans"] += 1
                 self._stats["total_alerts"] += alerts
                 self._stats["last_scan_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 if alerts > 0:
                     logger.info(
-                        "🔔 [SCAN #%s] ALERTS TRIGGERED: 5min=%s, 15min=%s, 30min=%s",
+                        "🔔 [SCAN #%s] PREMIUM ALERTS TRIGGERED: %s",
                         scan_count,
-                        alerts_5,
-                        alerts_15,
-                        alerts_30,
+                        alerts,
                     )
                 else:
                     logger.debug(
