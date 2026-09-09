@@ -328,15 +328,15 @@ class DataManager:
                 logger.error("ACCESS_TOKEN not found")
                 return []
             
-            # Correct payload format per DhanHQ API v2 docs
+            # Correct minimal payload for DhanHQ API v2
+            # Only include required fields - expiryCode and oi are NOT part of v2 API
             payload = {
-                "securityId": security_id,          # INTEGER, not string
+                "securityId": security_id,
                 "exchangeSegment": exchange_segment,
-                "instrument": instrument_type,      # API expects "instrument" key (not "instrumentType")
+                "instrument": instrument_type,
                 "fromDate": from_date,
                 "toDate": to_date,
-                "interval": interval,               # INTEGER
-                "oi": False
+                "interval": interval,
             }
             
             url = "https://api.dhan.co/v2/charts/historical"
