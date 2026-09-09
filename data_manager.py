@@ -324,14 +324,14 @@ class DataManager:
         interval: int = 5,
         symbol: str = "UNKNOWN"
     ) -> List[dict]:
-        """Fetch intraday data from DhanHQ API v2 /charts/intraday endpoint"""
+        """Fetch intraday data from DhanHQ API v2 /charts/historical endpoint"""
         try:
             access_token = os.getenv("ACCESS_TOKEN")
             if not access_token:
                 logger.error("ACCESS_TOKEN not found")
                 return []
             
-            # Correct payload for DhanHQ API v2 /charts/intraday endpoint
+            # Correct payload for DhanHQ API v2 /charts/historical endpoint
             # Per DhanHQ documentation: https://dhanhq.co/docs/v2/
             payload = {
                 "securityId": str(security_id),          # ✅ STRING (critical!)
@@ -340,17 +340,17 @@ class DataManager:
                 "interval": interval,                    # ✅ INTEGER (5, 15, 30, 60, etc.)
                 "fromDate": from_date,                   # ✅ "YYYY-MM-DD"
                 "toDate": to_date,                       # ✅ "YYYY-MM-DD"
-                "expiryCode": -1,                        # Optional: for derivatives
+                "expiryCode": 0,                         # Current contract for derivatives
                 "oi": False                              # Optional: open interest
             }
             
-            url = "https://api.dhan.co/v2/charts/intraday"
+            url = "https://api.dhan.co/v2/charts/historical"
             headers = {
                 "access-token": access_token,
                 "Content-Type": "application/json",
             }
             
-            logger.debug(f"[{symbol}] DhanHQ API request to /charts/intraday:")
+            logger.debug(f"[{symbol}] DhanHQ API request to /charts/historical:")
             logger.debug(f"[{symbol}] Payload: {json.dumps(payload, indent=2)}")
             
             response = requests.post(url, json=payload, headers=headers, timeout=10)

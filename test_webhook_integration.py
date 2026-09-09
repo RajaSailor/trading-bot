@@ -199,6 +199,41 @@ class WebhookIntegrationTests(unittest.TestCase):
         self.assertEqual(1, len(candles))
         self.assertEqual(18225.0, candles[0]["close"])
 
+    def test_data_manager_intraday_fetch_uses_historical_endpoint_for_current_contract(self):
+        data_manager = DataManager()
+        response_body = {
+            "open": [1],
+            "high": [2],
+            "low": [0.5],
+            "close": [1.5],
+            "volume": [10],
+            "timestamp": ["2026-09-09T09:15:00"],
+        }
+
+        with patch.dict("os.environ", {"ACCESS_TOKEN": "test-token"}, clear=False):
+            with patch("data_manager.requests.post") as mock_post:
+                mock_post.return_value.status_code = 200
+                mock_post.return_value.headers = {}
+                mock_post.return_value.text = str(response_body)
+                mock_post.return_value.json.return_value = response_body
+
+                candles = data_manager._fetch_dhan_intraday_data(
+                    security_id=13,
+                    exchange_segment="NSE_FNO",
+                    instrument_type="FUTIDX",
+                    from_date="2026-09-09",
+                    to_date="2026-09-09",
+                    interval=5,
+                    symbol="NIFTY",
+                )
+
+        self.assertEqual(1, len(candles))
+        args, kwargs = mock_post.call_args
+        self.assertEqual("https://api.dhan.co/v2/charts/historical", args[0])
+        self.assertEqual(0, kwargs["json"]["expiryCode"])
+        self.assertEqual(5, kwargs["json"]["interval"])
+        self.assertEqual("13", kwargs["json"]["securityId"])
+
     def test_data_manager_keeps_webhook_fallback_per_symbol_and_interval(self):
         data_manager = DataManager()
         data_manager.record_webhook_signal(
