@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 logger = logging.getLogger(__name__)
@@ -249,6 +249,9 @@ class DataManager:
         self._tv = None
         self._tv_interval = None
         self._dhan_client = None
+        self._security_master_cache: List[Dict[str, Any]] = []
+        self._security_master_cache_ts: float = 0.0
+        self._security_master_cache_ttl_seconds: int = 3600
         self._instrument_universe = self._build_instrument_universe()
 
     def get_instruments(self) -> Dict[str, List[Instrument]]:
@@ -262,9 +265,16 @@ class DataManager:
             return cached
 
         instrument = self._lookup_instrument(symbol)
-        if not instrument or instrument.security_id is None:
+        if not instrument:
             logger.debug(f"Instrument {symbol} not found")
             return []
+
+        security_id = instrument.security_id
+        if security_id is None:
+            security_id = self._find_security_id(symbol, instrument.exchange_segment)
+            if security_id is None:
+                logger.error(f"Could not resolve security_id for {symbol}")
+                return []
 
         try:
             interval_value = int(interval.replace("min", ""))
@@ -272,14 +282,14 @@ class DataManager:
             
             logger.debug(
                 f"Fetching DhanHQ candles: symbol={symbol}, "
-                f"security_id={instrument.security_id}, interval={interval_value}min"
+                f"security_id={security_id}, interval={interval_value}min"
             )
             
             # Apply rate limiting BEFORE API call
             _apply_rate_limit()
             
             candles = self._fetch_dhan_intraday_data(
-                security_id=instrument.security_id,
+                security_id=security_id,
                 exchange_segment=instrument.exchange_segment,
                 instrument_type=instrument.instrument_type,
                 from_date=today,
@@ -436,7 +446,7 @@ class DataManager:
             "index_options": [
                 Instrument(
                     symbol="NIFTY",
-                    security_id=13,
+                    security_id=None,
                     exchange="NSE_FNO",
                     exchange_segment="NSE_FNO",
                     instrument_type="FUTIDX",
@@ -445,7 +455,7 @@ class DataManager:
                 ),
                 Instrument(
                     symbol="BANKNIFTY",
-                    security_id=25,
+                    security_id=None,
                     exchange="NSE_FNO",
                     exchange_segment="NSE_FNO",
                     instrument_type="FUTIDX",
@@ -456,7 +466,7 @@ class DataManager:
             "commodity_options": [
                 Instrument(
                     symbol="GOLD",
-                    security_id=567647,
+                    security_id=None,
                     exchange="MCX",
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
@@ -465,7 +475,7 @@ class DataManager:
                 ),
                 Instrument(
                     symbol="CRUDE OIL",
-                    security_id=565899,
+                    security_id=None,
                     exchange="MCX",
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
@@ -474,6 +484,61 @@ class DataManager:
                 ),
             ]
         }
+
+    def _fetch_security_master_with_cache(self) -> List[Dict[str, Any]]:
+        """Fetch and cache Dhan security master for dynamic security ID lookup."""
+        now = time.time()
+        if (
+            self._security_master_cache
+            and now - self._security_master_cache_ts <= self._security_master_cache_ttl_seconds
+        ):
+            return self._security_master_cache
+
+        try:
+            access_token = os.getenv("ACCESS_TOKEN")
+            headers = {
+                "access-token": access_token,
+                "accept": "application/json",
+            }
+            response = requests.get(
+                "https://api.dhan.co/scrip-master",
+                headers=headers,
+                timeout=15,
+            )
+            if response.status_code == 200:
+                securities = response.json()
+                if isinstance(securities, list):
+                    self._security_master_cache = securities
+                    self._security_master_cache_ts = now
+                    logger.debug(f"Loaded {len(securities)} securities from security master")
+                    return securities
+        except Exception as exc:
+            logger.warning(f"Failed to fetch security master: {exc}")
+
+        return self._security_master_cache
+
+    def _find_security_id(self, symbol: str, exchange_segment: str) -> Optional[int]:
+        """Find current security ID for a symbol from security master."""
+        securities = self._fetch_security_master_with_cache()
+        symbol_upper = symbol.upper()
+        exchange_segment_upper = exchange_segment.upper()
+
+        for security in securities:
+            trading_symbol = str(security.get("trading_symbol", "")).upper()
+            segment = str(security.get("segment", "")).upper()
+            if trading_symbol == symbol_upper and segment == exchange_segment_upper:
+                try:
+                    security_id = security.get("security_id")
+                    if security_id:
+                        logger.debug(
+                            f"Found security_id={security_id} for {symbol} on {exchange_segment}"
+                        )
+                        return int(security_id)
+                except (ValueError, TypeError):
+                    continue
+
+        logger.warning(f"Could not find security_id for {symbol} on {exchange_segment}")
+        return None
     
     def _lookup_instrument(self, symbol: str) -> Optional[Instrument]:
         for instruments in self._instrument_universe.values():
