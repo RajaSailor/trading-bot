@@ -276,7 +276,7 @@ class DataManager:
             # Apply rate limiting BEFORE API call
             _apply_rate_limit()
             
-            candles = self._fetch_dhan_historical_data(
+            candles = self._fetch_dhan_intraday_data(
                 security_id=instrument.security_id,
                 exchange_segment=instrument.exchange_segment,
                 instrument_type=instrument.instrument_type,
@@ -312,7 +312,7 @@ class DataManager:
         logger.warning(f"No data source configured for {instrument.symbol}")
         return []
 
-    def _fetch_dhan_historical_data(
+    def _fetch_dhan_intraday_data(
         self,
         security_id: int,
         exchange_segment: str,
@@ -321,31 +321,33 @@ class DataManager:
         to_date: str,
         interval: int = 5,
     ) -> List[dict]:
-        """Fetch historical data from DhanHQ API v2"""
+        """Fetch intraday data from DhanHQ API v2 /charts/intraday endpoint"""
         try:
             access_token = os.getenv("ACCESS_TOKEN")
             if not access_token:
                 logger.error("ACCESS_TOKEN not found")
                 return []
             
-            # Correct minimal payload for DhanHQ API v2
-            # Only include required fields - expiryCode and oi are NOT part of v2 API
+            # Correct payload for DhanHQ API v2 /charts/intraday endpoint
+            # Per DhanHQ documentation: https://dhanhq.co/docs/v2/
             payload = {
-                "securityId": security_id,
-                "exchangeSegment": exchange_segment,
-                "instrument": instrument_type,
-                "fromDate": from_date,
-                "toDate": to_date,
-                "interval": interval,
+                "securityId": str(security_id),          # ✅ STRING (critical!)
+                "exchangeSegment": exchange_segment,     # ✅ e.g., "NSE_FNO"
+                "instrument": instrument_type,           # ✅ e.g., "FUTIDX"
+                "interval": interval,                    # ✅ INTEGER (5, 15, 30, 60, etc.)
+                "fromDate": from_date,                   # ✅ "YYYY-MM-DD"
+                "toDate": to_date,                       # ✅ "YYYY-MM-DD"
+                "expiryCode": -1,                        # Optional: for derivatives
+                "oi": False                              # Optional: open interest
             }
             
-            url = "https://api.dhan.co/v2/charts/historical"
+            url = "https://api.dhan.co/v2/charts/intraday"  # ✅ INTRADAY endpoint (not historical)
             headers = {
                 "access-token": access_token,
                 "Content-Type": "application/json",
             }
             
-            logger.debug(f"DhanHQ API request: {payload}")
+            logger.debug(f"DhanHQ API request to /charts/intraday: {payload}")
             response = requests.post(url, json=payload, headers=headers, timeout=10)
             
             if response.status_code != 200:
@@ -373,11 +375,11 @@ class DataManager:
                     logger.debug(f"Error parsing candle {i}: {e}")
                     continue
             
-            logger.info(f"✅ Fetched {len(candles)} candles from DhanHQ")
+            logger.info(f"✅ Fetched {len(candles)} intraday candles from DhanHQ")
             return candles
         
         except Exception as e:
-            logger.error(f"Error fetching historical data: {e}")
+            logger.error(f"Error fetching intraday data: {e}")
             return []
 
     def _build_instrument_universe(self) -> Dict[str, List[Instrument]]:
@@ -408,7 +410,7 @@ class DataManager:
                     symbol="GOLD",
                     security_id=567647,
                     exchange="MCX",
-                    exchange_segment="MCX",
+                    exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
                     data_source="dhan_primary",
@@ -417,7 +419,7 @@ class DataManager:
                     symbol="CRUDE OIL",
                     security_id=565899,
                     exchange="MCX",
-                    exchange_segment="MCX",
+                    exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
                     data_source="dhan_primary",
