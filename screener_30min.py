@@ -17,7 +17,7 @@ class ThirtyMinuteScreener:
         self.telegram_handler = telegram_handler
         self.position_manager = position_manager
         self.engine = StrategyEngine(lookback=7)
-        self.instruments = self.data_manager.get_instruments()["nifty50_pay_later"]
+        self.instruments = self.data_manager.get_instruments().get("nifty50_pay_later", [])
         self.last_run_at = 0.0
 
     def run_once(self, now: datetime | None = None) -> int:
