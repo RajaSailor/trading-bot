@@ -14,6 +14,7 @@ class PremiumStrategyEngine:
         self.lookback = lookback
         self.ce_candle_cache: Dict[str, List[dict]] = {}
         self.pe_candle_cache: Dict[str, List[dict]] = {}
+        logger.info("✅ Premium Strategy Engine initialized (lookback=%s)", lookback)
 
     def add_ce_candle(self, symbol: str, candle: dict) -> bool:
         return self._add_candle(self.ce_candle_cache, symbol, candle)
@@ -22,6 +23,13 @@ class PremiumStrategyEngine:
         return self._add_candle(self.pe_candle_cache, symbol, candle)
 
     def evaluate_premiums(self, symbol: str, category: str) -> List[dict]:
+        logger.debug("📊 [%s] Starting premium evaluation...", symbol)
+        logger.debug(
+            "📊 [%s] CE candles cached: %s, PE candles cached: %s",
+            symbol,
+            len(self.ce_candle_cache.get(symbol, [])),
+            len(self.pe_candle_cache.get(symbol, [])),
+        )
         signals = []
         signals.extend(
             self._evaluate_premium_breakout(
@@ -39,6 +47,7 @@ class PremiumStrategyEngine:
                 category,
             )
         )
+        logger.debug("📊 [%s] Total signals after evaluation: %s", symbol, len(signals))
         return signals
 
     def _add_candle(self, cache: Dict[str, List[dict]], symbol: str, candle: dict) -> bool:
@@ -59,7 +68,7 @@ class PremiumStrategyEngine:
         else:
             bucket.append(current)
 
-        cache[symbol] = bucket[-10:]
+        cache[symbol] = bucket[-500:]
         return len(cache[symbol]) >= 3
 
     def _evaluate_premium_breakout(
@@ -69,37 +78,107 @@ class PremiumStrategyEngine:
         option_type: str,
         category: str,
     ) -> List[dict]:
+        logger.debug(
+            "📊 [%s] %s: Starting breakout evaluation with %s candles",
+            symbol,
+            option_type,
+            len(candles),
+        )
         if len(candles) < 3:
+            logger.debug(
+                "📊 [%s] %s: Insufficient candles (%s/3 required)",
+                symbol,
+                option_type,
+                len(candles),
+            )
             return []
 
         recent = candles[-self.lookback:]
-        red_idx = None
-        for index in range(len(recent) - 2, -1, -1):
-            if recent[index]["close"] < recent[index]["open"]:
-                red_idx = index
-                break
+        signal = self._find_breakout(symbol, recent, option_type, category)
+        if signal:
+            return [signal]
 
-        if red_idx is None:
-            return []
+        if len(candles) > len(recent):
+            logger.debug(
+                "📊 [%s] %s: No breakout in last %s candles, checking full cached history (%s)",
+                symbol,
+                option_type,
+                len(recent),
+                len(candles),
+            )
+            signal = self._find_breakout(symbol, candles, option_type, category)
+            if signal:
+                return [signal]
 
-        red_candle = recent[red_idx]
-        red_high = float(red_candle["high"])
-        red_low = float(red_candle["low"])
+        logger.debug("📊 [%s] %s: No breakout found after RED candle", symbol, option_type)
+        return []
 
-        for index in range(red_idx + 1, len(recent)):
-            candle = recent[index]
-            if float(candle["high"]) <= red_high:
+    def _find_breakout(
+        self,
+        symbol: str,
+        candles: List[dict],
+        option_type: str,
+        category: str,
+    ) -> dict | None:
+        start_index = max(0, len(candles) - self.lookback)
+        for idx, candle in enumerate(candles[start_index:], start=start_index):
+            color = "🔴 RED" if float(candle["close"]) <= float(candle["open"]) else "🟢 GREEN"
+            logger.debug(
+                "  Candle[%s]: %s | O=%.2f, H=%.2f, L=%.2f, C=%.2f",
+                idx,
+                color,
+                float(candle["open"]),
+                float(candle["high"]),
+                float(candle["low"]),
+                float(candle["close"]),
+            )
+
+        for red_idx in range(len(candles) - 2, -1, -1):
+            red_candle = candles[red_idx]
+            if float(red_candle["close"]) > float(red_candle["open"]):
                 continue
 
-            signal_type = "CALL" if option_type == "CE" else "PUT"
+            red_high = float(red_candle["high"])
+            red_low = float(red_candle["low"])
             logger.info(
-                "🚀 [%s] %s premium breakout above %.2f",
+                "🔴 [%s] %s RED candle found at index %s: O=%.2f, H=%.2f, L=%.2f, C=%.2f",
+                symbol,
+                option_type,
+                red_idx,
+                float(red_candle["open"]),
+                red_high,
+                red_low,
+                float(red_candle["close"]),
+            )
+            logger.debug(
+                "📊 [%s] %s: Looking for breakout ABOVE red_high=%.2f",
                 symbol,
                 option_type,
                 red_high,
             )
-            return [
-                {
+            for index in range(red_idx + 1, len(candles)):
+                candle = candles[index]
+                breakout_high = float(candle["high"])
+                is_breakout = breakout_high > red_high
+                logger.debug(
+                    "  Checking candle[%s]: H=%.2f > %.2f? %s",
+                    index,
+                    breakout_high,
+                    red_high,
+                    "✅ YES" if is_breakout else "❌ NO",
+                )
+                if not is_breakout:
+                    continue
+
+                signal_type = "CALL" if option_type == "CE" else "PUT"
+                logger.info(
+                    "🚀 [%s] %s BREAKOUT DETECTED! Premium breaks above RED HIGH: %.2f → %.2f",
+                    symbol,
+                    option_type,
+                    red_high,
+                    breakout_high,
+                )
+                return {
                     "signal": signal_type,
                     "option_type": option_type,
                     "symbol": symbol,
@@ -118,9 +197,9 @@ class PremiumStrategyEngine:
                     "reference_color": "RED",
                     "reference_high": round(red_high, 2),
                     "reference_low": round(red_low, 2),
-                    "breakout_high": round(float(candle["high"]), 2),
+                    "breakout_high": round(breakout_high, 2),
                     "breakout_price": round(float(candle["close"]), 2),
                 }
-            ]
 
-        return []
+        logger.debug("📊 [%s] %s: No RED candle found in selected candles", symbol, option_type)
+        return None
