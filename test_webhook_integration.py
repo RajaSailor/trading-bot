@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import screener_app
 from data_manager import DataManager
@@ -245,6 +245,37 @@ class WebhookIntegrationTests(unittest.TestCase):
 
         self.assertEqual(18280.0, candles[0]["high"])
         self.assertEqual(18205.0, candles[0]["low"])
+
+    def test_data_manager_uses_historical_endpoint_for_intraday_derivatives(self):
+        data_manager = DataManager()
+        response = Mock(status_code=200, headers={}, text='{"open":[1],"high":[2],"low":[0.5],"close":[1.5],"volume":[10],"timestamp":["2026-09-04T10:40:00"]}')
+        response.json.return_value = {
+            "open": [1],
+            "high": [2],
+            "low": [0.5],
+            "close": [1.5],
+            "volume": [10],
+            "timestamp": ["2026-09-04T10:40:00"],
+        }
+
+        with (
+            patch.dict("os.environ", {"ACCESS_TOKEN": "token"}, clear=False),
+            patch("data_manager.requests.post", return_value=response) as mocked_post,
+        ):
+            candles = data_manager._fetch_dhan_intraday_data(
+                security_id=13,
+                exchange_segment="NSE_FNO",
+                instrument_type="FUTIDX",
+                from_date="2026-09-04",
+                to_date="2026-09-04",
+                interval=5,
+                symbol="NIFTY",
+            )
+
+        self.assertEqual(1, len(candles))
+        self.assertEqual(1.5, candles[0]["close"])
+        self.assertEqual("https://api.dhan.co/v2/charts/historical", mocked_post.call_args.args[0])
+        self.assertEqual(0, mocked_post.call_args.kwargs["json"]["expiryCode"])
 
     def test_telegram_format_includes_tradingview_source_banner(self):
         handler = TelegramHandler()
