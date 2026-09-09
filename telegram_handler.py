@@ -174,6 +174,9 @@ class TelegramHandler:
         return self._alert_history[-limit:]
 
     def format_signal_message(self, category: str, signal_data: dict, option_data: dict) -> str:
+        if signal_data.get("premium_strategy"):
+            return self._format_premium_signal_message(category, signal_data, option_data)
+
         icon = "🚀 CALL ENTRY" if signal_data["signal"] == "CALL" else "📉 PUT ENTRY"
         targets = signal_data["targets"]
         source = signal_data.get("source")
@@ -230,6 +233,29 @@ class TelegramHandler:
             f"⏰ Signal Time (IST): {signal_data.get('signal_time_ist', datetime.now(IST).strftime('%H:%M:%S'))}\n"
             f"🕐 Timeframe: {signal_data.get('timeframe', '')}\n"
             f"📡 Source: {source or 'SCREENER'}\n"
+            f"Channel: {category.replace('_', ' ').upper()}\n\n"
+            "📢 DISCLAIMER: Educational purposes only."
+        )
+
+    def _format_premium_signal_message(self, category: str, signal_data: dict, option_data: dict) -> str:
+        icon = "🚀 CALL ENTRY" if signal_data["signal"] == "CALL" else "📉 PUT ENTRY"
+        option_type = option_data.get("option_type", signal_data.get("option_type", ""))
+        premium_ltp = round(float(option_data.get("premium_ltp", signal_data["entry"])), 2)
+        targets = signal_data["targets"]
+        signal_time = signal_data.get("signal_time_ist", datetime.now(IST).strftime("%H:%M:%S"))
+        signal_date = signal_data.get("signal_date_ist", datetime.now(IST).strftime("%d:%m:%Y"))
+        return (
+            f"{icon}\n"
+            f"{signal_data['symbol']} | {signal_data.get('timeframe', '').upper()} ({option_type} Premium)\n\n"
+            f"⏰ Signal Time: {signal_time} | {signal_date}\n\n"
+            "📊 POSITION DETAILS:\n"
+            f"Entry: {signal_data['entry']:.2f}\n"
+            f"Target 1: {targets[0]:.2f} (+10 points)\n"
+            f"Target 2: {targets[1]:.2f} (+20 points)\n"
+            f"Target 3: {targets[2]:.2f} (+30 points)\n"
+            f"Stop Loss: {signal_data['stop_loss']:.2f}\n\n"
+            f"Strike: {option_data.get('option_symbol', 'N/A')}\n"
+            f"Premium (LTP): ₹{premium_ltp:.2f}\n\n"
             f"Channel: {category.replace('_', ' ').upper()}\n\n"
             "📢 DISCLAIMER: Educational purposes only."
         )

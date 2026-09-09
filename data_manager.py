@@ -69,13 +69,13 @@ class Instrument:
 
 
 NIFTY_50_STOCKS = [
-    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO", "BAJAJFINANCE",
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO", "BAJFINANCE",
     "BAJAJFINSV", "BEL", "BHARTIARTL", "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
-    "EICHERMOT", "GRASIM", "HCLTECH", "HDFC", "HDFC BANK", "HDFC LIFE", "HINDALCO", "HINDUNILVR",
-    "ICICIBANK", "INDIGO", "INFY", "ITC", "JIOFINANCE", "JSWSTEEL", "KOTAKBANK", "LT", "M&M",
-    "MARUTI", "MAXHEALTH", "NESTLEIND", "NTPC", "ONGC", "POWERGRID", "RELIANCE", "SBILIFE", "SBIN",
-    "SHRIRAMFIN", "SUNPHARMA", "TCS", "TECHM", "TATACONSUME", "TATAMOTORS", "TATASTEEL", "TRENT",
-    "TITAN", "ULTRATECH", "WIPRO",
+    "EICHERMOT", "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HINDALCO", "HINDUNILVR",
+    "ICICIBANK", "INDIGO", "INFY", "ITC", "JIOFIN", "JSWSTEEL", "KOTAKBANK", "LT", "M&M",
+    "MARUTI", "NESTLEIND", "NTPC", "ONGC", "POWERGRID", "RELIANCE", "SBILIFE", "SBIN",
+    "SHRIRAMFIN", "SUNPHARMA", "TCS", "TECHM", "TATACONSUM", "TATAMOTORS", "TATASTEEL", "TRENT",
+    "TITAN", "ULTRACEMCO", "WIPRO",
 ]
 
 _STOCK_ALIASES = {
@@ -277,7 +277,7 @@ class DataManager:
 
         security_id = instrument.security_id
         if security_id is None:
-            security_id = self._find_security_id(symbol, instrument.exchange_segment)
+            security_id = self._find_security_id(symbol, instrument.exchange_segment, instrument.instrument_type)
             if security_id is None:
                 logger.error(f"Could not resolve security_id for {symbol}")
                 return []
@@ -448,6 +448,18 @@ class DataManager:
 
     def _build_instrument_universe(self) -> Dict[str, List[Instrument]]:
         """Build instrument universe"""
+        stock_instruments = [
+            Instrument(
+                symbol=symbol,
+                security_id=_STOCK_ID_OVERRIDES.get(symbol),
+                exchange="NSE",
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                category="nifty50_stock_options",
+                data_source="dhan_primary",
+            )
+            for symbol in NIFTY_50_STOCKS
+        ]
         return {
             "index_options": [
                 Instrument(
@@ -468,10 +480,28 @@ class DataManager:
                     category="index_options",
                     data_source="dhan_primary",
                 ),
+                Instrument(
+                    symbol="SENSEX",
+                    security_id=None,
+                    exchange="BSE",
+                    exchange_segment="BSE_FNO",
+                    instrument_type="FUTIDX",
+                    category="index_options",
+                    data_source="dhan_primary",
+                ),
             ],
             "commodity_options": [
                 Instrument(
                     symbol="GOLD",
+                    security_id=None,
+                    exchange="MCX",
+                    exchange_segment="MCX_COMM",
+                    instrument_type="FUTCOM",
+                    category="commodity_options",
+                    data_source="dhan_primary",
+                ),
+                Instrument(
+                    symbol="SILVER",
                     security_id=None,
                     exchange="MCX",
                     exchange_segment="MCX_COMM",
@@ -488,7 +518,17 @@ class DataManager:
                     category="commodity_options",
                     data_source="dhan_primary",
                 ),
-            ]
+                Instrument(
+                    symbol="NATURALGAS",
+                    security_id=None,
+                    exchange="MCX",
+                    exchange_segment="MCX_COMM",
+                    instrument_type="FUTCOM",
+                    category="commodity_options",
+                    data_source="dhan_primary",
+                ),
+            ],
+            "nifty50_stock_options": stock_instruments,
         }
 
     def _fetch_security_master_with_cache(self) -> List[Dict[str, Any]]:
@@ -545,7 +585,12 @@ class DataManager:
 
         return self._security_master_cache
 
-    def _find_security_id(self, symbol: str, exchange_segment: str) -> Optional[int]:
+    def _find_security_id(
+        self,
+        symbol: str,
+        exchange_segment: str,
+        instrument_type: str | None = None,
+    ) -> Optional[int]:
         """Find current security ID for a symbol from security master."""
         securities = self._fetch_security_master_with_cache()
         if not securities:
@@ -554,13 +599,41 @@ class DataManager:
 
         symbol_upper = symbol.upper()
         normalized_symbol = "".join(ch for ch in symbol_upper if ch.isalnum())
+        requested_instrument = (instrument_type or "").upper()
 
         def matches_exchange(exchange_id: str) -> bool:
-            if exchange_segment == "NSE_FNO":
+            if exchange_segment in {"NSE_FNO", "NSE_EQ"}:
                 return "NSE" in exchange_id
-            if exchange_segment == "MCX_COMM":
+            if exchange_segment in {"BSE_FNO", "BSE_EQ"}:
+                return "BSE" in exchange_id
+            if exchange_segment in {"MCX_COMM", "MCX_OPT"}:
                 return "MCX" in exchange_id
             return False
+
+        def instrument_match_score(security: Dict[str, Any]) -> int:
+            if not requested_instrument:
+                return 0
+
+            exchange_instrument = str(security.get("SEM_EXCH_INSTRUMENT_TYPE", "")).upper()
+            instrument_name = str(security.get("SEM_INSTRUMENT_NAME", "")).upper()
+            value = f"{exchange_instrument} {instrument_name}"
+
+            if requested_instrument == "EQUITY":
+                if not value.strip():
+                    return 0
+                if "OPT" in value or "FUT" in value:
+                    return -1
+                if any(token in value for token in ("EQUITY", "EQ", "INDEX")):
+                    return 3
+                return 1
+
+            if not value.strip():
+                return 0
+            if requested_instrument == exchange_instrument or requested_instrument == instrument_name:
+                return 3
+            if requested_instrument in value:
+                return 2
+            return -1
 
         def symbol_match_score(trading_symbol: str) -> int:
             normalized_trading_symbol = "".join(ch for ch in trading_symbol if ch.isalnum())
@@ -572,25 +645,26 @@ class DataManager:
                 return 1
             return 0
 
-        best_match: Optional[tuple[int, int]] = None
+        best_match: Optional[tuple[int, int, int]] = None
 
         for security in securities:
             trading_symbol = str(security.get("SM_SYMBOL_NAME", "")).upper()
             exchange_id = str(security.get("SEM_EXM_EXCH_ID", "")).upper()
             match_score = symbol_match_score(trading_symbol)
-            if matches_exchange(exchange_id) and match_score:
+            type_score = instrument_match_score(security)
+            if matches_exchange(exchange_id) and match_score and type_score >= 0:
                 try:
                     security_id = security.get("SEM_SMST_SECURITY_ID")
                     if security_id:
-                        candidate = (match_score, int(security_id))
-                        if best_match is None or candidate[0] > best_match[0]:
+                        candidate = (match_score, type_score, int(security_id))
+                        if best_match is None or candidate[:2] > best_match[:2]:
                             best_match = candidate
                 except (ValueError, TypeError):
                     pass
 
         if best_match is not None:
-            logger.info(f"✅ Found security_id={best_match[1]} for {symbol} on {exchange_segment}")
-            return best_match[1]
+            logger.info(f"✅ Found security_id={best_match[2]} for {symbol} on {exchange_segment}")
+            return best_match[2]
 
         logger.warning(f"Could not find security_id for {symbol} on {exchange_segment}")
         return None

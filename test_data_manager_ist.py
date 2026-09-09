@@ -116,8 +116,16 @@ class DataManagerISTTests(unittest.TestCase):
             candles = manager.fetch_dhanhq_candles("BANKNIFTY", "5min")
 
         self.assertEqual([{"close": 1.5}], candles)
-        mocked_find.assert_called_once_with("BANKNIFTY", "NSE_FNO")
+        mocked_find.assert_called_once_with("BANKNIFTY", "NSE_FNO", "FUTIDX")
         self.assertEqual(98765, mocked_fetch.call_args.kwargs["security_id"])
+
+    def test_instrument_universe_covers_all_option_categories(self):
+        manager = DataManager()
+        universe = manager.get_instruments()
+
+        self.assertEqual(3, len(universe["index_options"]))
+        self.assertEqual(4, len(universe["commodity_options"]))
+        self.assertEqual(50, len(universe["nifty50_stock_options"]))
 
 
 if __name__ == "__main__":
