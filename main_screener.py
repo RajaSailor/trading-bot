@@ -119,26 +119,59 @@ class ScreenerController:
         return self.webhook_handler.get_health()
 
     def _run_loop(self) -> None:
+        logger.info("🟢 Screener loop starting...")
+        scan_count = 0
         while not self._stop_event.is_set():
             if self._paused:
                 time.sleep(1)
                 continue
             try:
-                alerts = 0
-                alerts += self.scanner_5.run_once()
-                alerts += self.scanner_15.run_once()
-                alerts += self.scanner_30.run_once()
+                scan_count += 1
+                logger.debug("%s", "=" * 80)
+                logger.debug("[SCAN #%s] Starting scan cycle...", scan_count)
+
+                logger.debug("Running 5-minute scanner...")
+                alerts_5 = self.scanner_5.run_once()
+                logger.debug("  → 5-min alerts: %s", alerts_5)
+
+                logger.debug("Running 15-minute scanner...")
+                alerts_15 = self.scanner_15.run_once()
+                logger.debug("  → 15-min alerts: %s", alerts_15)
+
+                logger.debug("Running 30-minute scanner...")
+                alerts_30 = self.scanner_30.run_once()
+                logger.debug("  → 30-min alerts: %s", alerts_30)
+
+                alerts = alerts_5 + alerts_15 + alerts_30
                 self._stats["total_scans"] += 1
                 self._stats["total_alerts"] += alerts
                 self._stats["last_scan_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                if alerts > 0:
+                    logger.info(
+                        "🔔 [SCAN #%s] ALERTS TRIGGERED: 5min=%s, 15min=%s, 30min=%s",
+                        scan_count,
+                        alerts_5,
+                        alerts_15,
+                        alerts_30,
+                    )
+                else:
+                    logger.debug(
+                        "[SCAN #%s] No alerts this scan (Total so far: %s)",
+                        scan_count,
+                        self._stats["total_alerts"],
+                    )
                 self._maybe_log_webhook_health()
                 if self._stats["total_scans"] % 5 == 0:
+                    logger.debug("Persisting state (scan #%s)...", self._stats["total_scans"])
                     self._persist_state()
+                logger.debug("[SCAN #%s] Scan complete - sleeping 1s", scan_count)
+                logger.debug("%s", "=" * 80)
             except Exception as exc:
-                logger.exception("Screener loop error")
+                logger.error("❌ Screener loop error on scan #%s: %s", scan_count, exc, exc_info=True)
                 self._stats["errors"].append(str(exc))
                 self._stats["errors"] = self._stats["errors"][-100:]
             time.sleep(1)
+        logger.info("✅ Screener loop stopped after %s scans", scan_count)
 
     def _persist_state(self) -> None:
         payload = {

@@ -34,27 +34,45 @@ class TelegramHandler:
         self._alert_keys: set[str] = set()
 
     def send_signal_alert(self, category: str, signal_data: dict, option_data: dict) -> bool:
-        key = (
-            f"{category}:{signal_data['symbol']}:{signal_data['signal']}:"
-            f"{signal_data['reference_timestamp']}:{signal_data['breakout_timestamp']}"
-        )
-        if key in self._alert_keys:
-            return False
-
-        message = self.format_signal_message(category, signal_data, option_data)
-        sent = self._send_message(self.CHANNELS[category], message)
-        if sent:
-            self._alert_keys.add(key)
-            self._alert_history.append(
-                {
-                    "category": category,
-                    "signal": signal_data,
-                    "option_data": option_data,
-                    "sent_at": datetime.utcnow().isoformat(),
-                }
+        try:
+            logger.debug(
+                "📤 Attempting to send %s alert for %s",
+                category,
+                signal_data.get("symbol", "UNKNOWN"),
             )
-            self._alert_history = self._alert_history[-200:]
-        return sent
+            key = (
+                f"{category}:{signal_data['symbol']}:{signal_data['signal']}:"
+                f"{signal_data['reference_timestamp']}:{signal_data['breakout_timestamp']}"
+            )
+            if key in self._alert_keys:
+                logger.debug("⚠️ Duplicate alert suppressed: %s", key)
+                return False
+
+            if category not in self.CHANNELS:
+                logger.error("❌ Unknown Telegram category: %s", category)
+                return False
+
+            message = self.format_signal_message(category, signal_data, option_data)
+            logger.debug("📨 Sending message to '%s' (chat_id=%s)", category, self.CHANNELS[category])
+            sent = self._send_message(self.CHANNELS[category], message)
+            if sent:
+                self._alert_keys.add(key)
+                self._alert_history.append(
+                    {
+                        "category": category,
+                        "signal": signal_data,
+                        "option_data": option_data,
+                        "sent_at": datetime.utcnow().isoformat(),
+                    }
+                )
+                self._alert_history = self._alert_history[-200:]
+                logger.info("✅ Alert queued/sent for '%s': %s", category, signal_data.get("symbol"))
+            else:
+                logger.warning("⚠️ Failed to deliver alert for '%s': %s", category, signal_data.get("symbol"))
+            return sent
+        except Exception as e:
+            logger.error("❌ Failed to queue/send alert: %s", e, exc_info=True)
+            return False
 
     def send_confirmation_request(self, user_chat_id: int, signal_details: dict) -> bool:
         message = (
