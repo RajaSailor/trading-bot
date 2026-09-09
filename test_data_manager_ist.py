@@ -30,22 +30,39 @@ class DataManagerISTTests(unittest.TestCase):
 
     def test_fetch_security_master_uses_cached_response(self):
         manager = DataManager()
-        response = Mock(status_code=200)
-        response.json.return_value = [
+        response_nse = Mock(status_code=200)
+        response_nse.json.return_value = [
             {"trading_symbol": "NIFTY", "segment": "NSE_FNO", "security_id": "12345"}
+        ]
+        response_mcx = Mock(status_code=200)
+        response_mcx.json.return_value = [
+            {"trading_symbol": "GOLD", "segment": "MCX_COMM", "security_id": "67890"}
         ]
 
         with (
             patch.dict("os.environ", {"ACCESS_TOKEN": "token"}, clear=False),
-            patch("data_manager.requests.get", return_value=response) as mocked_get,
+            patch("data_manager.requests.get", side_effect=[response_nse, response_mcx]) as mocked_get,
         ):
             first = manager._fetch_security_master_with_cache()
             second = manager._fetch_security_master_with_cache()
 
         self.assertEqual(first, second)
-        self.assertEqual(1, mocked_get.call_count)
-        self.assertEqual("https://api.dhan.co/scrip-master", mocked_get.call_args.args[0])
-        self.assertEqual("application/json", mocked_get.call_args.kwargs["headers"]["accept"])
+        self.assertEqual(2, mocked_get.call_count)
+        self.assertEqual(
+            "https://api.dhan.co/v2/instrument/NSE_FNO",
+            mocked_get.call_args_list[0].args[0],
+        )
+        self.assertEqual(
+            "https://api.dhan.co/v2/instrument/MCX_COMM",
+            mocked_get.call_args_list[1].args[0],
+        )
+        self.assertEqual(
+            "application/json",
+            mocked_get.call_args_list[0].kwargs["headers"]["Content-Type"],
+        )
+        self.assertFalse(mocked_get.call_args_list[0].kwargs["allow_redirects"])
+        self.assertFalse(mocked_get.call_args_list[1].kwargs["allow_redirects"])
+        self.assertEqual(2, len(first))
 
     def test_find_security_id_matches_symbol_and_segment(self):
         manager = DataManager()

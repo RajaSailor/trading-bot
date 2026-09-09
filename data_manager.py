@@ -492,28 +492,73 @@ class DataManager:
             self._security_master_cache
             and now - self._security_master_cache_ts <= self._security_master_cache_ttl_seconds
         ):
+            logger.debug(f"Using cached security master ({len(self._security_master_cache)} securities)")
             return self._security_master_cache
 
         try:
             access_token = os.getenv("ACCESS_TOKEN")
+            if not access_token:
+                logger.error("ACCESS_TOKEN not found for security master fetch")
+                return self._security_master_cache
+
             headers = {
                 "access-token": access_token,
-                "accept": "application/json",
+                "Content-Type": "application/json",
             }
-            response = requests.get(
-                "https://api.dhan.co/scrip-master",
-                headers=headers,
-                timeout=15,
-            )
-            if response.status_code == 200:
-                securities = response.json()
-                if isinstance(securities, list):
-                    self._security_master_cache = securities
-                    self._security_master_cache_ts = now
-                    logger.debug(f"Loaded {len(securities)} securities from security master")
-                    return securities
+            securities: List[Dict[str, Any]] = []
+
+            logger.debug("Fetching NSE_FNO securities from /v2/instrument/NSE_FNO")
+            try:
+                response_nse = requests.get(
+                    "https://api.dhan.co/v2/instrument/NSE_FNO",
+                    headers=headers,
+                    timeout=15,
+                    allow_redirects=False,
+                )
+                logger.debug(f"NSE_FNO endpoint response: {response_nse.status_code}")
+                if response_nse.status_code == 200:
+                    nse_securities = response_nse.json()
+                    if isinstance(nse_securities, list):
+                        securities.extend(nse_securities)
+                        logger.debug(f"Loaded {len(nse_securities)} NSE_FNO securities")
+                    else:
+                        logger.warning(f"NSE_FNO response is not a list: {type(nse_securities)}")
+                else:
+                    logger.warning(f"NSE_FNO endpoint returned {response_nse.status_code}")
+            except Exception as exc:
+                logger.warning(f"Failed to fetch NSE_FNO securities: {exc}")
+
+            logger.debug("Fetching MCX_COMM securities from /v2/instrument/MCX_COMM")
+            try:
+                response_mcx = requests.get(
+                    "https://api.dhan.co/v2/instrument/MCX_COMM",
+                    headers=headers,
+                    timeout=15,
+                    allow_redirects=False,
+                )
+                logger.debug(f"MCX_COMM endpoint response: {response_mcx.status_code}")
+                if response_mcx.status_code == 200:
+                    mcx_securities = response_mcx.json()
+                    if isinstance(mcx_securities, list):
+                        securities.extend(mcx_securities)
+                        logger.debug(f"Loaded {len(mcx_securities)} MCX_COMM securities")
+                    else:
+                        logger.warning(f"MCX_COMM response is not a list: {type(mcx_securities)}")
+                else:
+                    logger.warning(f"MCX_COMM endpoint returned {response_mcx.status_code}")
+            except Exception as exc:
+                logger.warning(f"Failed to fetch MCX_COMM securities: {exc}")
+
+            if securities:
+                self._security_master_cache = securities
+                self._security_master_cache_ts = now
+                logger.info(f"✅ Loaded {len(securities)} total securities from Dhan master")
+                return securities
+
+            logger.error("No securities loaded from either endpoint")
+            return self._security_master_cache
         except Exception as exc:
-            logger.warning(f"Failed to fetch security master: {exc}")
+            logger.error(f"Failed to fetch security master: {exc}", exc_info=True)
 
         return self._security_master_cache
 
