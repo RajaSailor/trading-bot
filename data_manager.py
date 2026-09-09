@@ -277,12 +277,12 @@ class DataManager:
             _apply_rate_limit()
             
             candles = self._fetch_dhan_historical_data(
-                security_id=str(instrument.security_id),
+                security_id=instrument.security_id,
                 exchange_segment=instrument.exchange_segment,
-                instrument=instrument.instrument_type,
+                instrument_type=instrument.instrument_type,
                 from_date=today,
                 to_date=today,
-                expiry_code=-1,
+                interval=interval_value,
             )
             
             if candles:
@@ -314,28 +314,29 @@ class DataManager:
 
     def _fetch_dhan_historical_data(
         self,
-        security_id: str,
+        security_id: int,
         exchange_segment: str,
-        instrument: str,
+        instrument_type: str,
         from_date: str,
         to_date: str,
-        expiry_code: int = -1,
+        interval: int = 5,
     ) -> List[dict]:
-        """Fetch historical data from DhanHQ API"""
+        """Fetch historical data from DhanHQ API v2"""
         try:
             access_token = os.getenv("ACCESS_TOKEN")
             if not access_token:
                 logger.error("ACCESS_TOKEN not found")
                 return []
             
+            # Correct payload format per DhanHQ API v2 docs
             payload = {
-                "securityId": security_id,
+                "securityId": security_id,          # INTEGER, not string
                 "exchangeSegment": exchange_segment,
-                "instrument": instrument,
+                "instrumentType": instrument_type,  # Changed from "instrument"
                 "fromDate": from_date,
                 "toDate": to_date,
-                "expiryCode": expiry_code,
-                "oi": False,
+                "interval": interval,               # INTEGER
+                "oi": False
             }
             
             url = "https://api.dhan.co/v2/charts/historical"
@@ -344,14 +345,16 @@ class DataManager:
                 "Content-Type": "application/json",
             }
             
+            logger.debug(f"DhanHQ API request: {payload}")
             response = requests.post(url, json=payload, headers=headers, timeout=10)
             
             if response.status_code != 200:
-                logger.error(f"DhanHQ API error: {response.status_code}")
+                logger.error(f"DhanHQ API error: {response.status_code} - {response.text}")
                 return []
             
             data = response.json()
             if not data or "open" not in data:
+                logger.warning(f"Empty response from DhanHQ API")
                 return []
             
             candles = []
@@ -366,9 +369,11 @@ class DataManager:
                         "timestamp": data["timestamp"][i],
                     }
                     candles.append(candle)
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error parsing candle {i}: {e}")
                     continue
             
+            logger.info(f"✅ Fetched {len(candles)} candles from DhanHQ")
             return candles
         
         except Exception as e:
@@ -393,7 +398,7 @@ class DataManager:
                     security_id=25,
                     exchange="NSE_FNO",
                     exchange_segment="NSE_FNO",
-                    instrument_type="OPTIDX",
+                    instrument_type="FUTIDX",
                     category="index_options",
                     data_source="dhan_primary",
                 ),
