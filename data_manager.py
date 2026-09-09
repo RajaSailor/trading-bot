@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 logger = logging.getLogger(__name__)
@@ -248,6 +248,9 @@ class DataManager:
         self._tv = None
         self._tv_interval = None
         self._dhan_client = None
+        self._security_list_cache: List[Dict[str, Any]] = []
+        self._security_list_cache_ts: float = 0.0
+        self._security_list_cache_ttl_seconds: int = 300
         self._instrument_universe = self._build_instrument_universe()
 
     def get_instruments(self) -> Dict[str, List[Instrument]]:
@@ -324,15 +327,19 @@ class DataManager:
         interval: int = 5,
         symbol: str = "UNKNOWN"
     ) -> List[dict]:
-        """Fetch intraday data from DhanHQ API v2 /charts/intraday endpoint"""
+        """Fetch intraday candles via DhanHQ historical endpoint."""
         try:
             access_token = os.getenv("ACCESS_TOKEN")
             if not access_token:
                 logger.error("ACCESS_TOKEN not found")
                 return []
             
-            # Correct payload for DhanHQ API v2 /charts/intraday endpoint
-            # Per DhanHQ documentation: https://dhanhq.co/docs/v2/
+            expiry_code = self._resolve_expiry_code(
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                symbol=symbol,
+            )
+
             payload = {
                 "securityId": str(security_id),          # ✅ STRING (critical!)
                 "exchangeSegment": exchange_segment,     # ✅ e.g., "NSE_FNO"
@@ -340,7 +347,7 @@ class DataManager:
                 "interval": interval,                    # ✅ INTEGER (5, 15, 30, 60, etc.)
                 "fromDate": from_date,                   # ✅ "YYYY-MM-DD"
                 "toDate": to_date,                       # ✅ "YYYY-MM-DD"
-                "expiryCode": 0,                         # Current active derivative contract
+                "expiryCode": expiry_code,
                 "oi": False                              # Optional: open interest
             }
             
@@ -350,7 +357,7 @@ class DataManager:
                 "Content-Type": "application/json",
             }
             
-            logger.debug(f"[{symbol}] DhanHQ API request to /charts/intraday:")
+            logger.debug(f"[{symbol}] DhanHQ API request to /charts/historical:")
             logger.debug(f"[{symbol}] Payload: {json.dumps(payload, indent=2)}")
             
             response = requests.post(url, json=payload, headers=headers, timeout=10)
@@ -430,6 +437,76 @@ class DataManager:
         except Exception as e:
             logger.error(f"[{symbol}] Error fetching intraday data: {e}", exc_info=True)
             return []
+
+    def _resolve_expiry_code(self, security_id: int, exchange_segment: str, symbol: str) -> int:
+        """Resolve expiryCode required by /charts/historical based on exchange segment."""
+        if exchange_segment != "NSE_FNO":
+            return -2147483648
+
+        security_list = self._fetch_security_list_with_cache()
+        target_security_id = str(security_id)
+
+        for security in security_list:
+            security_value = security.get("securityId", security.get("SEM_SMST_SECURITY_ID"))
+            if str(security_value) != target_security_id:
+                continue
+
+            expiry_value = security.get("expiryCode", security.get("SEM_EXPIRY_CODE"))
+            if expiry_value in (None, ""):
+                continue
+
+            try:
+                expiry_code = int(expiry_value)
+                logger.debug(
+                    f"[{symbol}] Using dynamic expiryCode={expiry_code} from security list for NSE_FNO"
+                )
+                return expiry_code
+            except (TypeError, ValueError):
+                logger.debug(f"[{symbol}] Invalid expiry value in security list: {expiry_value}")
+                break
+
+        logger.warning(
+            f"[{symbol}] Unable to resolve dynamic expiryCode for security_id={security_id}; using fallback expiryCode=0"
+        )
+        return 0
+
+    def _fetch_security_list_with_cache(self) -> List[Dict[str, Any]]:
+        """Fetch and cache Dhan security list for expiry code lookup."""
+        now = time.time()
+        if self._security_list_cache and now - self._security_list_cache_ts <= self._security_list_cache_ttl_seconds:
+            return self._security_list_cache
+
+        try:
+            from dhanhq import DhanContext, dhanhq
+
+            api_key = os.getenv("API_KEY")
+            access_token = os.getenv("ACCESS_TOKEN")
+            if not api_key or not access_token:
+                raise ValueError("API_KEY/ACCESS_TOKEN missing for security list fetch")
+
+            dhan_client = dhanhq(DhanContext(api_key, access_token))
+
+            if hasattr(dhan_client, "fetch_security_list"):
+                security_list = dhan_client.fetch_security_list("compact")
+            else:
+                security_list = dhan_client.security.fetch_security_list("compact")
+
+            if hasattr(security_list, "to_dict"):
+                security_records = security_list.to_dict("records")
+            elif isinstance(security_list, list):
+                security_records = security_list
+            else:
+                security_records = []
+
+            if security_records:
+                self._security_list_cache = security_records
+                self._security_list_cache_ts = now
+                logger.debug(f"Loaded {len(security_records)} securities for expiry lookup")
+                return security_records
+        except Exception as exc:
+            logger.warning(f"Failed to fetch Dhan security list for expiry lookup: {exc}")
+
+        return self._security_list_cache
 
     def _build_instrument_universe(self) -> Dict[str, List[Instrument]]:
         """Build instrument universe"""

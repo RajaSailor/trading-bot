@@ -261,6 +261,7 @@ class WebhookIntegrationTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {"ACCESS_TOKEN": "token"}, clear=False),
             patch("data_manager.requests.post", return_value=response) as mocked_post,
+            patch.object(data_manager, "_fetch_security_list_with_cache", return_value=[{"securityId": "13", "expiryCode": 2}]),
         ):
             candles = data_manager._fetch_dhan_intraday_data(
                 security_id=13,
@@ -275,7 +276,46 @@ class WebhookIntegrationTests(unittest.TestCase):
         self.assertEqual(1, len(candles))
         self.assertEqual(1.5, candles[0]["close"])
         self.assertEqual("https://api.dhan.co/v2/charts/historical", mocked_post.call_args.args[0])
-        self.assertEqual(0, mocked_post.call_args.kwargs["json"]["expiryCode"])
+        self.assertEqual(2, mocked_post.call_args.kwargs["json"]["expiryCode"])
+
+    def test_data_manager_uses_mcx_expiry_sentinel_for_historical_requests(self):
+        data_manager = DataManager()
+        response = Mock(status_code=200, headers={}, text='{"open":[1],"high":[2],"low":[0.5],"close":[1.5],"volume":[10],"timestamp":["2026-09-04T10:40:00"]}')
+        response.json.return_value = {
+            "open": [1],
+            "high": [2],
+            "low": [0.5],
+            "close": [1.5],
+            "volume": [10],
+            "timestamp": ["2026-09-04T10:40:00"],
+        }
+
+        with (
+            patch.dict("os.environ", {"ACCESS_TOKEN": "token"}, clear=False),
+            patch("data_manager.requests.post", return_value=response) as mocked_post,
+        ):
+            data_manager._fetch_dhan_intraday_data(
+                security_id=565899,
+                exchange_segment="MCX_COMM",
+                instrument_type="FUTCOM",
+                from_date="2026-09-04",
+                to_date="2026-09-04",
+                interval=5,
+                symbol="CRUDE OIL",
+            )
+
+        self.assertEqual(-2147483648, mocked_post.call_args.kwargs["json"]["expiryCode"])
+
+    def test_data_manager_reuses_cached_security_list_within_ttl(self):
+        data_manager = DataManager()
+        data_manager._security_list_cache = [{"securityId": "13", "expiryCode": 1}]
+        data_manager._security_list_cache_ts = 100.0
+        data_manager._security_list_cache_ttl_seconds = 300
+
+        with patch("data_manager.time.time", return_value=200.0):
+            cached = data_manager._fetch_security_list_with_cache()
+
+        self.assertEqual([{"securityId": "13", "expiryCode": 1}], cached)
 
     def test_telegram_format_includes_tradingview_source_banner(self):
         handler = TelegramHandler()
