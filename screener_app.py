@@ -226,7 +226,6 @@ def webhook_test():
     response_payload, status_code = _sanitize_webhook_response(result)
     return jsonify(response_payload), status_code
 
-
 @app.route('/health/webhook', methods=['GET'])
 def webhook_health():
     return jsonify(screener_controller.get_webhook_health()), 200
