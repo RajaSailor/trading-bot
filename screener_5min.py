@@ -18,9 +18,9 @@ class FiveMinuteScreener:
         self.position_manager = position_manager
         self.engine = StrategyEngine(lookback=7)
         universe = self.data_manager.get_instruments()
-        self.index_option_instruments = universe["index_options"]
-        self.stock_option_instruments = universe["nifty50_stock_options"]
-        self.crypto_instruments = universe["crypto"]
+        self.index_option_instruments = universe.get("index_options", [])
+        self.stock_option_instruments = universe.get("nifty50_stock_options", [])
+        self.crypto_instruments = universe.get("crypto", [])
         self.last_run = {"options": 0.0, "crypto": 0.0}
 
     def run_once(self, now: datetime | None = None) -> int:
