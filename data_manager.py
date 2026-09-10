@@ -636,6 +636,8 @@ class DataManager:
             if requested_instrument == "FUTIDX":
                 if not value.strip():
                     return 0
+                if requested_instrument == exchange_instrument or requested_instrument == instrument_name:
+                    return 3
                 if "OPT" in value:
                     return -1
                 if "FUTIDX" in value or "FUTURE INDEX" in value:
