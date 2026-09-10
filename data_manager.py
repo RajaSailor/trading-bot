@@ -659,7 +659,7 @@ class DataManager:
             if normalized_trading_symbol in normalized_symbols:
                 return 3
             if any(
-                normalized_trading_symbol.startswith(candidate) or candidate.startswith(normalized_trading_symbol)
+                normalized_trading_symbol.startswith(candidate)
                 for candidate in normalized_symbols
                 if candidate
             ):
