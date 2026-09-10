@@ -642,7 +642,7 @@ class DataManager:
                     return 3
                 if "FUT" in value:
                     return 2
-                return 1
+                return 0
 
             if not value.strip():
                 return 0
