@@ -118,7 +118,12 @@ class DataManagerISTTests(unittest.TestCase):
                 "SEM_SMST_SECURITY_ID": "1002",
                 "SEM_EXCH_INSTRUMENT_TYPE": "FUTIDX",
             },
-            {"SM_SYMBOL_NAME": "BSE SENSEX", "SEM_EXM_EXCH_ID": "BSE", "SEM_SMST_SECURITY_ID": "1003"},
+            {
+                "SM_SYMBOL_NAME": "BSE SENSEX",
+                "SEM_EXM_EXCH_ID": "BSE",
+                "SEM_SMST_SECURITY_ID": "1003",
+                "SEM_EXCH_INSTRUMENT_TYPE": "FUTIDX",
+            },
         ]
         manager._security_master_cache_ts = datetime.now().timestamp()
 
