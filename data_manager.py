@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import requests
+from nse_symbol_mapping import NSESymbolMapper
 
 try:
     from dhanhq import DhanContext, dhanhq
@@ -598,7 +599,12 @@ class DataManager:
             return None
 
         symbol_upper = symbol.upper()
-        normalized_symbol = "".join(ch for ch in symbol_upper if ch.isalnum())
+        symbol_aliases = NSESymbolMapper.get_possible_dhan_names(symbol_upper)
+        normalized_symbols = {
+            "".join(ch for ch in _normalize_stock_symbol(alias.upper()) if ch.isalnum())
+            for alias in symbol_aliases
+        }
+        normalized_symbols.add("".join(ch for ch in symbol_upper if ch.isalnum()))
         requested_instrument = (instrument_type or "").upper()
 
         def matches_exchange(exchange_id: str) -> bool:
@@ -627,6 +633,17 @@ class DataManager:
                     return 3
                 return 1
 
+            if requested_instrument == "FUTIDX":
+                if not value.strip():
+                    return 0
+                if "OPT" in value:
+                    return -1
+                if any(token in value for token in ("FUTIDX", "INDEX", "FUTURE INDEX")):
+                    return 3
+                if "FUT" in value:
+                    return 2
+                return 1
+
             if not value.strip():
                 return 0
             if requested_instrument == exchange_instrument or requested_instrument == instrument_name:
@@ -637,11 +654,15 @@ class DataManager:
 
         def symbol_match_score(trading_symbol: str) -> int:
             normalized_trading_symbol = "".join(ch for ch in trading_symbol if ch.isalnum())
-            if normalized_trading_symbol == normalized_symbol:
+            if normalized_trading_symbol in normalized_symbols:
                 return 3
-            if normalized_trading_symbol.startswith(normalized_symbol):
+            if any(
+                normalized_trading_symbol.startswith(candidate) or candidate.startswith(normalized_trading_symbol)
+                for candidate in normalized_symbols
+                if candidate
+            ):
                 return 2
-            if normalized_symbol in normalized_trading_symbol:
+            if any(candidate and candidate in normalized_trading_symbol for candidate in normalized_symbols):
                 return 1
             return 0
 

@@ -97,6 +97,19 @@ class DataManagerISTTests(unittest.TestCase):
         self.assertEqual(222, commodity_security_id)
         self.assertEqual(333, crude_oil_security_id)
 
+    def test_find_security_id_uses_index_aliases(self):
+        manager = DataManager()
+        manager._security_master_cache = [
+            {"SM_SYMBOL_NAME": "NIFTY 50", "SEM_EXM_EXCH_ID": "NSE", "SEM_SMST_SECURITY_ID": "1001"},
+            {"SM_SYMBOL_NAME": "NIFTYBANK", "SEM_EXM_EXCH_ID": "NSE", "SEM_SMST_SECURITY_ID": "1002"},
+            {"SM_SYMBOL_NAME": "BSE SENSEX", "SEM_EXM_EXCH_ID": "BSE", "SEM_SMST_SECURITY_ID": "1003"},
+        ]
+        manager._security_master_cache_ts = datetime.now().timestamp()
+
+        self.assertEqual(1001, manager._find_security_id("NIFTY", "NSE_FNO", "FUTIDX"))
+        self.assertEqual(1002, manager._find_security_id("BANKNIFTY", "NSE_FNO", "FUTIDX"))
+        self.assertEqual(1003, manager._find_security_id("SENSEX", "BSE_FNO", "FUTIDX"))
+
     def test_fetch_dhanhq_candles_resolves_dynamic_security_id(self):
         manager = DataManager()
 
