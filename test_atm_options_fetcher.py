@@ -48,6 +48,38 @@ class ATMOptionsFetcherTests(unittest.TestCase):
         self.assertEqual("GOLD-26SEP-72000-CE", contract["option_symbol"])
         self.assertEqual("OPTFUT", contract["instrument_type"])
 
+    def test_resolves_nifty_contract_with_security_master_alias_name(self):
+        manager = DataManager()
+        manager._security_master_cache = [
+            {
+                "SM_SYMBOL_NAME": "NIFTY 50",
+                "SEM_EXM_EXCH_ID": "NSE",
+                "SEM_SMST_SECURITY_ID": "200",
+                "SEM_STRIKE_PRICE": "24500",
+                "SEM_OPTION_TYPE": "CE",
+                "SEM_EXCH_INSTRUMENT_TYPE": "OPTIDX",
+                "SEM_TRADING_SYMBOL": "NIFTY-18SEP-24500-CE",
+                "SEM_EXPIRY_DATE": "2026-09-18 00:00:00",
+            }
+        ]
+        manager._security_master_cache_ts = 1
+        fetcher = ATMOptionsFetcher(manager)
+        instrument = Instrument(
+            symbol="NIFTY",
+            security_id=None,
+            exchange="NSE_FNO",
+            exchange_segment="NSE_FNO",
+            instrument_type="FUTIDX",
+            category="index_options",
+            data_source="dhan_primary",
+        )
+
+        contract = fetcher._resolve_option_contract(instrument, 24500, "CE")
+
+        self.assertIsNotNone(contract)
+        self.assertEqual(200, contract["security_id"])
+        self.assertEqual("NIFTY-18SEP-24500-CE", contract["option_symbol"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 from atm_calculator import calculate_atm_strikes
 from data_manager import DataManager, Instrument, IST, _apply_rate_limit, _normalize_stock_symbol
+from nse_symbol_mapping import NSESymbolMapper
 
 
 logger = logging.getLogger(__name__)
@@ -67,13 +68,18 @@ class ATMOptionsFetcher:
             return None
 
         option_side = option_type.upper()
+        candidate_symbols = {
+            self._normalized_symbol(name)
+            for name in NSESymbolMapper.get_possible_dhan_names(instrument.symbol)
+        }
         target_symbol = self._normalized_symbol(instrument.symbol)
+        candidate_symbols.add(target_symbol)
         preferred_expiry = None
         best_match = None
 
         for security in securities:
             security_symbol = self._normalized_symbol(str(security.get("SM_SYMBOL_NAME", "")))
-            if security_symbol != target_symbol:
+            if security_symbol not in candidate_symbols:
                 continue
 
             exchange_id = str(security.get("SEM_EXM_EXCH_ID", "")).upper()
@@ -160,6 +166,4 @@ class ATMOptionsFetcher:
     @staticmethod
     def _normalized_symbol(symbol: str) -> str:
         normalized = _normalize_stock_symbol(symbol.upper())
-        if normalized == "NIFTY":
-            normalized = "NIFTY 50"
         return "".join(ch for ch in normalized if ch.isalnum())
