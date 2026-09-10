@@ -8,6 +8,7 @@ class NSESymbolMapperTests(unittest.TestCase):
         self.assertEqual("NSE_FNO", NSESymbolMapper.get_exchange("NIFTY"))
         self.assertIn("NIFTY 50", NSESymbolMapper.get_possible_dhan_names("NIFTY"))
         self.assertEqual("BSE_FNO", NSESymbolMapper.get_exchange("SENSEX"))
+        self.assertIsNone(NSESymbolMapper.get_exchange("UNKNOWN"))
 
 
 if __name__ == "__main__":

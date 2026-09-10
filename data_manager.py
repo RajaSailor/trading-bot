@@ -638,9 +638,9 @@ class DataManager:
                     return 0
                 if "OPT" in value:
                     return -1
-                if any(token in value for token in ("FUTIDX", "INDEX", "FUTURE INDEX")):
+                if "FUTIDX" in value or "FUTURE INDEX" in value:
                     return 3
-                if "FUT" in value:
+                if "FUT" in value and ("IDX" in value or "INDEX" in value):
                     return 2
                 return 0
 

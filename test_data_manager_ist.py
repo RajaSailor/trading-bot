@@ -100,8 +100,24 @@ class DataManagerISTTests(unittest.TestCase):
     def test_find_security_id_uses_index_aliases(self):
         manager = DataManager()
         manager._security_master_cache = [
-            {"SM_SYMBOL_NAME": "NIFTY 50", "SEM_EXM_EXCH_ID": "NSE", "SEM_SMST_SECURITY_ID": "1001"},
-            {"SM_SYMBOL_NAME": "NIFTYBANK", "SEM_EXM_EXCH_ID": "NSE", "SEM_SMST_SECURITY_ID": "1002"},
+            {
+                "SM_SYMBOL_NAME": "NIFTY 50",
+                "SEM_EXM_EXCH_ID": "NSE",
+                "SEM_SMST_SECURITY_ID": "1001",
+                "SEM_EXCH_INSTRUMENT_TYPE": "FUTIDX",
+            },
+            {
+                "SM_SYMBOL_NAME": "NIFTYBANK",
+                "SEM_EXM_EXCH_ID": "NSE",
+                "SEM_SMST_SECURITY_ID": "1999",
+                "SEM_EXCH_INSTRUMENT_TYPE": "OPTIDX",
+            },
+            {
+                "SM_SYMBOL_NAME": "NIFTYBANK",
+                "SEM_EXM_EXCH_ID": "NSE",
+                "SEM_SMST_SECURITY_ID": "1002",
+                "SEM_EXCH_INSTRUMENT_TYPE": "FUTIDX",
+            },
             {"SM_SYMBOL_NAME": "BSE SENSEX", "SEM_EXM_EXCH_ID": "BSE", "SEM_SMST_SECURITY_ID": "1003"},
         ]
         manager._security_master_cache_ts = datetime.now().timestamp()

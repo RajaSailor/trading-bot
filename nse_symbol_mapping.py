@@ -39,8 +39,8 @@ class NSESymbolMapper:
         return [symbol.upper()]
 
     @staticmethod
-    def get_exchange(symbol: str) -> str:
+    def get_exchange(symbol: str) -> str | None:
         details = NSESymbolMapper.get_nse_index_details(symbol)
         if details:
             return str(details["exchange"])
-        return "NSE_FNO"
+        return None
