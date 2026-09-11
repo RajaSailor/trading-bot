@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -78,8 +79,7 @@ class ATMOptionsFetcher:
         best_match = None
 
         for security in securities:
-            security_symbol = self._normalized_symbol(str(security.get("SM_SYMBOL_NAME", "")))
-            if security_symbol not in candidate_symbols:
+            if not self._matches_option_symbol(instrument, security, candidate_symbols):
                 continue
 
             exchange_id = str(security.get("SEM_EXM_EXCH_ID", "")).upper()
@@ -121,6 +121,41 @@ class ATMOptionsFetcher:
                 best_match = candidate
 
         return best_match
+
+    @classmethod
+    def _matches_option_symbol(
+        cls,
+        instrument: Instrument,
+        security: dict,
+        candidate_symbols: set[str],
+    ) -> bool:
+        if instrument.category != "commodity_options":
+            security_symbol = cls._normalized_symbol(str(security.get("SM_SYMBOL_NAME", "")))
+            return security_symbol in candidate_symbols
+
+        for symbol_value in cls._security_symbol_values(security):
+            normalized_symbol = cls._normalized_symbol(symbol_value)
+            if normalized_symbol in candidate_symbols:
+                return True
+
+            commodity_root = cls._commodity_symbol_root(normalized_symbol)
+            if commodity_root and commodity_root in candidate_symbols:
+                return True
+
+        return False
+
+    @staticmethod
+    def _security_symbol_values(security: dict) -> tuple[str, ...]:
+        return (
+            str(security.get("SM_SYMBOL_NAME", "")),
+            str(security.get("SEM_TRADING_SYMBOL", "")),
+            str(security.get("SEM_CUSTOM_SYMBOL", "")),
+        )
+
+    @staticmethod
+    def _commodity_symbol_root(symbol: str) -> str:
+        match = re.match(r"[A-Z]+", symbol)
+        return match.group(0) if match else ""
 
     @staticmethod
     def _option_exchange_segment(instrument: Instrument) -> str:
