@@ -195,11 +195,8 @@ class MainScreener:
         self.telegram = telegram_handler
         self.screener = screener
         self.webhook_handler = WebhookHandler(self.telegram, self.screener)
-
-        import webhook_handler as wh
-
-        wh.webhook_handler_instance = self.webhook_handler
         self.app = webhook_app
+        self.app.config["WEBHOOK_HANDLER_INSTANCE"] = self.webhook_handler
         logger.info("✅ Main Screener with Webhook initialized")
 
     def run_webhook_server(self):

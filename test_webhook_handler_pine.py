@@ -53,11 +53,13 @@ class PineWebhookHandlerTests(unittest.TestCase):
         app = webhook_app
         app.testing = True
         client = app.test_client()
-        wh.webhook_handler_instance = WebhookHandler(FakeTelegram())
+        app.config["WEBHOOK_HANDLER_INSTANCE"] = WebhookHandler(FakeTelegram())
+        wh.webhook_handler_instance = None
         try:
             webhook_response = client.post("/webhook/tradingview", json=sample_pine_payload())
             health_response = client.get("/health")
         finally:
+            app.config.pop("WEBHOOK_HANDLER_INSTANCE", None)
             wh.webhook_handler_instance = None
 
         self.assertEqual(200, webhook_response.status_code)
@@ -69,6 +71,7 @@ class PineWebhookHandlerTests(unittest.TestCase):
         app = webhook_app
         app.testing = True
         client = app.test_client()
+        app.config.pop("WEBHOOK_HANDLER_INSTANCE", None)
         wh.webhook_handler_instance = None
 
         response = client.post("/webhook/tradingview", json=sample_pine_payload())
@@ -80,11 +83,22 @@ class PineWebhookHandlerTests(unittest.TestCase):
         app = webhook_app
         app.testing = True
         client = app.test_client()
+        app.config.pop("WEBHOOK_HANDLER_INSTANCE", None)
 
         response = client.post("/webhook/tradingview", data="not-json", content_type="text/plain")
 
         self.assertEqual(400, response.status_code)
         self.assertEqual("Invalid JSON payload", response.get_json()["message"])
+
+    def test_handle_tradingview_webhook_rejects_unsupported_symbol(self):
+        telegram = FakeTelegram()
+        handler = WebhookHandler(telegram)
+
+        result = handler.handle_tradingview_webhook(sample_pine_payload(symbol="BTC-USD-PERP"))
+
+        self.assertEqual("error", result["status"])
+        self.assertEqual("Unsupported symbol", result["message"])
+        self.assertEqual([], telegram.calls)
 
 
 if __name__ == "__main__":

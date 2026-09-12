@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
-from flask import Flask, request
+from flask import Flask, current_app, request
 
 from atm_calculator import calculate_option_details
 from webhook_store import webhook_store
@@ -78,6 +78,8 @@ class WebhookHandler:
             symbol_name = symbol.split(":")[-1] if ":" in str(symbol) else str(symbol)
             alert = self._format_alert(symbol_name, str(signal).upper(), float(entry), float(sl), float(t1), float(t2), float(t3))
             channel = self._get_channel(symbol_name)
+            if channel is None:
+                return {"status": "error", "message": "Unsupported symbol"}
 
             sent = self.telegram.send_to_channel(channel, alert)
             if not sent:
@@ -110,7 +112,7 @@ class WebhookHandler:
         except Exception:
             return f"🚀 {symbol} {signal} ALERT"
 
-    def _get_channel(self, symbol: str) -> str:
+    def _get_channel(self, symbol: str) -> Optional[str]:
         symbol_upper = symbol.upper()
         if symbol_upper in {"GOLD1!", "SILVER1!", "CRUDE1!", "NGAS1!", "GOLD", "SILVER", "CRUDE", "GAS", "NATURALGAS"}:
             return "commodity_options"
@@ -118,7 +120,9 @@ class WebhookHandler:
             return "index_options"
         if symbol_upper in {"BTCUSDT", "ETHUSDT", "BTC/USD", "ETH/USD", "BTC", "ETH"}:
             return "crypto"
-        return "nifty50_options"
+        if symbol_upper.isalpha():
+            return "nifty50_options"
+        return None
 
     @staticmethod
     def _get_time() -> str:
@@ -437,10 +441,20 @@ def webhook_tradingview():
         data = request.get_json(silent=True)
         if data is None:
             return {"status": "error", "message": "Invalid JSON payload"}, 400
-        if webhook_handler_instance is None:
+        handler = current_app.config.get("WEBHOOK_HANDLER_INSTANCE", webhook_handler_instance)
+        if handler is None:
             return {"status": "error", "message": "Handler not initialized"}, 500
-        result = webhook_handler_instance.handle_tradingview_webhook(data)
-        return result, 200 if result.get("status") == "success" else 400
+        result = handler.handle_tradingview_webhook(data)
+        if result.get("status") == "success":
+            return result, 200
+        message = str(result.get("message", "")).lower()
+        if message in {"missing required fields", "invalid json payload", "unsupported symbol"}:
+            status = 400
+        elif message == "failed to send alert":
+            status = 502
+        else:
+            status = 500
+        return result, status
     except Exception as e:
         logger.error("❌ Webhook endpoint error: %s", e, exc_info=True)
         return {"status": "error", "message": "internal webhook processing error"}, 500
