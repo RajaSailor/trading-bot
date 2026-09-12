@@ -9,8 +9,6 @@ import threading
 import time
 from typing import Dict, List, Tuple
 
-import websockets
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +29,10 @@ class TradingViewFetcher:
     def __init__(self, cache_ttl_seconds: int = 8, timeout_seconds: int = 10) -> None:
         self.cache_ttl_seconds = cache_ttl_seconds
         self.timeout_seconds = timeout_seconds
-        self._cache: Dict[Tuple[str, str], dict] = {}
+        self._cache: Dict[Tuple[str, ...], dict] = {}
 
     def fetch_candles(self, symbol: str, interval: str, limit: int = 120) -> List[dict]:
-        cache_key = (symbol, interval)
+        cache_key = (symbol, interval, str(limit))
         cached = self._read_cache(cache_key)
         if cached is not None:
             return cached
@@ -61,6 +59,12 @@ class TradingViewFetcher:
         return result.get("value", [])
 
     async def _fetch_history(self, symbol: str, interval: str, limit: int) -> List[dict]:
+        try:
+            import websockets
+        except ImportError:
+            logger.warning("TradingView websocket dependency is unavailable")
+            return []
+
         tv_interval = self.INTERVAL_MAP.get(interval, interval.replace("min", ""))
         chart_session = self._session_id("cs")
         quote_session = self._session_id("qs")
@@ -189,7 +193,7 @@ class TradingViewFetcher:
             )
         return candles
 
-    def _read_cache(self, key: Tuple[str, str]) -> List[dict] | None:
+    def _read_cache(self, key: Tuple[str, ...]) -> List[dict] | None:
         item = self._cache.get(key)
         if not item:
             return None
@@ -197,5 +201,5 @@ class TradingViewFetcher:
             return None
         return item["candles"]
 
-    def _write_cache(self, key: Tuple[str, str], candles: List[dict]) -> None:
+    def _write_cache(self, key: Tuple[str, ...], candles: List[dict]) -> None:
         self._cache[key] = {"ts": time.time(), "candles": candles}

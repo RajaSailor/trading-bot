@@ -24,7 +24,7 @@ class PremiumScreener:
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=7)
         self.spot_engine = StrategyEngine(lookback=7)
-        self.option_scan_interval_seconds = 15 * 60
+        self.stock_option_scan_interval_seconds = 15
         self.spot_scan_interval_seconds = 15 * 60
         universe = self.data_manager.get_instruments()
         self.index_instruments = universe.get("index_options", [])
@@ -54,7 +54,7 @@ class PremiumScreener:
                 alerts += self._scan_instruments(self.index_instruments, "10min")
                 self.last_run["index_10min"] = time.time()
 
-            if time.time() - self.last_run["nifty50_15min"] >= self.option_scan_interval_seconds:
+            if time.time() - self.last_run["nifty50_15min"] >= self.stock_option_scan_interval_seconds:
                 alerts += self._scan_instruments(self.stock_instruments, "15min")
                 self.last_run["nifty50_15min"] = time.time()
 
