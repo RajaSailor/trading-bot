@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+import requests
+
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -146,6 +148,37 @@ class TelegramHandler:
             return sent
         except Exception as e:
             logger.error("❌ [%s] Failed to send alert: %s", category.upper(), e, exc_info=True)
+            return False
+
+    def send_to_channel(self, channel_type: str, alert_msg: str) -> bool:
+        """Send raw alert to a configured Telegram channel."""
+        try:
+            channel_aliases = {
+                "nifty50_options": "nifty50_stock_options",
+                "nifty50_5x": "nifty50_intraday_5x",
+                "nifty50_paylater": "nifty50_pay_later",
+            }
+            normalized_channel = channel_aliases.get(channel_type, channel_type)
+            if normalized_channel not in self.BOT_CONFIG:
+                logger.warning("❌ Unknown channel type: %s", channel_type)
+                return False
+
+            bot_token, chat_id = self._get_bot_for_category(normalized_channel)
+            if not bot_token or not chat_id:
+                logger.warning("❌ Channel config missing for %s", channel_type)
+                return False
+
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload = {"chat_id": chat_id, "text": alert_msg, "parse_mode": "HTML"}
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                logger.info("✅ Alert sent to %s", channel_type)
+                return True
+
+            logger.error("❌ Failed to send to %s: %s", channel_type, response.status_code)
+            return False
+        except Exception as e:
+            logger.error("Error sending to channel: %s", e, exc_info=True)
             return False
 
     def send_confirmation_request(self, user_chat_id: int, signal_details: dict) -> bool:

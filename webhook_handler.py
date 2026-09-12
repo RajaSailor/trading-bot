@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
+from flask import Flask, request
+
 from atm_calculator import calculate_option_details
 from webhook_store import webhook_store
 
@@ -43,6 +45,84 @@ INSTRUMENT_TYPE_BY_CATEGORY = {
     "nifty50_pay_later": "STOCK",
     "crypto": "CRYPTO",
 }
+
+
+class WebhookHandler:
+    """Handle incoming TradingView Pine Script webhooks."""
+
+    def __init__(self, telegram_handler, screener=None):
+        self.telegram = telegram_handler
+        self.screener = screener
+        logger.info("✅ Webhook Handler initialized")
+
+    def handle_tradingview_webhook(self, data: dict) -> Dict:
+        try:
+            logger.info("🔔 Webhook received: %s", data)
+
+            if not isinstance(data, dict):
+                return {"status": "error", "message": "Invalid JSON payload"}
+
+            symbol = data.get("symbol")
+            signal = data.get("signal")
+            entry = data.get("entry")
+            sl = data.get("sl")
+            t1 = data.get("t1")
+            t2 = data.get("t2")
+            t3 = data.get("t3")
+
+            required_values = [symbol, signal, entry, sl, t1, t2, t3]
+            if any(value is None for value in required_values):
+                logger.warning("❌ Missing required fields in webhook data")
+                return {"status": "error", "message": "Missing required fields"}
+
+            symbol_name = symbol.split(":")[-1] if ":" in str(symbol) else str(symbol)
+            alert = self._format_alert(symbol_name, str(signal).upper(), float(entry), float(sl), float(t1), float(t2), float(t3))
+            channel = self._get_channel(symbol_name)
+
+            sent = self.telegram.send_to_channel(channel, alert)
+            if not sent:
+                return {"status": "error", "message": "Failed to send alert", "symbol": symbol_name, "channel": channel}
+
+            logger.info("✅ Alert sent to %s", channel)
+            return {"status": "success", "message": "Alert processed", "symbol": symbol_name, "channel": channel}
+
+        except Exception as e:
+            logger.error("❌ Error processing webhook: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    def _format_alert(self, symbol: str, signal: str, entry: float, sl: float, t1: float, t2: float, t3: float) -> str:
+        try:
+            direction = "PUT" if signal == "PUT" else "CALL"
+            emoji = "📉" if direction == "PUT" else "🚀"
+            return (
+                f"{emoji} {direction} ENTRY\n"
+                f"{symbol} | TRADINGVIEW SIGNAL\n\n"
+                f"⏰ Signal Time: {self._get_time()}\n\n"
+                "📊 POSITION DETAILS:\n"
+                f"Entry: {entry:.2f}\n"
+                f"Target 1: {t1:.2f} ({t1 - entry:+.2f} points)\n"
+                f"Target 2: {t2:.2f} ({t2 - entry:+.2f} points)\n"
+                f"Target 3: {t3:.2f} ({t3 - entry:+.2f} points)\n"
+                f"Stop Loss: {sl:.2f}\n\n"
+                "📍 Source: TradingView Pine Script Webhook\n"
+                "📢 DISCLAIMER: Educational purposes only."
+            )
+        except Exception:
+            return f"🚀 {symbol} {signal} ALERT"
+
+    def _get_channel(self, symbol: str) -> str:
+        symbol_upper = symbol.upper()
+        if symbol_upper in {"GOLD1!", "SILVER1!", "CRUDE1!", "NGAS1!", "GOLD", "SILVER", "CRUDE", "GAS", "NATURALGAS"}:
+            return "commodity_options"
+        if symbol_upper in {"NIFTY50", "NIFTY", "BANKNIFTY", "SENSEX"}:
+            return "index_options"
+        if symbol_upper in {"BTCUSDT", "ETHUSDT", "BTC/USD", "ETH/USD", "BTC", "ETH"}:
+            return "crypto"
+        return "nifty50_options"
+
+    @staticmethod
+    def _get_time() -> str:
+        return datetime.now().strftime("%H:%M:%S | %d:%m:%Y")
 
 
 class WebhookValidationError(ValueError):
@@ -345,3 +425,25 @@ class TradingViewWebhookHandler:
             return previous_dt.strftime("%I:%M %p").lstrip("0")
         except ValueError:
             return breakout_time
+
+
+webhook_app = Flask(__name__)
+webhook_handler_instance: Optional[WebhookHandler] = None
+
+
+@webhook_app.route("/webhook/tradingview", methods=["POST"])
+def webhook_tradingview():
+    try:
+        data = request.get_json(silent=True) or {}
+        if webhook_handler_instance is None:
+            return {"status": "error", "message": "Handler not initialized"}, 500
+        result = webhook_handler_instance.handle_tradingview_webhook(data)
+        return result, 200 if result.get("status") == "success" else 400
+    except Exception as e:
+        logger.error("❌ Webhook endpoint error: %s", e, exc_info=True)
+        return {"status": "error", "message": str(e)}, 500
+
+
+@webhook_app.route("/health", methods=["GET"])
+def health_check():
+    return {"status": "healthy", "service": "trading-bot-webhook"}, 200
