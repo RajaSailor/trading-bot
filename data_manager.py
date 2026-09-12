@@ -293,6 +293,14 @@ class DataManager:
             logger.debug(f"Instrument {symbol} not found")
             return []
 
+        candles = self._fetch_dhanhq_candles_for_instrument(instrument, interval)
+        if candles:
+            self._write_cache(cache_key, candles)
+        return candles
+
+    def _fetch_dhanhq_candles_for_instrument(self, instrument: Instrument, interval: str) -> List[dict]:
+        symbol = instrument.symbol
+
         security_id = instrument.security_id
         if security_id is None:
             security_id = self._find_security_id(symbol, instrument.exchange_segment, instrument.instrument_type)
@@ -321,9 +329,7 @@ class DataManager:
                 interval=interval_value,
                 symbol=symbol  # Pass symbol for debug logging
             )
-            
             if candles:
-                self._write_cache(cache_key, candles)
                 logger.info(f"✅ DhanHQ fetch successful for {symbol}: {len(candles)} candles")
                 return candles
             
@@ -376,7 +382,7 @@ class DataManager:
 
         if instrument.category != "crypto":
             logger.info("Falling back to DhanHQ candles for %s", instrument.symbol)
-            return self.fetch_dhanhq_candles(instrument.symbol, interval)
+            return self._fetch_dhanhq_candles_for_instrument(instrument, interval)
 
         logger.warning("No TradingView candles available for crypto symbol %s", instrument.symbol)
         return []

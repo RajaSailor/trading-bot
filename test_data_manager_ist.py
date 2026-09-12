@@ -173,7 +173,7 @@ class DataManagerISTTests(unittest.TestCase):
 
         with (
             patch.object(manager, "_get_tradingview_fetcher", return_value=tradingview_fetcher),
-            patch.object(manager, "fetch_dhanhq_candles", return_value=[{"close": 99.0}]) as mocked_dhan,
+            patch.object(manager, "_fetch_dhanhq_candles_for_instrument", return_value=[{"close": 99.0}]) as mocked_dhan,
         ):
             first = manager.fetch_candles(instrument, "10min")
             second = manager.fetch_candles(instrument, "10min")

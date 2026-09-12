@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -156,18 +157,19 @@ class PremiumScreenerTests(unittest.TestCase):
 
         self.assertFalse(sent)
 
-    def test_run_once_throttles_spot_scans_to_fifteen_minutes(self):
+    def test_run_once_throttles_fifteen_minute_scans(self):
         screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
         calls = []
-        screener._scan_instruments = lambda instruments, interval: 0
+        screener._scan_instruments = lambda instruments, interval: calls.append(("options", interval, len(instruments))) or 0
         screener._scan_spot_instruments = lambda instruments, interval, strategy_group, primary_category: calls.append(primary_category) or 0
+        screener.last_run["nifty50_15min"] = 1000
         screener.last_run["stock_spot_15min"] = 1000
         screener.last_run["crypto_15min"] = 1000
 
         with patch("screener_premium.time.time", return_value=1100):
-            screener.run_once()
+            screener.run_once(now=datetime(2026, 9, 9, 10, 0, 0))
 
-        self.assertEqual([], calls)
+        self.assertEqual([("options", "10min", 1), ("options", "10min", 0)], calls)
 
 
 if __name__ == "__main__":
