@@ -76,6 +76,16 @@ class PineWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(500, response.status_code)
         self.assertEqual("error", response.get_json()["status"])
 
+    def test_webhook_endpoint_rejects_invalid_json(self):
+        app = webhook_app
+        app.testing = True
+        client = app.test_client()
+
+        response = client.post("/webhook/tradingview", data="not-json", content_type="text/plain")
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("Invalid JSON payload", response.get_json()["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

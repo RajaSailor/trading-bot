@@ -122,7 +122,7 @@ class WebhookHandler:
 
     @staticmethod
     def _get_time() -> str:
-        return datetime.now().strftime("%H:%M:%S | %d-%m-%Y")
+        return datetime.now(IST).strftime("%H:%M:%S | %d-%m-%Y")
 
 
 class WebhookValidationError(ValueError):
@@ -434,7 +434,9 @@ webhook_handler_instance: Optional[WebhookHandler] = None
 @webhook_app.route("/webhook/tradingview", methods=["POST"])
 def webhook_tradingview():
     try:
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if data is None:
+            return {"status": "error", "message": "Invalid JSON payload"}, 400
         if webhook_handler_instance is None:
             return {"status": "error", "message": "Handler not initialized"}, 500
         result = webhook_handler_instance.handle_tradingview_webhook(data)

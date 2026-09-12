@@ -238,8 +238,12 @@ class MainScreener:
         self.run_screener_loop()
 
 
-def create_app(telegram_handler, screener=None):
-    return MainScreener(telegram_handler, screener)
+def create_app(telegram_handler=None, screener=None):
+    telegram_handler = telegram_handler or TelegramHandler()
+    main_screener = MainScreener(telegram_handler, screener)
+    app = main_screener.app
+    app.main_screener = main_screener
+    return app
 
 
 screener_controller = ScreenerController()
