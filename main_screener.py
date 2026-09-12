@@ -12,7 +12,7 @@ from data_manager import DataManager
 from position_manager import PositionManager
 from screener_premium import PremiumScreener
 from telegram_handler import TelegramHandler
-from webhook_handler import TradingViewWebhookHandler, WebhookHandler, webhook_app
+from webhook_handler import TradingViewWebhookHandler, WebhookHandler, create_webhook_app
 from webhook_store import webhook_store
 
 
@@ -195,8 +195,7 @@ class MainScreener:
         self.telegram = telegram_handler
         self.screener = screener
         self.webhook_handler = WebhookHandler(self.telegram, self.screener)
-        self.app = webhook_app
-        self.app.config["WEBHOOK_HANDLER_INSTANCE"] = self.webhook_handler
+        self.app = create_webhook_app(self.webhook_handler)
         logger.info("✅ Main Screener with Webhook initialized")
 
     def run_webhook_server(self):

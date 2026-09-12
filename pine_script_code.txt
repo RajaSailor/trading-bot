@@ -15,9 +15,6 @@ indicator("Premium Breakout Alerts - Webhook", overlay=true)
 // CONFIGURATION
 // ============================================
 
-candle_lookback = 7  // Check last 7 candles for RED
-min_candles = 3      // Minimum candles for valid signal
-
 RED_COLOR = color.rgb(255, 0, 0, 80)
 GREEN_COLOR = color.rgb(0, 255, 0, 80)
 

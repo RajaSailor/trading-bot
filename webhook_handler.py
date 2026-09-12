@@ -89,11 +89,14 @@ class WebhookHandler:
             signal_type = str(signal).upper()
             if signal_type not in {"CALL", "PUT"}:
                 return {"status": "error", "message": "Unsupported signal"}
-            entry_value = float(entry)
-            sl_value = float(sl)
-            t1_value = float(t1)
-            t2_value = float(t2)
-            t3_value = float(t3)
+            try:
+                entry_value = float(entry)
+                sl_value = float(sl)
+                t1_value = float(t1)
+                t2_value = float(t2)
+                t3_value = float(t3)
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "Numeric fields must be valid numbers"}
 
             alert = self._format_alert(symbol_name, signal_type, entry_value, sl_value, t1_value, t2_value, t3_value)
             channel = self._get_channel(symbol_name)
@@ -450,35 +453,50 @@ class TradingViewWebhookHandler:
             return breakout_time
 
 
-webhook_app = Flask(__name__)
 webhook_handler_instance: Optional[WebhookHandler] = None
 
-
-@webhook_app.route("/webhook/tradingview", methods=["POST"])
-def webhook_tradingview():
-    try:
-        data = request.get_json(force=True, silent=True)
-        if data is None:
-            return {"status": "error", "message": "Invalid JSON payload"}, 400
-        handler = current_app.config.get("WEBHOOK_HANDLER_INSTANCE", webhook_handler_instance)
-        if handler is None:
-            return {"status": "error", "message": "Handler not initialized"}, 500
-        result = handler.handle_tradingview_webhook(data)
-        if result.get("status") == "success":
-            return result, 200
-        message = str(result.get("message", "")).lower()
-        if message in {"missing required fields", "invalid json payload", "unsupported symbol", "unsupported signal"}:
-            status = 400
-        elif message == "failed to send alert":
-            status = 502
-        else:
-            status = 500
-        return result, status
-    except Exception as e:
-        logger.error("❌ Webhook endpoint error: %s", e, exc_info=True)
-        return {"status": "error", "message": "internal webhook processing error"}, 500
+def _resolve_status_code(result: dict) -> int:
+    if result.get("status") == "success":
+        return 200
+    message = str(result.get("message", "")).lower()
+    if message in {
+        "missing required fields",
+        "invalid json payload",
+        "unsupported symbol",
+        "unsupported signal",
+        "numeric fields must be valid numbers",
+    }:
+        return 400
+    if message == "failed to send alert":
+        return 502
+    return 500
 
 
-@webhook_app.route("/health", methods=["GET"])
-def health_check():
-    return {"status": "healthy", "service": "trading-bot-webhook"}, 200
+def create_webhook_app(handler_instance: Optional[WebhookHandler] = None) -> Flask:
+    app = Flask(__name__)
+    if handler_instance is not None:
+        app.config["WEBHOOK_HANDLER_INSTANCE"] = handler_instance
+
+    @app.route("/webhook/tradingview", methods=["POST"])
+    def webhook_tradingview():
+        try:
+            data = request.get_json(force=True, silent=True)
+            if data is None:
+                return {"status": "error", "message": "Invalid JSON payload"}, 400
+            handler = current_app.config.get("WEBHOOK_HANDLER_INSTANCE", webhook_handler_instance)
+            if handler is None:
+                return {"status": "error", "message": "Handler not initialized"}, 500
+            result = handler.handle_tradingview_webhook(data)
+            return result, _resolve_status_code(result)
+        except Exception as e:
+            logger.error("❌ Webhook endpoint error: %s", e, exc_info=True)
+            return {"status": "error", "message": "internal webhook processing error"}, 500
+
+    @app.route("/health", methods=["GET"])
+    def health_check():
+        return {"status": "healthy", "service": "trading-bot-webhook"}, 200
+
+    return app
+
+
+webhook_app = create_webhook_app()
