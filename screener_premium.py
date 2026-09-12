@@ -24,6 +24,7 @@ class PremiumScreener:
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=7)
         self.spot_engine = StrategyEngine(lookback=7)
+        self.spot_scan_interval_seconds = 15 * 60
         universe = self.data_manager.get_instruments()
         self.index_instruments = universe.get("index_options", [])
         self.commodity_instruments = universe.get("commodity_options", [])
@@ -56,7 +57,7 @@ class PremiumScreener:
                 alerts += self._scan_instruments(self.stock_instruments, "15min")
                 self.last_run["nifty50_15min"] = time.time()
 
-            if time.time() - self.last_run["stock_spot_15min"] >= 15:
+            if time.time() - self.last_run["stock_spot_15min"] >= self.spot_scan_interval_seconds:
                 alerts += self._scan_spot_instruments(
                     self.stock_spot_instruments,
                     "15min",
@@ -65,7 +66,7 @@ class PremiumScreener:
                 )
                 self.last_run["stock_spot_15min"] = time.time()
 
-        if time.time() - self.last_run["crypto_15min"] >= 15:
+        if time.time() - self.last_run["crypto_15min"] >= self.spot_scan_interval_seconds:
             alerts += self._scan_spot_instruments(
                 self.crypto_instruments,
                 "15min",
@@ -179,6 +180,7 @@ class PremiumScreener:
 
         for instrument in instruments:
             try:
+                engine = self._fresh_spot_engine()
                 candles = self.data_manager.fetch_candles(instrument, interval)
                 if len(candles) < 2:
                     logger.debug("❌ [%s] Insufficient spot candles", instrument.symbol)
@@ -186,11 +188,11 @@ class PremiumScreener:
 
                 latest = candles[-1]
                 for historical in candles[-8:-1]:
-                    self.spot_engine.add_candle(instrument.symbol, historical)
-                if not self.spot_engine.add_candle(instrument.symbol, latest):
+                    engine.add_candle(instrument.symbol, historical)
+                if not engine.add_candle(instrument.symbol, latest):
                     continue
 
-                for signal in self.spot_engine.evaluate(instrument.symbol, strategy_group):
+                for signal in engine.evaluate(instrument.symbol, strategy_group):
                     logger.info(
                         "🚀 [%s] %s spot breakout for %s @ %.2f",
                         primary_category,
@@ -229,15 +231,24 @@ class PremiumScreener:
         return f"{interval.replace('min', '')}-MINUTE BREAKOUT"
 
     def _dispatch_option_alert(self, category: str, signal: dict, telegram_payload: dict) -> bool:
-        sent = self.telegram_handler.send_signal_alert(category, signal, telegram_payload)
-        if not sent:
-            return False
+        send_results = [self.telegram_handler.send_signal_alert(category, signal, telegram_payload)]
 
         if category == "nifty50_stock_options":
-            self.telegram_handler.send_signal_alert("nifty50_intraday_5x", signal, telegram_payload)
-            self.telegram_handler.send_signal_alert("nifty50_pay_later", signal, telegram_payload)
+            send_results.append(
+                self.telegram_handler.send_signal_alert("nifty50_intraday_5x", signal, telegram_payload)
+            )
+            send_results.append(
+                self.telegram_handler.send_signal_alert("nifty50_pay_later", signal, telegram_payload)
+            )
 
-        return True
+        return all(send_results)
+
+    def _fresh_spot_engine(self):
+        engine_class = self.spot_engine.__class__
+        try:
+            return engine_class(lookback=getattr(self.spot_engine, "lookback", 7))
+        except TypeError:
+            return engine_class()
 
     @staticmethod
     def _in_window(now: dt_time, start: dt_time, end: dt_time) -> bool:

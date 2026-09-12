@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from screener_premium import PremiumScreener
 
@@ -65,6 +66,12 @@ class _FakeTelegramHandler:
 class _FakePositionManager:
     def add_position(self, **kwargs):
         return object()
+
+
+class _PartiallyFailingTelegramHandler(_FakeTelegramHandler):
+    def send_signal_alert(self, category, signal_data, option_data):
+        super().send_signal_alert(category, signal_data, option_data)
+        return category != "nifty50_pay_later"
 
 
 class _FakeSpotEngine:
@@ -136,6 +143,31 @@ class PremiumScreenerTests(unittest.TestCase):
 
         self.assertEqual(1, alerts)
         self.assertEqual([("nifty50_stock_options", "CALL", "SPOT")], telegram.sent)
+
+    def test_dispatch_option_alert_requires_all_nifty50_deliveries(self):
+        telegram = _PartiallyFailingTelegramHandler()
+        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
+
+        sent = screener._dispatch_option_alert(
+            "nifty50_stock_options",
+            {"signal": "CALL", "symbol": "RELIANCE", "reference_timestamp": "t1", "breakout_timestamp": "t2"},
+            {"option_symbol": "RELIANCE-2950-CE"},
+        )
+
+        self.assertFalse(sent)
+
+    def test_run_once_throttles_spot_scans_to_fifteen_minutes(self):
+        screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
+        calls = []
+        screener._scan_instruments = lambda instruments, interval: 0
+        screener._scan_spot_instruments = lambda instruments, interval, strategy_group, primary_category: calls.append(primary_category) or 0
+        screener.last_run["stock_spot_15min"] = 1000
+        screener.last_run["crypto_15min"] = 1000
+
+        with patch("screener_premium.time.time", return_value=1100):
+            screener.run_once()
+
+        self.assertEqual([], calls)
 
 
 if __name__ == "__main__":
