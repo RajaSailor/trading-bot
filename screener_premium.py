@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from atm_options_fetcher import ATMOptionsFetcher
 from premium_strategy_engine import PremiumStrategyEngine
+from strategy_engine import StrategyEngine
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -22,14 +23,23 @@ class PremiumScreener:
         self.position_manager = position_manager
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=7)
+        self.spot_engine = StrategyEngine(lookback=7)
+        self.stock_option_scan_interval_seconds = 15 * 60
+        self.spot_scan_interval_seconds = 15 * 60
+        self._processed_signal_keys: set[str] = set()
+        self._processed_signal_order: list[str] = []
         universe = self.data_manager.get_instruments()
         self.index_instruments = universe.get("index_options", [])
         self.commodity_instruments = universe.get("commodity_options", [])
         self.stock_instruments = universe.get("nifty50_stock_options", [])
+        self.stock_spot_instruments = universe.get("nifty50_stock_spot", [])
+        self.crypto_instruments = universe.get("crypto", [])
         self.last_run = {
             "commodity_10min": 0.0,
             "index_10min": 0.0,
             "nifty50_15min": 0.0,
+            "stock_spot_15min": 0.0,
+            "crypto_15min": 0.0,
         }
 
     def run_once(self, now: datetime | None = None) -> int:
@@ -46,9 +56,28 @@ class PremiumScreener:
                 alerts += self._scan_instruments(self.index_instruments, "10min")
                 self.last_run["index_10min"] = time.time()
 
-            if time.time() - self.last_run["nifty50_15min"] >= 15:
+            if time.time() - self.last_run["nifty50_15min"] >= self.stock_option_scan_interval_seconds:
                 alerts += self._scan_instruments(self.stock_instruments, "15min")
                 self.last_run["nifty50_15min"] = time.time()
+
+            if time.time() - self.last_run["stock_spot_15min"] >= self.spot_scan_interval_seconds:
+                alerts += self._scan_spot_instruments(
+                    self.stock_spot_instruments,
+                    "15min",
+                    StrategyEngine.GROUP_2,
+                    primary_category="nifty50_stock_options",
+                )
+                self.last_run["stock_spot_15min"] = time.time()
+
+        if self._in_window(now.time(), dt_time(0, 0), dt_time(23, 59, 59)):
+            if time.time() - self.last_run["crypto_15min"] >= self.spot_scan_interval_seconds:
+                alerts += self._scan_spot_instruments(
+                    self.crypto_instruments,
+                    "15min",
+                    StrategyEngine.GROUP_2,
+                    primary_category="crypto",
+                )
+                self.last_run["crypto_15min"] = time.time()
 
         return alerts
 
@@ -95,6 +124,11 @@ class PremiumScreener:
 
                 logger.debug("📊 [%s] Calling engine.evaluate_premiums()...", instrument.symbol)
                 for signal in self.engine.evaluate_premiums(instrument.symbol, instrument.category):
+                    signal_key = self._signal_key(instrument.category, signal)
+                    if signal_key in self._processed_signal_keys:
+                        logger.debug("⚠️ [%s] Duplicate premium signal skipped: %s", instrument.symbol, signal_key)
+                        continue
+
                     option_data = ce_option if signal["option_type"] == "CE" else pe_option
                     if not option_data:
                         logger.warning(
@@ -133,7 +167,8 @@ class PremiumScreener:
                         "premium_ltp": option_data.get("premium_ltp", signal["entry"]),
                         "option_type": option_data["option_type"],
                     }
-                    if self.telegram_handler.send_signal_alert(instrument.category, signal, telegram_payload):
+                    if self._dispatch_option_alert(instrument.category, signal, telegram_payload):
+                        self._remember_signal_key(signal_key)
                         logger.info("✅ Alert sent for %s %s", instrument.symbol, signal["signal"])
                         alerts += 1
                     else:
@@ -143,9 +178,102 @@ class PremiumScreener:
         logger.debug("📊 Instrument scan complete: %s alerts", alerts)
         return alerts
 
+    def _scan_spot_instruments(
+        self,
+        instruments,
+        interval: str,
+        strategy_group: str,
+        primary_category: str,
+    ) -> int:
+        alerts = 0
+        logger.debug("📊 Scanning %s spot instruments for interval %s", len(instruments), interval)
+
+        for instrument in instruments:
+            try:
+                engine = self._fresh_spot_engine()
+                candles = self.data_manager.fetch_candles(instrument, interval)
+                if len(candles) < 2:
+                    logger.debug("❌ [%s] Insufficient spot candles", instrument.symbol)
+                    continue
+
+                latest = candles[-1]
+                for historical in candles[-8:-1]:
+                    engine.add_candle(instrument.symbol, historical)
+                if not engine.add_candle(instrument.symbol, latest):
+                    continue
+
+                for signal in engine.evaluate(instrument.symbol, strategy_group):
+                    logger.info(
+                        "🚀 [%s] %s spot breakout for %s @ %.2f",
+                        primary_category,
+                        signal["signal"],
+                        instrument.symbol,
+                        signal["entry"],
+                    )
+                    signal["timeframe"] = self._display_timeframe(interval)
+                    signal["spot_strategy"] = True
+                    signal["signal_time_ist"] = datetime.now(IST).strftime("%H:%M:%S")
+                    signal["signal_date_ist"] = datetime.now(IST).strftime("%d:%m:%Y")
+
+                    accepted = self.position_manager.add_position(
+                        symbol=instrument.symbol,
+                        side=signal["signal"],
+                        entry_price=signal["entry"],
+                        stop_loss=signal["stop_loss"],
+                        targets=signal["targets"],
+                    )
+                    if not accepted:
+                        continue
+
+                    spot_payload = {
+                        "instrument_label": "SPOT",
+                        "spot_ltp": latest["close"],
+                    }
+                    if self.telegram_handler.send_signal_alert(primary_category, signal, spot_payload):
+                        alerts += 1
+            except Exception as exc:
+                logger.error("❌ Spot screener failed for %s: %s", instrument.symbol, exc, exc_info=True)
+
+        return alerts
+
     @staticmethod
     def _display_timeframe(interval: str) -> str:
         return f"{interval.replace('min', '')}-MINUTE BREAKOUT"
+
+    def _dispatch_option_alert(self, category: str, signal: dict, telegram_payload: dict) -> bool:
+        send_results = [self.telegram_handler.send_signal_alert(category, signal, telegram_payload)]
+
+        if category == "nifty50_stock_options":
+            send_results.append(
+                self.telegram_handler.send_signal_alert("nifty50_intraday_5x", signal, telegram_payload)
+            )
+            send_results.append(
+                self.telegram_handler.send_signal_alert("nifty50_pay_later", signal, telegram_payload)
+            )
+
+        return all(send_results)
+
+    def _fresh_spot_engine(self):
+        engine_class = self.spot_engine.__class__
+        try:
+            return engine_class(lookback=getattr(self.spot_engine, "lookback", 7))
+        except TypeError:
+            return engine_class()
+
+    @staticmethod
+    def _signal_key(category: str, signal: dict) -> str:
+        return (
+            f"{category}:{signal.get('symbol')}:{signal.get('signal')}:"
+            f"{signal.get('option_type', '')}:{signal.get('reference_timestamp')}:"
+            f"{signal.get('breakout_timestamp')}"
+        )
+
+    def _remember_signal_key(self, signal_key: str) -> None:
+        self._processed_signal_keys.add(signal_key)
+        self._processed_signal_order.append(signal_key)
+        if len(self._processed_signal_order) > 2000:
+            expired = self._processed_signal_order.pop(0)
+            self._processed_signal_keys.discard(expired)
 
     @staticmethod
     def _in_window(now: dt_time, start: dt_time, end: dt_time) -> bool:

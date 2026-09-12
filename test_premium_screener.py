@@ -1,5 +1,7 @@
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from screener_premium import PremiumScreener
 
@@ -9,8 +11,16 @@ class _FakeDataManager:
         return {
             "index_options": [],
             "commodity_options": [SimpleNamespace(symbol="GOLD", category="commodity_options")],
-            "nifty50_stock_options": [],
+            "nifty50_stock_options": [SimpleNamespace(symbol="RELIANCE", category="nifty50_stock_options")],
+            "nifty50_stock_spot": [SimpleNamespace(symbol="INFY", category="nifty50_stock_spot")],
+            "crypto": [],
         }
+
+    def fetch_candles(self, instrument, interval):
+        return [
+            {"open": 100, "high": 103, "low": 97, "close": 98, "timestamp": "t1"},
+            {"open": 98, "high": 104, "low": 97, "close": 101, "timestamp": "t2"},
+        ]
 
 
 class _FakeFetcher:
@@ -44,13 +54,43 @@ class _FakeTelegramHandler:
         self.sent = []
 
     def send_signal_alert(self, category, signal_data, option_data):
-        self.sent.append((category, signal_data["signal"], option_data["option_symbol"]))
+        self.sent.append(
+            (
+                category,
+                signal_data["signal"],
+                option_data.get("option_symbol") or option_data.get("instrument_label"),
+            )
+        )
         return True
 
 
 class _FakePositionManager:
     def add_position(self, **kwargs):
         return object()
+
+
+class _PartiallyFailingTelegramHandler(_FakeTelegramHandler):
+    def send_signal_alert(self, category, signal_data, option_data):
+        super().send_signal_alert(category, signal_data, option_data)
+        return category != "nifty50_pay_later"
+
+
+class _FakeSpotEngine:
+    def add_candle(self, symbol, candle):
+        return True
+
+    def evaluate(self, symbol, strategy_group):
+        return [
+            {
+                "symbol": symbol,
+                "signal": "CALL",
+                "entry": 103,
+                "stop_loss": 97,
+                "targets": [113, 123, 133],
+                "reference_timestamp": "t1",
+                "breakout_timestamp": "t2",
+            }
+        ]
 
 
 class PremiumScreenerTests(unittest.TestCase):
@@ -62,6 +102,85 @@ class PremiumScreenerTests(unittest.TestCase):
         alerts = screener._scan_instruments(screener.commodity_instruments, "10min")
 
         self.assertEqual(2, alerts)
+        self.assertEqual(
+            [
+                ("commodity_options", "CALL", "GOLD-24OCT-127-CE"),
+                ("commodity_options", "PUT", "GOLD-24OCT-127-PE"),
+            ],
+            telegram.sent,
+        )
+
+    def test_stock_option_alerts_are_fanned_out_to_all_nifty50_channels(self):
+        telegram = _FakeTelegramHandler()
+        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
+
+        sent = screener._dispatch_option_alert(
+            "nifty50_stock_options",
+            {"signal": "CALL", "symbol": "RELIANCE", "reference_timestamp": "t1", "breakout_timestamp": "t2"},
+            {"option_symbol": "RELIANCE-2950-CE"},
+        )
+
+        self.assertTrue(sent)
+        self.assertEqual(
+            [
+                ("nifty50_stock_options", "CALL", "RELIANCE-2950-CE"),
+                ("nifty50_intraday_5x", "CALL", "RELIANCE-2950-CE"),
+                ("nifty50_pay_later", "CALL", "RELIANCE-2950-CE"),
+            ],
+            telegram.sent,
+        )
+
+    def test_scan_spot_instruments_sends_stock_spot_alerts_to_primary_channel(self):
+        telegram = _FakeTelegramHandler()
+        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
+        screener.spot_engine = _FakeSpotEngine()
+
+        alerts = screener._scan_spot_instruments(
+            screener.stock_spot_instruments,
+            "15min",
+            "group2",
+            primary_category="nifty50_stock_options",
+        )
+
+        self.assertEqual(1, alerts)
+        self.assertEqual([("nifty50_stock_options", "CALL", "SPOT")], telegram.sent)
+
+    def test_dispatch_option_alert_requires_all_nifty50_deliveries(self):
+        telegram = _PartiallyFailingTelegramHandler()
+        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
+
+        sent = screener._dispatch_option_alert(
+            "nifty50_stock_options",
+            {"signal": "CALL", "symbol": "RELIANCE", "reference_timestamp": "t1", "breakout_timestamp": "t2"},
+            {"option_symbol": "RELIANCE-2950-CE"},
+        )
+
+        self.assertFalse(sent)
+
+    def test_run_once_throttles_fifteen_minute_scans(self):
+        screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
+        calls = []
+        screener._scan_instruments = lambda instruments, interval: calls.append(("options", interval, len(instruments))) or 0
+        screener._scan_spot_instruments = lambda instruments, interval, strategy_group, primary_category: calls.append(primary_category) or 0
+        screener.last_run["nifty50_15min"] = 1000
+        screener.last_run["stock_spot_15min"] = 1000
+        screener.last_run["crypto_15min"] = 1000
+
+        with patch("screener_premium.time.time", return_value=1100):
+            screener.run_once(now=datetime(2026, 9, 9, 10, 0, 0))
+
+        self.assertEqual([("options", "10min", 1), ("options", "10min", 0)], calls)
+
+    def test_scan_instruments_skips_duplicate_premium_signals(self):
+        telegram = _FakeTelegramHandler()
+        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
+        screener.fetcher = _FakeFetcher()
+
+        first = screener._scan_instruments(screener.commodity_instruments, "10min")
+        second = screener._scan_instruments(screener.commodity_instruments, "10min")
+
+        self.assertEqual(2, first)
+        self.assertEqual(0, second)
         self.assertEqual(
             [
                 ("commodity_options", "CALL", "GOLD-24OCT-127-CE"),

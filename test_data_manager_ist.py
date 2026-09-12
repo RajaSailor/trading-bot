@@ -160,6 +160,28 @@ class DataManagerISTTests(unittest.TestCase):
         self.assertEqual(3, len(universe["index_options"]))
         self.assertEqual(4, len(universe["commodity_options"]))
         self.assertEqual(50, len(universe["nifty50_stock_options"]))
+        self.assertEqual(50, len(universe["nifty50_stock_spot"]))
+        self.assertEqual(2, len(universe["crypto"]))
+        self.assertEqual("tradingview_primary", universe["index_options"][0].data_source)
+        self.assertTrue(universe["crypto"][0].tradingview_symbol.startswith("BINANCE:"))
+
+    def test_fetch_candles_uses_tradingview_primary_before_dhanhq_fallback(self):
+        manager = DataManager()
+        instrument = manager.get_instruments()["index_options"][0]
+        tradingview_fetcher = Mock()
+        tradingview_fetcher.fetch_candles.side_effect = [[], [{"close": 101.0}]]
+
+        with (
+            patch.object(manager, "_get_tradingview_fetcher", return_value=tradingview_fetcher),
+            patch.object(manager, "_fetch_dhanhq_candles_for_instrument", return_value=[{"close": 99.0}]) as mocked_dhan,
+        ):
+            first = manager.fetch_candles(instrument, "10min")
+            second = manager.fetch_candles(instrument, "10min")
+
+        self.assertEqual([{"close": 99.0}], first)
+        self.assertEqual([{"close": 101.0}], second)
+        self.assertEqual(1, mocked_dhan.call_count)
+        self.assertEqual(2, tradingview_fetcher.fetch_candles.call_count)
 
 
 if __name__ == "__main__":
