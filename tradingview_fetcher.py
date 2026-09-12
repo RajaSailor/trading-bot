@@ -51,11 +51,18 @@ class TradingViewFetcher:
         result: dict = {}
 
         def runner():
-            result["value"] = asyncio.run(coroutine)
+            try:
+                result["value"] = asyncio.run(coroutine)
+            except Exception as exc:
+                result["error"] = exc
 
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
         thread.join(timeout=self.timeout_seconds + 2)
+        if "error" in result:
+            raise result["error"]
+        if "value" not in result:
+            raise TimeoutError("TradingView fetch timed out")
         return result.get("value", [])
 
     async def _fetch_history(self, symbol: str, interval: str, limit: int) -> List[dict]:

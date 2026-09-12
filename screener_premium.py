@@ -24,8 +24,10 @@ class PremiumScreener:
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=7)
         self.spot_engine = StrategyEngine(lookback=7)
-        self.stock_option_scan_interval_seconds = 15 * 60
+        self.stock_option_scan_interval_seconds = 15
         self.spot_scan_interval_seconds = 15 * 60
+        self._processed_signal_keys: set[str] = set()
+        self._processed_signal_order: list[str] = []
         universe = self.data_manager.get_instruments()
         self.index_instruments = universe.get("index_options", [])
         self.commodity_instruments = universe.get("commodity_options", [])
@@ -121,6 +123,11 @@ class PremiumScreener:
 
                 logger.debug("📊 [%s] Calling engine.evaluate_premiums()...", instrument.symbol)
                 for signal in self.engine.evaluate_premiums(instrument.symbol, instrument.category):
+                    signal_key = self._signal_key(instrument.category, signal)
+                    if signal_key in self._processed_signal_keys:
+                        logger.debug("⚠️ [%s] Duplicate premium signal skipped: %s", instrument.symbol, signal_key)
+                        continue
+
                     option_data = ce_option if signal["option_type"] == "CE" else pe_option
                     if not option_data:
                         logger.warning(
@@ -153,6 +160,7 @@ class PremiumScreener:
                     if not accepted:
                         continue
 
+                    self._remember_signal_key(signal_key)
                     telegram_payload = {
                         "option_symbol": option_data["option_symbol"],
                         "strike_price": option_data["atm_strike"],
@@ -250,6 +258,21 @@ class PremiumScreener:
             return engine_class(lookback=getattr(self.spot_engine, "lookback", 7))
         except TypeError:
             return engine_class()
+
+    @staticmethod
+    def _signal_key(category: str, signal: dict) -> str:
+        return (
+            f"{category}:{signal.get('symbol')}:{signal.get('signal')}:"
+            f"{signal.get('option_type', '')}:{signal.get('reference_timestamp')}:"
+            f"{signal.get('breakout_timestamp')}"
+        )
+
+    def _remember_signal_key(self, signal_key: str) -> None:
+        self._processed_signal_keys.add(signal_key)
+        self._processed_signal_order.append(signal_key)
+        if len(self._processed_signal_order) > 2000:
+            expired = self._processed_signal_order.pop(0)
+            self._processed_signal_keys.discard(expired)
 
     @staticmethod
     def _in_window(now: dt_time, start: dt_time, end: dt_time) -> bool:

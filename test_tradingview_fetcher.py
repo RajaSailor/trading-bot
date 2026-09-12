@@ -76,6 +76,29 @@ class TradingViewFetcherTests(unittest.TestCase):
         self.assertIsNone(cached)
         self.assertNotIn(key, fetcher._cache)
 
+    def test_run_reraises_thread_worker_exception(self):
+        fetcher = TradingViewFetcher()
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=True):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+            def join(self, timeout=None):
+                return None
+
+        async def boom():
+            raise ValueError("boom")
+
+        with (
+            patch("tradingview_fetcher.asyncio.get_running_loop", return_value=object()),
+            patch("tradingview_fetcher.threading.Thread", ImmediateThread),
+        ):
+            with self.assertRaisesRegex(ValueError, "boom"):
+                fetcher._run(boom())
+
 
 if __name__ == "__main__":
     unittest.main()
