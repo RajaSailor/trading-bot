@@ -46,6 +46,16 @@ INSTRUMENT_TYPE_BY_CATEGORY = {
     "crypto": "CRYPTO",
 }
 
+NIFTY50_STOCK_SYMBOLS = {
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO", "BAJFINANCE",
+    "BAJAJFINSV", "BEL", "BHARTIARTL", "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
+    "EICHERMOT", "ETERNAL", "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HEROMOTOCO", "HINDALCO",
+    "HINDUNILVR", "ICICIBANK", "INDUSINDBK", "INFY", "ITC", "JIOFIN", "JSWSTEEL", "KOTAKBANK",
+    "LT", "M&M", "MARUTI", "NESTLEIND", "NTPC", "ONGC", "POWERGRID", "RELIANCE", "SBILIFE",
+    "SBIN", "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM", "TATAMOTORS", "TATASTEEL", "TCS",
+    "TECHM", "TITAN", "TRENT", "ULTRACEMCO", "WIPRO",
+}
+
 
 class WebhookHandler:
     """Handle incoming TradingView Pine Script webhooks."""
@@ -76,7 +86,14 @@ class WebhookHandler:
                 return {"status": "error", "message": "Missing required fields"}
 
             symbol_name = symbol.split(":")[-1] if ":" in str(symbol) else str(symbol)
-            alert = self._format_alert(symbol_name, str(signal).upper(), float(entry), float(sl), float(t1), float(t2), float(t3))
+            signal_type = str(signal).upper()
+            entry_value = float(entry)
+            sl_value = float(sl)
+            t1_value = float(t1)
+            t2_value = float(t2)
+            t3_value = float(t3)
+
+            alert = self._format_alert(symbol_name, signal_type, entry_value, sl_value, t1_value, t2_value, t3_value)
             channel = self._get_channel(symbol_name)
             if channel is None:
                 return {"status": "error", "message": "Unsupported symbol"}
@@ -120,7 +137,7 @@ class WebhookHandler:
             return "index_options"
         if symbol_upper in {"BTCUSDT", "ETHUSDT", "BTC/USD", "ETH/USD", "BTC", "ETH"}:
             return "crypto"
-        if symbol_upper.isalpha():
+        if symbol_upper in NIFTY50_STOCK_SYMBOLS:
             return "nifty50_options"
         return None
 

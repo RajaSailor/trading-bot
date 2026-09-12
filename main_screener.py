@@ -236,7 +236,8 @@ class MainScreener:
 
 
 def create_app(telegram_handler=None, screener=None):
-    telegram_handler = telegram_handler or TelegramHandler()
+    if telegram_handler is None:
+        telegram_handler = TelegramHandler()
     main_screener = MainScreener(telegram_handler, screener)
     app = main_screener.app
     app.main_screener = main_screener

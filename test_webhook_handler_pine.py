@@ -28,6 +28,12 @@ class FakeTelegram:
         return True
 
 
+class FakeTelegramFail(FakeTelegram):
+    def send_to_channel(self, channel_type: str, alert_msg: str) -> bool:
+        self.calls.append((channel_type, alert_msg))
+        return False
+
+
 class PineWebhookHandlerTests(unittest.TestCase):
     def test_handle_tradingview_webhook_routes_index_symbol(self):
         telegram = FakeTelegram()
@@ -99,6 +105,32 @@ class PineWebhookHandlerTests(unittest.TestCase):
         self.assertEqual("error", result["status"])
         self.assertEqual("Unsupported symbol", result["message"])
         self.assertEqual([], telegram.calls)
+
+    def test_webhook_endpoint_returns_400_for_unsupported_symbol(self):
+        app = webhook_app
+        app.testing = True
+        client = app.test_client()
+        app.config["WEBHOOK_HANDLER_INSTANCE"] = WebhookHandler(FakeTelegram())
+        try:
+            response = client.post("/webhook/tradingview", json=sample_pine_payload(symbol="BTC-USD-PERP"))
+        finally:
+            app.config.pop("WEBHOOK_HANDLER_INSTANCE", None)
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("Unsupported symbol", response.get_json()["message"])
+
+    def test_webhook_endpoint_returns_502_for_delivery_failure(self):
+        app = webhook_app
+        app.testing = True
+        client = app.test_client()
+        app.config["WEBHOOK_HANDLER_INSTANCE"] = WebhookHandler(FakeTelegramFail())
+        try:
+            response = client.post("/webhook/tradingview", json=sample_pine_payload())
+        finally:
+            app.config.pop("WEBHOOK_HANDLER_INSTANCE", None)
+
+        self.assertEqual(502, response.status_code)
+        self.assertEqual("Failed to send alert", response.get_json()["message"])
 
 
 if __name__ == "__main__":
