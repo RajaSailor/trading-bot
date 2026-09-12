@@ -88,7 +88,7 @@ class WebhookHandler:
 
         except Exception as e:
             logger.error("❌ Error processing webhook: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": "Internal webhook processing error"}
 
     def _format_alert(self, symbol: str, signal: str, entry: float, sl: float, t1: float, t2: float, t3: float) -> str:
         try:
@@ -441,7 +441,7 @@ def webhook_tradingview():
         return result, 200 if result.get("status") == "success" else 400
     except Exception as e:
         logger.error("❌ Webhook endpoint error: %s", e, exc_info=True)
-        return {"status": "error", "message": str(e)}, 500
+        return {"status": "error", "message": "internal webhook processing error"}, 500
 
 
 @webhook_app.route("/health", methods=["GET"])

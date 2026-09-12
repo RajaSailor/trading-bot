@@ -2,14 +2,14 @@
 indicator("Premium Breakout Alerts - Webhook", overlay=true)
 
 // ============================================
-// ⚠️ IMPORTANT: REPLACE WEBHOOK_URL BELOW
+// ⚠️ IMPORTANT: WEBHOOK URL IS SET IN ALERT UI
 // ============================================
-
-// Get your Render service URL from:
-// https://dashboard.render.com/services/trading-bot
-// Format: https://trading-bot-xxxx.onrender.com/webhook/tradingview
-
-WEBHOOK_URL = "https://your-render-service-url/webhook/tradingview"
+//
+// 1) Create alert in TradingView using this script.
+// 2) Condition: "Any alert() function call"
+// 3) Webhook URL:
+//    https://your-render-service-url/webhook/tradingview
+// 4) Keep message empty (script sends JSON via alert()).
 
 // ============================================
 // CONFIGURATION
@@ -56,10 +56,8 @@ if breakout_call
     t2 = entry + 20
     t3 = entry + 30
     
-    request.post(
-        url = WEBHOOK_URL,
-        headers = map("Content-Type", "application/json"),
-        data = str.format(
+    alert(
+        str.format(
             '{{"symbol":"{0}","signal":"CALL","entry":{1},"sl":{2},"t1":{3},"t2":{4},"t3":{5},"timestamp":"{6}"}}',
             syminfo.tickerid,
             entry,
@@ -68,7 +66,8 @@ if breakout_call
             t2,
             t3,
             time
-        )
+        ),
+        alert.freq_once_per_bar
     )
     
     label.new(bar_index, high, "🚀 CALL", color=color.green, textcolor=color.white)
@@ -81,10 +80,8 @@ if breakout_put
     t2 = entry - 20
     t3 = entry - 30
     
-    request.post(
-        url = WEBHOOK_URL,
-        headers = map("Content-Type", "application/json"),
-        data = str.format(
+    alert(
+        str.format(
             '{{"symbol":"{0}","signal":"PUT","entry":{1},"sl":{2},"t1":{3},"t2":{4},"t3":{5},"timestamp":"{6}"}}',
             syminfo.tickerid,
             entry,
@@ -93,7 +90,8 @@ if breakout_put
             t2,
             t3,
             time
-        )
+        ),
+        alert.freq_once_per_bar
     )
     
     label.new(bar_index, low, "📉 PUT", color=color.red, textcolor=color.white)
