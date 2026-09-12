@@ -157,7 +157,7 @@ class PremiumScreenerTests(unittest.TestCase):
 
         self.assertFalse(sent)
 
-    def test_run_once_throttles_fifteen_minute_spot_scans_only(self):
+    def test_run_once_throttles_fifteen_minute_scans(self):
         screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
         calls = []
         screener._scan_instruments = lambda instruments, interval: calls.append(("options", interval, len(instruments))) or 0
@@ -169,10 +169,7 @@ class PremiumScreenerTests(unittest.TestCase):
         with patch("screener_premium.time.time", return_value=1100):
             screener.run_once(now=datetime(2026, 9, 9, 10, 0, 0))
 
-        self.assertEqual(
-            [("options", "10min", 1), ("options", "10min", 0), ("options", "15min", 1)],
-            calls,
-        )
+        self.assertEqual([("options", "10min", 1), ("options", "10min", 0)], calls)
 
 
 if __name__ == "__main__":

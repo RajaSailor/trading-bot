@@ -198,6 +198,7 @@ class TradingViewFetcher:
         if not item:
             return None
         if time.time() - item["ts"] > self.cache_ttl_seconds:
+            self._cache.pop(key, None)
             return None
         return item["candles"]
 
