@@ -268,17 +268,25 @@ class TelegramHandler:
         targets = signal_data["targets"]
         spot_ltp = round(float(option_data.get("spot_ltp", signal_data["entry"])), 2)
         instrument_label = option_data.get("instrument_label", "SPOT")
+        timeframe = signal_data.get("timeframe", "").upper()
+        header = (
+            f"{signal_data['symbol']} | {timeframe} ({instrument_label})"
+            if timeframe
+            else f"{signal_data['symbol']} | {instrument_label}"
+        )
         signal_time = signal_data.get("signal_time_ist", datetime.now(IST).strftime("%H:%M:%S"))
         signal_date = signal_data.get("signal_date_ist", datetime.now(IST).strftime("%d:%m:%Y"))
+        target_lines = "\n".join(
+            f"Target {index}: {float(target):.2f}"
+            for index, target in enumerate(targets, start=1)
+        )
         return (
             f"{icon}\n"
-            f"{signal_data['symbol']} | {signal_data.get('timeframe', '').upper()} ({instrument_label})\n\n"
+            f"{header}\n\n"
             f"⏰ Signal Time: {signal_time} | {signal_date}\n\n"
             "📊 POSITION DETAILS:\n"
             f"Entry: {signal_data['entry']:.2f}\n"
-            f"Target 1: {targets[0]:.2f}\n"
-            f"Target 2: {targets[1]:.2f}\n"
-            f"Target 3: {targets[2]:.2f}\n"
+            f"{target_lines}\n"
             f"Stop Loss: {signal_data['stop_loss']:.2f}\n\n"
             f"Spot (LTP): ₹{spot_ltp:.2f}\n\n"
             f"Channel: {category.replace('_', ' ').upper()}\n\n"

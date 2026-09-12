@@ -169,6 +169,30 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         self.assertIn("Spot (LTP): ₹60512.25", message)
         self.assertIn("Channel: CRYPTO", message)
 
+    def test_format_signal_message_handles_missing_spot_timeframe_and_short_targets(self):
+        handler = TelegramHandler(token="default-token")
+
+        message = handler.format_signal_message(
+            "crypto",
+            {
+                "symbol": "ETH",
+                "signal": "PUT",
+                "targets": [2500, 2490],
+                "entry": 2510,
+                "stop_loss": 2525,
+                "spot_strategy": True,
+            },
+            {
+                "instrument_label": "SPOT",
+                "spot_ltp": 2505,
+            },
+        )
+
+        self.assertIn("📉 SHORT ENTRY", message)
+        self.assertIn("ETH | SPOT", message)
+        self.assertIn("Target 1: 2500.00", message)
+        self.assertIn("Target 2: 2490.00", message)
+
 
 if __name__ == "__main__":
     unittest.main()

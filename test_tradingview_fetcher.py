@@ -99,6 +99,26 @@ class TradingViewFetcherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "boom"):
                 fetcher._run(boom())
 
+    def test_run_raises_timeout_when_worker_never_reports_result(self):
+        fetcher = TradingViewFetcher()
+
+        class NoopThread:
+            def __init__(self, target, daemon=True):
+                self._target = target
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+        with (
+            patch("tradingview_fetcher.asyncio.get_running_loop", return_value=object()),
+            patch("tradingview_fetcher.threading.Thread", NoopThread),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "TradingView fetch timed out"):
+                fetcher._run(object())
+
 
 if __name__ == "__main__":
     unittest.main()

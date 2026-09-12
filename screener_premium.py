@@ -24,7 +24,7 @@ class PremiumScreener:
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=7)
         self.spot_engine = StrategyEngine(lookback=7)
-        self.stock_option_scan_interval_seconds = 15
+        self.stock_option_scan_interval_seconds = 15 * 60
         self.spot_scan_interval_seconds = 15 * 60
         self._processed_signal_keys: set[str] = set()
         self._processed_signal_order: list[str] = []
