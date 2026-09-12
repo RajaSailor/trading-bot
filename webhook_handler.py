@@ -87,6 +87,8 @@ class WebhookHandler:
 
             symbol_name = symbol.split(":")[-1] if ":" in str(symbol) else str(symbol)
             signal_type = str(signal).upper()
+            if signal_type not in {"CALL", "PUT"}:
+                return {"status": "error", "message": "Unsupported signal"}
             entry_value = float(entry)
             sl_value = float(sl)
             t1_value = float(t1)
@@ -455,7 +457,7 @@ webhook_handler_instance: Optional[WebhookHandler] = None
 @webhook_app.route("/webhook/tradingview", methods=["POST"])
 def webhook_tradingview():
     try:
-        data = request.get_json(silent=True)
+        data = request.get_json(force=True, silent=True)
         if data is None:
             return {"status": "error", "message": "Invalid JSON payload"}, 400
         handler = current_app.config.get("WEBHOOK_HANDLER_INSTANCE", webhook_handler_instance)
@@ -465,7 +467,7 @@ def webhook_tradingview():
         if result.get("status") == "success":
             return result, 200
         message = str(result.get("message", "")).lower()
-        if message in {"missing required fields", "invalid json payload", "unsupported symbol"}:
+        if message in {"missing required fields", "invalid json payload", "unsupported symbol", "unsupported signal"}:
             status = 400
         elif message == "failed to send alert":
             status = 502

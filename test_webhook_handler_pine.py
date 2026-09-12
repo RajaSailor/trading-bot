@@ -45,6 +45,16 @@ class PineWebhookHandlerTests(unittest.TestCase):
         self.assertEqual("index_options", result["channel"])
         self.assertEqual(1, len(telegram.calls))
 
+    def test_handle_tradingview_webhook_accepts_put_signal(self):
+        telegram = FakeTelegram()
+        handler = WebhookHandler(telegram)
+
+        result = handler.handle_tradingview_webhook(sample_pine_payload(signal="PUT"))
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual(1, len(telegram.calls))
+        self.assertEqual("index_options", telegram.calls[0][0])
+
     def test_handle_tradingview_webhook_rejects_missing_required_fields(self):
         telegram = FakeTelegram()
         handler = WebhookHandler(telegram)
