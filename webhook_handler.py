@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
+from flask import Flask, current_app, request
+
 from atm_calculator import calculate_option_details
 from webhook_store import webhook_store
 
@@ -43,6 +45,110 @@ INSTRUMENT_TYPE_BY_CATEGORY = {
     "nifty50_pay_later": "STOCK",
     "crypto": "CRYPTO",
 }
+
+NIFTY50_STOCK_SYMBOLS = {
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO", "BAJFINANCE",
+    "BAJAJFINSV", "BEL", "BHARTIARTL", "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
+    "EICHERMOT", "ETERNAL", "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HEROMOTOCO", "HINDALCO",
+    "HINDUNILVR", "ICICIBANK", "INDUSINDBK", "INFY", "ITC", "JIOFIN", "JSWSTEEL", "KOTAKBANK",
+    "LT", "M&M", "MARUTI", "NESTLEIND", "NTPC", "ONGC", "POWERGRID", "RELIANCE", "SBILIFE",
+    "SBIN", "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM", "TATAMOTORS", "TATASTEEL", "TCS",
+    "TECHM", "TITAN", "TRENT", "ULTRACEMCO", "WIPRO",
+}
+
+
+class WebhookHandler:
+    """Handle incoming TradingView Pine Script webhooks."""
+
+    def __init__(self, telegram_handler, screener=None):
+        self.telegram = telegram_handler
+        self.screener = screener
+        logger.info("✅ Webhook Handler initialized")
+
+    def handle_tradingview_webhook(self, data: dict) -> Dict:
+        try:
+            logger.info("🔔 Webhook received: %s", data)
+
+            if not isinstance(data, dict):
+                return {"status": "error", "message": "Invalid JSON payload"}
+
+            symbol = data.get("symbol")
+            signal = data.get("signal")
+            entry = data.get("entry")
+            sl = data.get("sl")
+            t1 = data.get("t1")
+            t2 = data.get("t2")
+            t3 = data.get("t3")
+
+            required_values = [symbol, signal, entry, sl, t1, t2, t3]
+            if any(value is None for value in required_values):
+                logger.warning("❌ Missing required fields in webhook data")
+                return {"status": "error", "message": "Missing required fields"}
+
+            symbol_name = symbol.split(":")[-1] if ":" in str(symbol) else str(symbol)
+            signal_type = str(signal).upper()
+            if signal_type not in {"CALL", "PUT"}:
+                return {"status": "error", "message": "Unsupported signal"}
+            try:
+                entry_value = float(entry)
+                sl_value = float(sl)
+                t1_value = float(t1)
+                t2_value = float(t2)
+                t3_value = float(t3)
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "Numeric fields must be valid numbers"}
+
+            alert = self._format_alert(symbol_name, signal_type, entry_value, sl_value, t1_value, t2_value, t3_value)
+            channel = self._get_channel(symbol_name)
+            if channel is None:
+                return {"status": "error", "message": "Unsupported symbol"}
+
+            sent = self.telegram.send_to_channel(channel, alert)
+            if not sent:
+                return {"status": "error", "message": "Failed to send alert", "symbol": symbol_name, "channel": channel}
+
+            logger.info("✅ Alert sent to %s", channel)
+            return {"status": "success", "message": "Alert processed", "symbol": symbol_name, "channel": channel}
+
+        except Exception as e:
+            logger.error("❌ Error processing webhook: %s", e, exc_info=True)
+            return {"status": "error", "message": "Internal webhook processing error"}
+
+    def _format_alert(self, symbol: str, signal: str, entry: float, sl: float, t1: float, t2: float, t3: float) -> str:
+        try:
+            direction = "PUT" if signal == "PUT" else "CALL"
+            emoji = "📉" if direction == "PUT" else "🚀"
+            return (
+                f"{emoji} {direction} ENTRY\n"
+                f"{symbol} | TRADINGVIEW SIGNAL\n\n"
+                f"⏰ Signal Time: {self._get_time()}\n\n"
+                "📊 POSITION DETAILS:\n"
+                f"Entry: {entry:.2f}\n"
+                f"Target 1: {t1:.2f} ({t1 - entry:+.2f} points)\n"
+                f"Target 2: {t2:.2f} ({t2 - entry:+.2f} points)\n"
+                f"Target 3: {t3:.2f} ({t3 - entry:+.2f} points)\n"
+                f"Stop Loss: {sl:.2f}\n\n"
+                "📍 Source: TradingView Pine Script Webhook\n"
+                "📢 DISCLAIMER: Educational purposes only."
+            )
+        except Exception:
+            return f"🚀 {symbol} {signal} ALERT"
+
+    def _get_channel(self, symbol: str) -> Optional[str]:
+        symbol_upper = symbol.upper()
+        if symbol_upper in {"GOLD1!", "SILVER1!", "CRUDE1!", "NGAS1!", "GOLD", "SILVER", "CRUDE", "GAS", "NATURALGAS"}:
+            return "commodity_options"
+        if symbol_upper in {"NIFTY50", "NIFTY", "BANKNIFTY", "SENSEX"}:
+            return "index_options"
+        if symbol_upper in {"BTCUSDT", "ETHUSDT", "BTC/USD", "ETH/USD", "BTC", "ETH"}:
+            return "crypto"
+        if symbol_upper in NIFTY50_STOCK_SYMBOLS:
+            return "nifty50_options"
+        return None
+
+    @staticmethod
+    def _get_time() -> str:
+        return datetime.now(IST).strftime("%H:%M:%S | %d-%m-%Y")
 
 
 class WebhookValidationError(ValueError):
@@ -345,3 +451,52 @@ class TradingViewWebhookHandler:
             return previous_dt.strftime("%I:%M %p").lstrip("0")
         except ValueError:
             return breakout_time
+
+
+webhook_handler_instance: Optional[WebhookHandler] = None
+
+def _resolve_status_code(result: dict) -> int:
+    if result.get("status") == "success":
+        return 200
+    message = str(result.get("message", "")).lower()
+    if message in {
+        "missing required fields",
+        "invalid json payload",
+        "unsupported symbol",
+        "unsupported signal",
+        "numeric fields must be valid numbers",
+    }:
+        return 400
+    if message == "failed to send alert":
+        return 502
+    return 500
+
+
+def create_webhook_app(handler_instance: Optional[WebhookHandler] = None) -> Flask:
+    app = Flask(__name__)
+    if handler_instance is not None:
+        app.config["WEBHOOK_HANDLER_INSTANCE"] = handler_instance
+
+    @app.route("/webhook/tradingview", methods=["POST"])
+    def webhook_tradingview():
+        try:
+            data = request.get_json(force=True, silent=True)
+            if data is None:
+                return {"status": "error", "message": "Invalid JSON payload"}, 400
+            handler = current_app.config.get("WEBHOOK_HANDLER_INSTANCE", webhook_handler_instance)
+            if handler is None:
+                return {"status": "error", "message": "Handler not initialized"}, 500
+            result = handler.handle_tradingview_webhook(data)
+            return result, _resolve_status_code(result)
+        except Exception as e:
+            logger.error("❌ Webhook endpoint error: %s", e, exc_info=True)
+            return {"status": "error", "message": "internal webhook processing error"}, 500
+
+    @app.route("/health", methods=["GET"])
+    def health_check():
+        return {"status": "healthy", "service": "trading-bot-webhook"}, 200
+
+    return app
+
+
+webhook_app = create_webhook_app()

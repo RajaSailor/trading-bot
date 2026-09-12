@@ -1,0 +1,93 @@
+//@version=5
+indicator("Premium Breakout Alerts - Webhook", overlay=true)
+
+// ============================================
+// ⚠️ IMPORTANT: WEBHOOK URL IS SET IN ALERT UI
+// ============================================
+//
+// 1) Create alert in TradingView using this script.
+// 2) Condition: "Any alert() function call"
+// 3) Webhook URL:
+//    https://your-render-service-url/webhook/tradingview
+// 4) Keep message empty (script sends JSON via alert()).
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+RED_COLOR = color.rgb(255, 0, 0, 80)
+GREEN_COLOR = color.rgb(0, 255, 0, 80)
+
+// ============================================
+// DETECT RED CANDLE
+// ============================================
+
+is_red = close < open
+is_green = close > open
+
+var float last_red_high = na
+var float last_red_low = na
+var int last_red_bar = na
+
+if is_red
+    last_red_high := high
+    last_red_low := low
+    last_red_bar := bar_index
+    barcolor(RED_COLOR)
+
+// ============================================
+// DETECT BREAKOUT
+// ============================================
+
+breakout_call = not na(last_red_high) and high > last_red_high and bar_index > last_red_bar
+breakout_put = not na(last_red_low) and low < last_red_low and bar_index > last_red_bar
+
+// ============================================
+// SEND WEBHOOK
+// ============================================
+
+if breakout_call
+    entry = last_red_high
+    sl = last_red_low
+    t1 = entry + 10
+    t2 = entry + 20
+    t3 = entry + 30
+    
+    alert(
+        str.format(
+            '{{"symbol":"{0}","signal":"CALL","entry":{1},"sl":{2},"t1":{3},"t2":{4},"t3":{5},"timestamp":"{6}"}}',
+            syminfo.tickerid,
+            entry,
+            sl,
+            t1,
+            t2,
+            t3,
+            time
+        ),
+        alert.freq_once_per_bar
+    )
+    
+    label.new(bar_index, high, "🚀 CALL", color=color.green, textcolor=color.white)
+
+if breakout_put
+    entry = last_red_low
+    sl = last_red_high
+    t1 = entry - 10
+    t2 = entry - 20
+    t3 = entry - 30
+    
+    alert(
+        str.format(
+            '{{"symbol":"{0}","signal":"PUT","entry":{1},"sl":{2},"t1":{3},"t2":{4},"t3":{5},"timestamp":"{6}"}}',
+            syminfo.tickerid,
+            entry,
+            sl,
+            t1,
+            t2,
+            t3,
+            time
+        ),
+        alert.freq_once_per_bar
+    )
+    
+    label.new(bar_index, low, "📉 PUT", color=color.red, textcolor=color.white)

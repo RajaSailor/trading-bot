@@ -193,6 +193,33 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         self.assertIn("Target 1: 2500.00", message)
         self.assertIn("Target 2: 2490.00", message)
 
+    def test_send_to_channel_supports_nifty50_options_alias(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TELEGRAM_BOT_TOKEN": "default-token",
+                "BOT_NIFTY50_OPTIONS_TOKEN": "nifty50-token",
+                "CHANNEL_NIFTY50_OPTIONS_ID": "-3800",
+            },
+            clear=False,
+        ):
+            handler = TelegramHandler()
+            with patch("telegram_handler.requests.post") as mocked_post:
+                mocked_post.return_value.status_code = 200
+                sent = handler.send_to_channel("nifty50_options", "test alert")
+
+        self.assertTrue(sent)
+        mocked_post.assert_called_once()
+        self.assertEqual(-3800, mocked_post.call_args.kwargs["json"]["chat_id"])
+
+    def test_send_to_channel_rejects_unknown_channel(self):
+        handler = TelegramHandler(token="default-token")
+        with patch("telegram_handler.requests.post") as mocked_post:
+            sent = handler.send_to_channel("unknown_channel", "test alert")
+
+        self.assertFalse(sent)
+        mocked_post.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

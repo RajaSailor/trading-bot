@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from data_manager import DataManager
 from position_manager import PositionManager
 from screener_premium import PremiumScreener
 from telegram_handler import TelegramHandler
-from webhook_handler import TradingViewWebhookHandler
+from webhook_handler import TradingViewWebhookHandler, WebhookHandler, create_webhook_app
 from webhook_store import webhook_store
 
 
@@ -185,6 +186,61 @@ class ScreenerController:
             })
         except Exception:
             logger.warning("Unable to restore previous screener state")
+
+
+class MainScreener:
+    """Main orchestrator with Flask webhook server + screener loop."""
+
+    def __init__(self, telegram_handler, screener=None):
+        self.telegram = telegram_handler
+        self.screener = screener
+        self.webhook_handler = WebhookHandler(self.telegram, self.screener)
+        self.app = create_webhook_app(self.webhook_handler)
+        logger.info("✅ Main Screener with Webhook initialized")
+
+    def run_webhook_server(self):
+        try:
+            if os.getenv("ENABLE_EMBEDDED_WEBHOOK_SERVER", "false").lower() != "true":
+                logger.info("ℹ️ Embedded Flask server disabled; use Gunicorn/WSGI with webhook_app")
+                return
+            logger.info("🚀 Starting embedded Flask webhook server on port 5000...")
+            self.app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
+        except Exception as e:
+            logger.error("❌ Webhook server error: %s", e, exc_info=True)
+
+    def run_screener_loop(self):
+        try:
+            logger.info("🚀 Starting screener loop...")
+            while True:
+                try:
+                    if self.screener:
+                        logger.debug("📊 Running unified scan...")
+                        results = self.screener.scan_all()
+                        logger.info("✅ Scan results: %s", results)
+                    else:
+                        logger.debug("⚠️ Screener not initialized, skipping scan")
+                    time.sleep(10)
+                except Exception as e:
+                    logger.error("❌ Error in screener loop: %s", e, exc_info=True)
+                    time.sleep(5)
+        except KeyboardInterrupt:
+            logger.info("Screener loop stopped")
+
+    def run(self):
+        webhook_thread = threading.Thread(target=self.run_webhook_server, daemon=True, name="WebhookServer")
+        webhook_thread.start()
+        logger.info("✅ Webhook server thread started")
+        time.sleep(2)
+        self.run_screener_loop()
+
+
+def create_app(telegram_handler=None, screener=None):
+    if telegram_handler is None:
+        telegram_handler = TelegramHandler()
+    main_screener = MainScreener(telegram_handler, screener)
+    app = main_screener.app
+    app.main_screener = main_screener
+    return app
 
 
 screener_controller = ScreenerController()
