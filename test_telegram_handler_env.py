@@ -141,6 +141,34 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         self.assertIn("Premium (LTP): ₹127.48", message)
         self.assertIn("Channel: COMMODITY OPTIONS", message)
 
+    def test_format_signal_message_uses_spot_breakout_layout(self):
+        handler = TelegramHandler(token="default-token")
+
+        message = handler.format_signal_message(
+            "crypto",
+            {
+                "symbol": "BTC",
+                "signal": "CALL",
+                "targets": [60510, 60520, 60530],
+                "entry": 60500,
+                "stop_loss": 60480,
+                "timeframe": "15-MINUTE BREAKOUT",
+                "spot_strategy": True,
+                "signal_time_ist": "15:30:00",
+                "signal_date_ist": "09:09:2026",
+            },
+            {
+                "instrument_label": "SPOT",
+                "spot_ltp": 60512.25,
+            },
+        )
+
+        self.assertIn("🚀 LONG ENTRY", message)
+        self.assertIn("BTC | 15-MINUTE BREAKOUT (SPOT)", message)
+        self.assertIn("⏰ Signal Time: 15:30:00 | 09:09:2026", message)
+        self.assertIn("Spot (LTP): ₹60512.25", message)
+        self.assertIn("Channel: CRYPTO", message)
+
 
 if __name__ == "__main__":
     unittest.main()

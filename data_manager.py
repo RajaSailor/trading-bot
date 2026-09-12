@@ -93,9 +93,25 @@ _STOCK_ID_OVERRIDES = {
     "TATAMOTORS": 3456,
 }
 
+_TRADINGVIEW_SYMBOL_OVERRIDES = {
+    "NIFTY": "NSE:NIFTY50",
+    "BANKNIFTY": "NSE:BANKNIFTY",
+    "SENSEX": "BSE:SENSEX",
+    "GOLD": "MCX:GOLD1!",
+    "SILVER": "MCX:SILVER1!",
+    "CRUDE OIL": "MCX:CRUDE1!",
+    "NATURALGAS": "MCX:NGAS1!",
+    "BTC": "BINANCE:BTCUSDT",
+    "ETH": "BINANCE:ETHUSDT",
+}
+
 
 def _normalize_stock_symbol(name: str) -> str:
     return _STOCK_ALIASES.get(name, name)
+
+
+def _tradingview_symbol_for(name: str, exchange: str = "NSE") -> str:
+    return _TRADINGVIEW_SYMBOL_OVERRIDES.get(name, f"{exchange}:{name}")
 
 
 class DhanAPIClient:
@@ -254,6 +270,7 @@ class DataManager:
         self._webhook_cache: Dict[Tuple[str, str], dict] = {}
         self._webhook_lock = threading.Lock()
         self._tv = None
+        self._tv_fetcher = None
         self._tv_interval = None
         self._dhan_client = None
         self._security_master_cache: List[Dict[str, Any]] = []
@@ -327,9 +344,41 @@ class DataManager:
         # Route based on data source
         if instrument.data_source == "dhan_primary":
             return self.fetch_dhanhq_candles(instrument.symbol, interval_normalized)
-        
+        if instrument.data_source == "tradingview_primary":
+            return self.fetch_tradingview_candles(instrument, interval_normalized)
+
         # Default: return empty if no provider configured
         logger.warning(f"No data source configured for {instrument.symbol}")
+        return []
+
+    def fetch_tradingview_candles(self, instrument: Instrument, interval: str) -> List[dict]:
+        """Fetch candles from TradingView with DhanHQ fallback where supported."""
+        cache_key = (f"tv:{instrument.symbol}", interval)
+        cached = self._read_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        tradingview_symbol = instrument.tradingview_symbol or _tradingview_symbol_for(
+            instrument.symbol,
+            instrument.exchange if ":" not in instrument.exchange else "NSE",
+        )
+        candles: List[dict] = []
+
+        try:
+            fetcher = self._get_tradingview_fetcher()
+            candles = fetcher.fetch_candles(tradingview_symbol, interval)
+        except Exception as exc:
+            logger.warning("TradingView fetch failed for %s: %s", instrument.symbol, exc)
+
+        if candles:
+            self._write_cache(cache_key, candles)
+            return candles
+
+        if instrument.category != "crypto":
+            logger.info("Falling back to DhanHQ candles for %s", instrument.symbol)
+            return self.fetch_dhanhq_candles(instrument.symbol, interval)
+
+        logger.warning("No TradingView candles available for crypto symbol %s", instrument.symbol)
         return []
 
     def _fetch_dhan_intraday_data(
@@ -457,7 +506,21 @@ class DataManager:
                 exchange_segment="NSE_EQ",
                 instrument_type="EQUITY",
                 category="nifty50_stock_options",
-                data_source="dhan_primary",
+                data_source="tradingview_primary",
+                tradingview_symbol=_tradingview_symbol_for(symbol),
+            )
+            for symbol in NIFTY_50_STOCKS
+        ]
+        stock_spot_instruments = [
+            Instrument(
+                symbol=symbol,
+                security_id=_STOCK_ID_OVERRIDES.get(symbol),
+                exchange="NSE",
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                category="nifty50_stock_spot",
+                data_source="tradingview_primary",
+                tradingview_symbol=_tradingview_symbol_for(symbol),
             )
             for symbol in NIFTY_50_STOCKS
         ]
@@ -470,7 +533,8 @@ class DataManager:
                     exchange_segment="NSE_FNO",
                     instrument_type="FUTIDX",
                     category="index_options",
-                    data_source="dhan_primary",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("NIFTY"),
                 ),
                 Instrument(
                     symbol="BANKNIFTY",
@@ -479,7 +543,8 @@ class DataManager:
                     exchange_segment="NSE_FNO",
                     instrument_type="FUTIDX",
                     category="index_options",
-                    data_source="dhan_primary",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("BANKNIFTY"),
                 ),
                 Instrument(
                     symbol="SENSEX",
@@ -488,7 +553,8 @@ class DataManager:
                     exchange_segment="BSE_FNO",
                     instrument_type="FUTIDX",
                     category="index_options",
-                    data_source="dhan_primary",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("SENSEX", "BSE"),
                 ),
             ],
             "commodity_options": [
@@ -499,7 +565,8 @@ class DataManager:
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
-                    data_source="dhan_primary",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("GOLD", "MCX"),
                 ),
                 Instrument(
                     symbol="SILVER",
@@ -508,7 +575,8 @@ class DataManager:
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
-                    data_source="dhan_primary",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("SILVER", "MCX"),
                 ),
                 Instrument(
                     symbol="CRUDE OIL",
@@ -517,7 +585,8 @@ class DataManager:
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
-                    data_source="dhan_primary",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("CRUDE OIL", "MCX"),
                 ),
                 Instrument(
                     symbol="NATURALGAS",
@@ -526,10 +595,34 @@ class DataManager:
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
-                    data_source="dhan_primary",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("NATURALGAS", "MCX"),
                 ),
             ],
             "nifty50_stock_options": stock_instruments,
+            "nifty50_stock_spot": stock_spot_instruments,
+            "crypto": [
+                Instrument(
+                    symbol="BTC",
+                    security_id=None,
+                    exchange="BINANCE",
+                    exchange_segment="BINANCE",
+                    instrument_type="SPOT",
+                    category="crypto",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("BTC", "BINANCE"),
+                ),
+                Instrument(
+                    symbol="ETH",
+                    security_id=None,
+                    exchange="BINANCE",
+                    exchange_segment="BINANCE",
+                    instrument_type="SPOT",
+                    category="crypto",
+                    data_source="tradingview_primary",
+                    tradingview_symbol=_tradingview_symbol_for("ETH", "BINANCE"),
+                ),
+            ],
         }
 
     def _fetch_security_master_with_cache(self) -> List[Dict[str, Any]]:
@@ -698,6 +791,13 @@ class DataManager:
                 if instrument.symbol == symbol:
                     return instrument
         return None
+
+    def _get_tradingview_fetcher(self):
+        if self._tv_fetcher is None:
+            from tradingview_fetcher import TradingViewFetcher
+
+            self._tv_fetcher = TradingViewFetcher(cache_ttl_seconds=self.cache_ttl_seconds)
+        return self._tv_fetcher
     
     def _read_cache(self, key: Tuple[str, str]) -> Optional[List[dict]]:
         item = self._cache.get(key)

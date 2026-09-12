@@ -9,8 +9,16 @@ class _FakeDataManager:
         return {
             "index_options": [],
             "commodity_options": [SimpleNamespace(symbol="GOLD", category="commodity_options")],
-            "nifty50_stock_options": [],
+            "nifty50_stock_options": [SimpleNamespace(symbol="RELIANCE", category="nifty50_stock_options")],
+            "nifty50_stock_spot": [SimpleNamespace(symbol="INFY", category="nifty50_stock_spot")],
+            "crypto": [],
         }
+
+    def fetch_candles(self, instrument, interval):
+        return [
+            {"open": 100, "high": 103, "low": 97, "close": 98, "timestamp": "t1"},
+            {"open": 98, "high": 104, "low": 97, "close": 101, "timestamp": "t2"},
+        ]
 
 
 class _FakeFetcher:
@@ -44,13 +52,37 @@ class _FakeTelegramHandler:
         self.sent = []
 
     def send_signal_alert(self, category, signal_data, option_data):
-        self.sent.append((category, signal_data["signal"], option_data["option_symbol"]))
+        self.sent.append(
+            (
+                category,
+                signal_data["signal"],
+                option_data.get("option_symbol") or option_data.get("instrument_label"),
+            )
+        )
         return True
 
 
 class _FakePositionManager:
     def add_position(self, **kwargs):
         return object()
+
+
+class _FakeSpotEngine:
+    def add_candle(self, symbol, candle):
+        return True
+
+    def evaluate(self, symbol, strategy_group):
+        return [
+            {
+                "symbol": symbol,
+                "signal": "CALL",
+                "entry": 103,
+                "stop_loss": 97,
+                "targets": [113, 123, 133],
+                "reference_timestamp": "t1",
+                "breakout_timestamp": "t2",
+            }
+        ]
 
 
 class PremiumScreenerTests(unittest.TestCase):
@@ -69,6 +101,41 @@ class PremiumScreenerTests(unittest.TestCase):
             ],
             telegram.sent,
         )
+
+    def test_stock_option_alerts_are_fanned_out_to_all_nifty50_channels(self):
+        telegram = _FakeTelegramHandler()
+        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
+
+        sent = screener._dispatch_option_alert(
+            "nifty50_stock_options",
+            {"signal": "CALL", "symbol": "RELIANCE", "reference_timestamp": "t1", "breakout_timestamp": "t2"},
+            {"option_symbol": "RELIANCE-2950-CE"},
+        )
+
+        self.assertTrue(sent)
+        self.assertEqual(
+            [
+                ("nifty50_stock_options", "CALL", "RELIANCE-2950-CE"),
+                ("nifty50_intraday_5x", "CALL", "RELIANCE-2950-CE"),
+                ("nifty50_pay_later", "CALL", "RELIANCE-2950-CE"),
+            ],
+            telegram.sent,
+        )
+
+    def test_scan_spot_instruments_sends_stock_spot_alerts_to_primary_channel(self):
+        telegram = _FakeTelegramHandler()
+        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
+        screener.spot_engine = _FakeSpotEngine()
+
+        alerts = screener._scan_spot_instruments(
+            screener.stock_spot_instruments,
+            "15min",
+            "group2",
+            primary_category="nifty50_stock_options",
+        )
+
+        self.assertEqual(1, alerts)
+        self.assertEqual([("nifty50_stock_options", "CALL", "SPOT")], telegram.sent)
 
 
 if __name__ == "__main__":
