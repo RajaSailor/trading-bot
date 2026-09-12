@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -203,7 +204,10 @@ class MainScreener:
 
     def run_webhook_server(self):
         try:
-            logger.info("🚀 Starting Flask webhook server on port 5000...")
+            if os.getenv("ENABLE_EMBEDDED_WEBHOOK_SERVER", "false").lower() != "true":
+                logger.info("ℹ️ Embedded Flask server disabled; use Gunicorn/WSGI with webhook_app")
+                return
+            logger.info("🚀 Starting embedded Flask webhook server on port 5000...")
             self.app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
         except Exception as e:
             logger.error("❌ Webhook server error: %s", e, exc_info=True)

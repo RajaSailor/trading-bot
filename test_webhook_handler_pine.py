@@ -65,6 +65,17 @@ class PineWebhookHandlerTests(unittest.TestCase):
         self.assertEqual(200, health_response.status_code)
         self.assertEqual("healthy", health_response.get_json()["status"])
 
+    def test_webhook_endpoint_requires_initialized_handler(self):
+        app = webhook_app
+        app.testing = True
+        client = app.test_client()
+        wh.webhook_handler_instance = None
+
+        response = client.post("/webhook/tradingview", json=sample_pine_payload())
+
+        self.assertEqual(500, response.status_code)
+        self.assertEqual("error", response.get_json()["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

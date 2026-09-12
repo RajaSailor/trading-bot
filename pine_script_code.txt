@@ -71,7 +71,6 @@ if breakout_call
     )
     
     label.new(bar_index, high, "🚀 CALL", color=color.green, textcolor=color.white)
-    alert("CALL BREAKOUT: " + syminfo.tickerid, alert.freq_once_per_bar)
 
 if breakout_put
     entry = last_red_low
@@ -95,4 +94,3 @@ if breakout_put
     )
     
     label.new(bar_index, low, "📉 PUT", color=color.red, textcolor=color.white)
-    alert("PUT BREAKOUT: " + syminfo.tickerid, alert.freq_once_per_bar)

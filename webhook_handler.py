@@ -122,7 +122,7 @@ class WebhookHandler:
 
     @staticmethod
     def _get_time() -> str:
-        return datetime.now().strftime("%H:%M:%S | %d:%m:%Y")
+        return datetime.now().strftime("%H:%M:%S | %d-%m-%Y")
 
 
 class WebhookValidationError(ValueError):
