@@ -30,6 +30,7 @@ class TradingViewFetcher:
         self.cache_ttl_seconds = cache_ttl_seconds
         self.timeout_seconds = timeout_seconds
         self._cache: Dict[Tuple[str, ...], dict] = {}
+        self._lock = threading.Lock()
 
     def fetch_candles(self, symbol: str, interval: str, limit: int = 120) -> List[dict]:
         cache_key = (symbol, interval, str(limit))
@@ -201,13 +202,15 @@ class TradingViewFetcher:
         return candles
 
     def _read_cache(self, key: Tuple[str, ...]) -> List[dict] | None:
-        item = self._cache.get(key)
-        if not item:
-            return None
-        if time.time() - item["ts"] > self.cache_ttl_seconds:
-            self._cache.pop(key, None)
-            return None
-        return item["candles"]
+        with self._lock:
+            item = self._cache.get(key)
+            if not item:
+                return None
+            if time.time() - item["ts"] > self.cache_ttl_seconds:
+                self._cache.pop(key, None)
+                return None
+            return item["candles"]
 
     def _write_cache(self, key: Tuple[str, ...], candles: List[dict]) -> None:
-        self._cache[key] = {"ts": time.time(), "candles": candles}
+        with self._lock:
+            self._cache[key] = {"ts": time.time(), "candles": candles}

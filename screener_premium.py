@@ -69,14 +69,15 @@ class PremiumScreener:
                 )
                 self.last_run["stock_spot_15min"] = time.time()
 
-        if time.time() - self.last_run["crypto_15min"] >= self.spot_scan_interval_seconds:
-            alerts += self._scan_spot_instruments(
-                self.crypto_instruments,
-                "15min",
-                StrategyEngine.GROUP_2,
-                primary_category="crypto",
-            )
-            self.last_run["crypto_15min"] = time.time()
+        if self._in_window(now.time(), dt_time(0, 0), dt_time(23, 59, 59)):
+            if time.time() - self.last_run["crypto_15min"] >= self.spot_scan_interval_seconds:
+                alerts += self._scan_spot_instruments(
+                    self.crypto_instruments,
+                    "15min",
+                    StrategyEngine.GROUP_2,
+                    primary_category="crypto",
+                )
+                self.last_run["crypto_15min"] = time.time()
 
         return alerts
 
@@ -160,7 +161,6 @@ class PremiumScreener:
                     if not accepted:
                         continue
 
-                    self._remember_signal_key(signal_key)
                     telegram_payload = {
                         "option_symbol": option_data["option_symbol"],
                         "strike_price": option_data["atm_strike"],
@@ -168,6 +168,7 @@ class PremiumScreener:
                         "option_type": option_data["option_type"],
                     }
                     if self._dispatch_option_alert(instrument.category, signal, telegram_payload):
+                        self._remember_signal_key(signal_key)
                         logger.info("✅ Alert sent for %s %s", instrument.symbol, signal["signal"])
                         alerts += 1
                     else:
