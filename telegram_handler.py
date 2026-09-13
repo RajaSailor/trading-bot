@@ -102,8 +102,8 @@ class TelegramHandler:
         fallback_channel = (
             configured_channel
             or config["channel_id"]
-            or os.getenv("TELEGRAM_CHAT_ID")
             or self.default_chat_id
+            or os.getenv("TELEGRAM_CHAT_ID")
             or os.getenv("CHAT_ID", "0")
         )
         return int(fallback_channel)

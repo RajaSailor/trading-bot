@@ -44,6 +44,28 @@ class TelegramAlertsFixedEnvTests(unittest.TestCase):
             finally:
                 alerts.shutdown()
 
+    def test_service_and_trade_control_bots_fall_back_to_default_envs(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "BOT_SERVICE_ALERTS_TOKEN": "",
+                "CHANNEL_SERVICE_ALERTS_ID": "",
+                "BOT_TRADE_CONTROL_TOKEN": "",
+                "CHANNEL_TRADE_CONTROL_ID": "",
+                "TELEGRAM_BOT_TOKEN": "default-token",
+                "TELEGRAM_CHAT_ID": "-9001",
+            },
+            clear=False,
+        ):
+            alerts = TelegramAlertsFixed()
+            try:
+                self.assertEqual("default-token", alerts.bots["service_alerts"]["token"])
+                self.assertEqual(-9001, alerts.bots["service_alerts"]["channel_id"])
+                self.assertEqual("default-token", alerts.bots["trade_control"]["token"])
+                self.assertEqual(-9001, alerts.bots["trade_control"]["channel_id"])
+            finally:
+                alerts.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()
