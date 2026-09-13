@@ -33,28 +33,28 @@ except ImportError:
 # TELEGRAM CHANNELS
 TELEGRAM_CHANNELS = {
     "INDEX": {
-        "token": "8601160697:AAFFxscCMfqcrXaf1lw69xK7Ue-RW_8aIzI",
-        "chat_id": "-1003814243881",
+        "token": os.getenv("BOT_INDEX_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+        "chat_id": os.getenv("CHANNEL_INDEX_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
         "symbols": ["NIFTY", "BANKNIFTY", "SENSEX"]
     },
     "COMMODITY": {
-        "token": "8762956800:AAEkQZfYhawfxQEua8OSYcnp3FPRU2xywsc",
-        "chat_id": "-1004466883026",
+        "token": os.getenv("BOT_COMMODITY_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+        "chat_id": os.getenv("CHANNEL_COMMODITY_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
         "symbols": ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS"]
     },
     "NIFTY_50_OPTIONS": {
-        "token": "8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ",
-        "chat_id": "-1003966854933",
+        "token": os.getenv("BOT_NIFTY50_OPTIONS_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+        "chat_id": os.getenv("CHANNEL_NIFTY50_OPTIONS_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
         "symbols": ["RELIANCE", "TCS", "INFY"]
     },
     "NIFTY_50_5X": {
-        "token": "8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ",
-        "chat_id": "-1004403277287",
+        "token": os.getenv("BOT_NIFTY50_5X_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+        "chat_id": os.getenv("CHANNEL_NIFTY50_5X_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
         "symbols": ["RELIANCE", "TCS", "INFY"]
     },
     "NIFTY_50_PAY_LATER": {
-        "token": "8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ",
-        "chat_id": "-1003966854994",
+        "token": os.getenv("BOT_NIFTY50_PAY_LATER_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+        "chat_id": os.getenv("CHANNEL_NIFTY50_PAY_LATER_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
         "symbols": ["RELIANCE", "TCS", "INFY"]
     },
 }

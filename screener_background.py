@@ -42,34 +42,50 @@ ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 # TELEGRAM MULTI-BOT CONFIGURATION
 # ============================================================================
 # System alerts bot (daily checks, errors, mobile control)
-SYSTEM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")  # 8654404135:AAGHqdH81h1t1_RzjfqBSsbRk8O5l-ozRdc
-SYSTEM_CHAT_ID = int(os.getenv("CHAT_ID"))      # -1004321977761
+def _get_env_int(*names, default=0):
+    for name in names:
+        value = os.getenv(name)
+        if not value:
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            logger.warning("Invalid integer value for %s", name)
+    return default
+
+
+SYSTEM_BOT_TOKEN = (
+    os.getenv("BOT_SERVICE_ALERTS_TOKEN")
+    or os.getenv("TELEGRAM_BOT_TOKEN")
+    or os.getenv("TELEGRAM_TOKEN")
+)
+SYSTEM_CHAT_ID = _get_env_int("CHANNEL_SERVICE_ALERTS_ID", "TELEGRAM_CHAT_ID", "CHAT_ID")
 
 # Trading bots - one for each asset class
 TRADING_BOTS = {
     "INDEX": {
-        "token": os.getenv("BOT_INDEX_TOKEN"),           # 8601160697:AAFFxscCMfqcrXaf1lw69xK7Ue-RW_8aIzI
-        "channel_id": int(os.getenv("CHANNEL_INDEX_ID")) # -1003966854994
+        "token": os.getenv("BOT_INDEX_TOKEN"),
+        "channel_id": _get_env_int("CHANNEL_INDEX_ID")
     },
     "NIFTY50_STOCKS": {
-        "token": os.getenv("BOT_NIFTY50_OPTIONS_TOKEN"),           # 8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ
-        "channel_id": int(os.getenv("CHANNEL_NIFTY50_OPTIONS_ID")) # -1003804613787
+        "token": os.getenv("BOT_NIFTY50_OPTIONS_TOKEN"),
+        "channel_id": _get_env_int("CHANNEL_NIFTY50_OPTIONS_ID")
     },
     "COMMODITY": {
-        "token": os.getenv("BOT_COMMODITY_TOKEN"),           # 8762956800:AAEkQZfYhawfxQEua8OSYcnp3FPRU2xywsc
-        "channel_id": int(os.getenv("CHANNEL_COMMODITY_ID")) # -1004403277287
+        "token": os.getenv("BOT_COMMODITY_TOKEN"),
+        "channel_id": _get_env_int("CHANNEL_COMMODITY_ID")
     },
     "NIFTY50_INTRADAY": {
-        "token": os.getenv("BOT_NIFTY50_5X_TOKEN"),           # 8265739611:AAFbraUdEY01eJOel76S8mMgBiZT4otxkd4
-        "channel_id": int(os.getenv("CHANNEL_NIFTY50_5X_ID")) # -1004466883026
+        "token": os.getenv("BOT_NIFTY50_5X_TOKEN"),
+        "channel_id": _get_env_int("CHANNEL_NIFTY50_5X_ID")
     },
     "NIFTY50_PAYLATER": {
-        "token": os.getenv("BOT_NIFTY50_PAY_LATER_TOKEN"),           # 8934391945:AAEdycuHV7sZP6eASCU2j7kQ9SBG7e9D4Q0
-        "channel_id": int(os.getenv("CHANNEL_NIFTY50_PAY_LATER_ID")) # -1003814243881
+        "token": os.getenv("BOT_NIFTY50_PAY_LATER_TOKEN"),
+        "channel_id": _get_env_int("CHANNEL_NIFTY50_PAY_LATER_ID")
     },
     "CRYPTO": {
-        "token": os.getenv("BOT_CRYPTO_TOKEN"),           # 8921592389:AAF7IKqXz2a7yp0a--m0vP21itKHVKqF-7k
-        "channel_id": int(os.getenv("CHANNEL_CRYPTO_ID")) # -1004482078964
+        "token": os.getenv("BOT_CRYPTO_TOKEN"),
+        "channel_id": _get_env_int("CHANNEL_CRYPTO_ID")
     }
 }
 

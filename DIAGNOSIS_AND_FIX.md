@@ -64,9 +64,9 @@ ALL Signals → Single bot → Single channel ❌
 
 ### Before (BROKEN):
 ```env
-API_KEY=f6c12cb2
+API_KEY=your_dhan_api_key
 ACCESS_TOKEN=...
-TELEGRAM_TOKEN=8654404135:AAGHqdH81h1t1_RzjfqBSsbRk8O5l-ozRdc
+TELEGRAM_TOKEN=your_default_telegram_bot_token
 CHAT_ID=-1004321977761
 
 # ❌ 6 bot tokens NOT in .env
@@ -76,12 +76,12 @@ CHAT_ID=-1004321977761
 ### After (FIXED):
 ```env
 # ✅ ALL 6 bot tokens
-BOT_INDEX_TOKEN=8601160697:AAFFxscCMfqcrXaf1lw69xK7Ue-RW_8aIzI
-BOT_COMMODITY_TOKEN=8762956800:AAEkQZfYhawfxQEua8OSYcnp3FPRU2xywsc
-BOT_NIFTY50_OPTIONS_TOKEN=8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ
-BOT_NIFTY50_5X_TOKEN=8265739611:AAFbraUdEY01eJOel76S8mMgBiZT4otxkd4
-BOT_NIFTY50_PAY_LATER_TOKEN=8934391945:AAEdycuHV7sZP6eASCU2j7kQ9SBG7e9D4Q0
-BOT_CRYPTO_TOKEN=8921592389:AAF7IKqXz2a7yp0a--m0vP21itKHVKqF-7k
+BOT_INDEX_TOKEN=your_index_bot_token
+BOT_COMMODITY_TOKEN=your_commodity_bot_token
+BOT_NIFTY50_OPTIONS_TOKEN=your_nifty50_options_bot_token
+BOT_NIFTY50_5X_TOKEN=your_nifty50_5x_bot_token
+BOT_NIFTY50_PAY_LATER_TOKEN=your_nifty50_pay_later_bot_token
+BOT_CRYPTO_TOKEN=your_crypto_bot_token
 
 # ✅ ALL 6 channel IDs
 CHANNEL_INDEX_ID=-1003814243881

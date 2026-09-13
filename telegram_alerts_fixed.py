@@ -19,8 +19,8 @@ class TelegramAlertsFixed:
     
     BOTS = {
         "index_options": {
-            "token_env": "TELEGRAM_BOT_TOKEN",
-            "channel_env": "TELEGRAM_CHAT_ID",
+            "token_envs": ["BOT_INDEX_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"],
+            "channel_envs": ["CHANNEL_INDEX_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"],
             "description": "NIFTY 50 & BANKNIFTY Index Options"
         },
         "commodity": {
@@ -48,6 +48,16 @@ class TelegramAlertsFixed:
             "channel_env": "CHANNEL_NIFTY50_PAY_LATER_ID",
             "description": "NIFTY 50 Pay Later"
         },
+        "service_alerts": {
+            "token_envs": ["BOT_SERVICE_ALERTS_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"],
+            "channel_envs": ["CHANNEL_SERVICE_ALERTS_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"],
+            "description": "Service health, error alerts, and monitoring"
+        },
+        "trade_control": {
+            "token_envs": ["BOT_TRADE_CONTROL_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"],
+            "channel_envs": ["CHANNEL_TRADE_CONTROL_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"],
+            "description": "Trade approvals and remote control"
+        },
     }
     
     def __init__(self) -> None:
@@ -67,8 +77,8 @@ class TelegramAlertsFixed:
     def _init_bots(self) -> None:
         """Initialize all configured telegram bots"""
         for bot_name, config in self.BOTS.items():
-            token = os.getenv(config["token_env"])
-            channel_id = os.getenv(config["channel_env"])
+            token = self._get_first_env(config.get("token_envs") or [config["token_env"]])
+            channel_id = self._get_first_env(config.get("channel_envs") or [config["channel_env"]])
             
             if token and channel_id:
                 try:
@@ -86,6 +96,14 @@ class TelegramAlertsFixed:
                     logger.error(f"❌ Failed to init bot '{bot_name}': {e}")
             else:
                 logger.warning(f"⚠️  Bot '{bot_name}' not configured")
+
+    @staticmethod
+    def _get_first_env(names):
+        for name in names:
+            value = os.getenv(name)
+            if value:
+                return value
+        return None
     
     def _start_sender_thread(self) -> None:
         """Start background thread for async message sending"""

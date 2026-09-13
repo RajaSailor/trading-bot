@@ -11,7 +11,7 @@ API_KEY=your_dhan_client_id
 ACCESS_TOKEN=your_dhan_access_token
 
 # TradingView Login
-TV_USERNAME=Sailor_raja12390
+TV_USERNAME=your_tradingview_username
 TV_PASSWORD=your_tv_password
 
 # Telegram Bot

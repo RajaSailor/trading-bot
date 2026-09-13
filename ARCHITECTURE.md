@@ -398,7 +398,7 @@ HOW TO CREATE TELEGRAM BOTS
 3. Follow prompts:
    - Name: "Index Options Bot"
    - Username: "nifty_alerts_bot" (must be unique)
-4. You'll get a token like: 8601160697:AAFFxscCMfqcrXaf1lw69xK7Ue-RW_8aIzI
+4. You'll get a token like: your_index_bot_token
 5. Save this token in .env as: BOT_INDEX_TOKEN
 
 REPEAT FOR EACH BOT:

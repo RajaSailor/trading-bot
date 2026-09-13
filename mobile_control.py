@@ -21,9 +21,24 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv(dotenv_path="./.env", override=True)
 
+def _get_env_int(*names, default=0):
+    for name in names:
+        value = os.getenv(name)
+        if not value:
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            logger.warning("Invalid integer value for %s", name)
+    return default
+
 # System bot token for mobile control
-SYSTEM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-SYSTEM_CHAT_ID = int(os.getenv("CHAT_ID"))
+SYSTEM_BOT_TOKEN = (
+    os.getenv("BOT_TRADE_CONTROL_TOKEN")
+    or os.getenv("TELEGRAM_BOT_TOKEN")
+    or os.getenv("TELEGRAM_TOKEN")
+)
+SYSTEM_CHAT_ID = _get_env_int("CHANNEL_TRADE_CONTROL_ID", "TELEGRAM_CHAT_ID", "CHAT_ID")
 
 # ============================================================================
 # COMMAND HANDLERS
@@ -460,4 +475,3 @@ def start_mobile_control():
 
 if __name__ == "__main__":
     start_mobile_control()
-
