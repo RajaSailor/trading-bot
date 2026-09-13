@@ -30,34 +30,34 @@ except ImportError:
     DHANHQ_AVAILABLE = False
     logger.warning("⚠️ DhanHQ not available - using mock prices")
 
-# TELEGRAM CHANNELS
-TELEGRAM_CHANNELS = {
-    "INDEX": {
-        "token": os.getenv("BOT_INDEX_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
-        "chat_id": os.getenv("CHANNEL_INDEX_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
-        "symbols": ["NIFTY", "BANKNIFTY", "SENSEX"]
-    },
-    "COMMODITY": {
-        "token": os.getenv("BOT_COMMODITY_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
-        "chat_id": os.getenv("CHANNEL_COMMODITY_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
-        "symbols": ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS"]
-    },
-    "NIFTY_50_OPTIONS": {
-        "token": os.getenv("BOT_NIFTY50_OPTIONS_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
-        "chat_id": os.getenv("CHANNEL_NIFTY50_OPTIONS_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
-        "symbols": ["RELIANCE", "TCS", "INFY"]
-    },
-    "NIFTY_50_5X": {
-        "token": os.getenv("BOT_NIFTY50_5X_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
-        "chat_id": os.getenv("CHANNEL_NIFTY50_5X_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
-        "symbols": ["RELIANCE", "TCS", "INFY"]
-    },
-    "NIFTY_50_PAY_LATER": {
-        "token": os.getenv("BOT_NIFTY50_PAY_LATER_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
-        "chat_id": os.getenv("CHANNEL_NIFTY50_PAY_LATER_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
-        "symbols": ["RELIANCE", "TCS", "INFY"]
-    },
-}
+def get_telegram_channels():
+    return {
+        "INDEX": {
+            "token": os.getenv("BOT_INDEX_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_INDEX_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["NIFTY", "BANKNIFTY", "SENSEX"]
+        },
+        "COMMODITY": {
+            "token": os.getenv("BOT_COMMODITY_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_COMMODITY_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS"]
+        },
+        "NIFTY_50_OPTIONS": {
+            "token": os.getenv("BOT_NIFTY50_OPTIONS_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_NIFTY50_OPTIONS_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["RELIANCE", "TCS", "INFY"]
+        },
+        "NIFTY_50_5X": {
+            "token": os.getenv("BOT_NIFTY50_5X_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_NIFTY50_5X_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["RELIANCE", "TCS", "INFY"]
+        },
+        "NIFTY_50_PAY_LATER": {
+            "token": os.getenv("BOT_NIFTY50_PAY_LATER_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_NIFTY50_PAY_LATER_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["RELIANCE", "TCS", "INFY"]
+        },
+    }
 
 SYMBOLS = {
     "NIFTY": {"security_id": 13, "exchange": "NSE_FNO", "type": "INDEX"},
@@ -141,7 +141,7 @@ def calculate_atm_options(spot_price, symbol):
 async def send_message_async(channel_name, message):
     """Send message to Telegram channel"""
     try:
-        config = TELEGRAM_CHANNELS[channel_name]
+        config = get_telegram_channels()[channel_name]
         bot = Bot(token=config["token"])
         chat_id = int(config["chat_id"])
         
@@ -275,9 +275,10 @@ def send_all_test_alerts():
     
     success_count = 0
     total_count = 0
+    telegram_channels = get_telegram_channels()
     
     # Send to each channel
-    for channel_name, config in TELEGRAM_CHANNELS.items():
+    for channel_name, config in telegram_channels.items():
         logger.info(f"\n📢 {channel_name} Channel:")
         logger.info(f"   Chat ID: {config['chat_id']}")
         logger.info(f"   Symbols: {', '.join(config['symbols'])}")

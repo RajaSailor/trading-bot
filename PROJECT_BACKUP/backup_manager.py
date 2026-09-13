@@ -32,7 +32,7 @@ def _get_env_int(*names, default=0):
             try:
                 return int(value)
             except ValueError:
-                return default
+                continue
     return default
 
 TELEGRAM_BOT_TOKENS = {
