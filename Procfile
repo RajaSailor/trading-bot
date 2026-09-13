@@ -1,1 +1,2 @@
-web: python screener_app.py
+web: gunicorn main:app
+worker: python unified_main.py

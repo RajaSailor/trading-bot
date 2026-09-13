@@ -220,6 +220,42 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         self.assertFalse(sent)
         mocked_post.assert_not_called()
 
+    def test_send_to_channel_routes_trade_control(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TELEGRAM_BOT_TOKEN": "default-token",
+                "BOT_TRADE_CONTROL_TOKEN": "trade-token",
+                "CHANNEL_TRADE_CONTROL_ID": "-7894",
+            },
+            clear=False,
+        ):
+            handler = TelegramHandler()
+            with patch("telegram_handler.requests.post") as mocked_post:
+                mocked_post.return_value.status_code = 200
+                sent = handler.send_to_channel("trade_control", "approval test")
+
+        self.assertTrue(sent)
+        self.assertEqual(-7894, mocked_post.call_args.kwargs["json"]["chat_id"])
+
+    def test_send_to_channel_routes_service_alerts(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TELEGRAM_BOT_TOKEN": "default-token",
+                "BOT_SERVICE_ALERTS_TOKEN": "service-token",
+                "CHANNEL_SERVICE_ALERTS_ID": "-7895",
+            },
+            clear=False,
+        ):
+            handler = TelegramHandler()
+            with patch("telegram_handler.requests.post") as mocked_post:
+                mocked_post.return_value.status_code = 200
+                sent = handler.send_to_channel("service_alerts", "service test")
+
+        self.assertTrue(sent)
+        self.assertEqual(-7895, mocked_post.call_args.kwargs["json"]["chat_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

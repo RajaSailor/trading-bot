@@ -6,6 +6,7 @@ from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 
 from atm_options_fetcher import ATMOptionsFetcher
+from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import PremiumStrategyEngine
 from strategy_engine import StrategyEngine
 
@@ -17,13 +18,24 @@ logger = logging.getLogger(__name__)
 class PremiumScreener:
     """Screen ATM option premium candles instead of underlying candles."""
 
-    def __init__(self, data_manager, telegram_handler, position_manager) -> None:
+    def __init__(
+        self,
+        data_manager,
+        telegram_handler,
+        position_manager,
+        trade_control_handler=None,
+        trade_control_bot=None,
+        live_signal_detector: LiveSignalDetector | None = None,
+    ) -> None:
         self.data_manager = data_manager
         self.telegram_handler = telegram_handler
         self.position_manager = position_manager
+        self.trade_control_handler = trade_control_handler
+        self.trade_control_bot = trade_control_bot
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=7)
         self.spot_engine = StrategyEngine(lookback=7)
+        self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.stock_option_scan_interval_seconds = 15 * 60
         self.spot_scan_interval_seconds = 15 * 60
         self._processed_signal_keys: set[str] = set()
@@ -128,6 +140,13 @@ class PremiumScreener:
                     if signal_key in self._processed_signal_keys:
                         logger.debug("⚠️ [%s] Duplicate premium signal skipped: %s", instrument.symbol, signal_key)
                         continue
+                    if not self.live_signal_detector.should_emit(
+                        signal_key,
+                        str(signal.get("reference_timestamp", "")),
+                        str(signal.get("breakout_timestamp", "")),
+                    ):
+                        logger.debug("⚠️ [%s] Non-live/historical signal skipped: %s", instrument.symbol, signal_key)
+                        continue
 
                     option_data = ce_option if signal["option_type"] == "CE" else pe_option
                     if not option_data:
@@ -148,8 +167,16 @@ class PremiumScreener:
                     )
                     signal["timeframe"] = self._display_timeframe(interval)
                     signal["premium_strategy"] = True
+                    signal["category"] = instrument.category
                     signal["signal_time_ist"] = datetime.now(IST).strftime("%H:%M:%S")
                     signal["signal_date_ist"] = datetime.now(IST).strftime("%d:%m:%Y")
+
+                    if self.trade_control_handler and self.trade_control_bot:
+                        trade_request = self.trade_control_bot.create_and_send_request(signal, option_data)
+                        if trade_request:
+                            self._remember_signal_key(signal_key)
+                            alerts += 1
+                            continue
 
                     accepted = self.position_manager.add_position(
                         symbol=instrument.symbol,
@@ -203,6 +230,15 @@ class PremiumScreener:
                     continue
 
                 for signal in engine.evaluate(instrument.symbol, strategy_group):
+                    signal_key = self._signal_key(primary_category, signal)
+                    if signal_key in self._processed_signal_keys:
+                        continue
+                    if not self.live_signal_detector.should_emit(
+                        signal_key,
+                        str(signal.get("reference_timestamp", "")),
+                        str(signal.get("breakout_timestamp", "")),
+                    ):
+                        continue
                     logger.info(
                         "🚀 [%s] %s spot breakout for %s @ %.2f",
                         primary_category,
@@ -212,6 +248,7 @@ class PremiumScreener:
                     )
                     signal["timeframe"] = self._display_timeframe(interval)
                     signal["spot_strategy"] = True
+                    signal["category"] = primary_category
                     signal["signal_time_ist"] = datetime.now(IST).strftime("%H:%M:%S")
                     signal["signal_date_ist"] = datetime.now(IST).strftime("%d:%m:%Y")
 
@@ -230,6 +267,7 @@ class PremiumScreener:
                         "spot_ltp": latest["close"],
                     }
                     if self.telegram_handler.send_signal_alert(primary_category, signal, spot_payload):
+                        self._remember_signal_key(signal_key)
                         alerts += 1
             except Exception as exc:
                 logger.error("❌ Spot screener failed for %s: %s", instrument.symbol, exc, exc_info=True)
