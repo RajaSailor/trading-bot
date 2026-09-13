@@ -138,10 +138,10 @@ def calculate_atm_options(spot_price, symbol):
         "put_premium": round(base_premium * 0.8, 2)
     }
 
-async def send_message_async(channel_name, message):
+async def send_message_async(channel_name, message, telegram_channels=None):
     """Send message to Telegram channel"""
     try:
-        config = get_telegram_channels()[channel_name]
+        config = (telegram_channels or get_telegram_channels())[channel_name]
         bot = Bot(token=config["token"])
         chat_id = int(config["chat_id"])
         
@@ -160,12 +160,12 @@ async def send_message_async(channel_name, message):
         logger.error(f"❌ Error for {channel_name}: {e}")
         return False
 
-def send_message(channel_name, message):
+def send_message(channel_name, message, telegram_channels=None):
     """Send message (blocking wrapper)"""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(send_message_async(channel_name, message))
+        result = loop.run_until_complete(send_message_async(channel_name, message, telegram_channels))
         loop.close()
         return result
     except Exception as e:
@@ -302,7 +302,7 @@ def send_all_test_alerts():
                 message = format_nifty50_alert(symbol, spot_price, options)
             
             # Send alert
-            if send_message(channel_name, message):
+            if send_message(channel_name, message, telegram_channels):
                 success_count += 1
                 logger.info(f"     ✅ Alert sent for {symbol}")
             else:

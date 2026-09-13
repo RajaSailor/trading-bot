@@ -36,7 +36,7 @@ TELEGRAM_BOTS = {
     "INDEX_OPTIONS": {
         "bot_name": "winindexoptionsalertsbot",
         "bot_url": "t.me/winindexoptionsalertsbot",
-        "token": os.getenv("BOT_INDEX_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN", ""),
+        "token": _get_token("BOT_INDEX_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"),
         "channel_name": "📊 INDEX OPTIONS ALERTS",
         "channel_chat_id": _get_channel_id("CHANNEL_INDEX_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
         "description": "Real-time NIFTY 50, BANK NIFTY & SENSEX Options Trading Signals",
