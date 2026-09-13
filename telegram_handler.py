@@ -99,7 +99,13 @@ class TelegramHandler:
 
     def _resolve_channel_id(self, config: dict) -> int:
         configured_channel = os.getenv(config["channel_env"])
-        fallback_channel = configured_channel or config["channel_id"] or self.default_chat_id or os.getenv("CHAT_ID", "0")
+        fallback_channel = (
+            configured_channel
+            or config["channel_id"]
+            or os.getenv("TELEGRAM_CHAT_ID")
+            or self.default_chat_id
+            or os.getenv("CHAT_ID", "0")
+        )
         return int(fallback_channel)
 
     def _get_bot_for_category(self, category: str) -> tuple[str, int]:

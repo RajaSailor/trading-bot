@@ -24,28 +24,28 @@ class TelegramAlertsFixed:
             "description": "NIFTY 50 & BANKNIFTY Index Options"
         },
         "commodity": {
-            "token_env": "BOT_COMMODITY_TOKEN",
-            "channel_env": "CHANNEL_COMMODITY_ID",
+            "token_envs": ["BOT_COMMODITY_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"],
+            "channel_envs": ["CHANNEL_COMMODITY_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"],
             "description": "Gold, Silver, Crude Oil, Natural Gas"
         },
         "crypto": {
-            "token_env": "BOT_CRYPTO_TOKEN",
-            "channel_env": "CHANNEL_CRYPTO_ID",
+            "token_envs": ["BOT_CRYPTO_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"],
+            "channel_envs": ["CHANNEL_CRYPTO_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"],
             "description": "Bitcoin, Ethereum, Crypto Pairs"
         },
         "nifty50_5x": {
-            "token_env": "BOT_NIFTY50_5X_TOKEN",
-            "channel_env": "CHANNEL_NIFTY50_5X_ID",
+            "token_envs": ["BOT_NIFTY50_5X_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"],
+            "channel_envs": ["CHANNEL_NIFTY50_5X_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"],
             "description": "NIFTY 50 Intraday 5X"
         },
         "nifty50_options": {
-            "token_env": "BOT_NIFTY50_OPTIONS_TOKEN",
-            "channel_env": "CHANNEL_NIFTY50_OPTIONS_ID",
+            "token_envs": ["BOT_NIFTY50_OPTIONS_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"],
+            "channel_envs": ["CHANNEL_NIFTY50_OPTIONS_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"],
             "description": "NIFTY 50 Stock Options"
         },
         "nifty50_pay_later": {
-            "token_env": "BOT_NIFTY50_PAY_LATER_TOKEN",
-            "channel_env": "CHANNEL_NIFTY50_PAY_LATER_ID",
+            "token_envs": ["BOT_NIFTY50_PAY_LATER_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"],
+            "channel_envs": ["CHANNEL_NIFTY50_PAY_LATER_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"],
             "description": "NIFTY 50 Pay Later"
         },
         "service_alerts": {
@@ -77,8 +77,8 @@ class TelegramAlertsFixed:
     def _init_bots(self) -> None:
         """Initialize all configured telegram bots"""
         for bot_name, config in self.BOTS.items():
-            token = self._get_first_env(config.get("token_envs") or [config["token_env"]])
-            channel_id = self._get_first_env(config.get("channel_envs") or [config["channel_env"]])
+            token = self._get_first_env(config["token_envs"])
+            channel_id = self._get_first_env(config["channel_envs"])
             
             if token and channel_id:
                 try:
