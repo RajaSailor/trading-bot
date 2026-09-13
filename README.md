@@ -2,7 +2,7 @@
 
 **Production-Ready Algorithmic Trading Screener with Telegram Alerts**
 
-A sophisticated, multi-channel trading bot that monitors 53 financial instruments across 6 dedicated Telegram channels using a 10-minute breakout strategy.
+A sophisticated, multi-channel trading bot that monitors multiple financial instruments across dedicated Telegram bots and channels using a 10-minute breakout strategy.
 
 ---
 
@@ -38,7 +38,7 @@ A sophisticated, multi-channel trading bot that monitors 53 financial instrument
   - ⚡️ NIFTY 50 INTRADAY 5X (50 stocks margin trading)
   - 🏦 NIFTY 50 PAY LATER (50 stocks BNPL)
   - 💰 CRYPTO MARKET (BTC/USD, ETH/USD)
-- **1 System Channel**: Daily health checks, errors, and mobile control
+- **2 Operations Channels**: dedicated service alerts and trade control
 
 ### 🧪 Trading Modes
 - **Practice Mode**: Paper trading simulator (₹1,00,000 starting capital)
@@ -94,9 +94,9 @@ A sophisticated, multi-channel trading bot that monitors 53 financial instrument
     ▼                                  ▼
 ┌──────────────────┐          ┌────────────────┐
 │ DHAN HQ API      │          │ TELEGRAM BOTS  │
-│ • Market Data    │          │ • 6 Channels   │
-│ • 10-min candles │          │ • Alerts       │
-│ • OHLC data      │          │ • System Ch    │
+│ • Market Data    │          │ • 8 Bots/Channels │
+│ • 10-min candles │          │ • Trading Alerts │
+│ • OHLC data      │          │ • Ops + Control │
 └──────────────────┘          └────────────────┘
     │
     ▼
@@ -172,7 +172,7 @@ Automated backups with compression and recovery.
 - Python 3.8+
 - Render account (for cloud hosting)
 - DhanHQ trading account (for live trading)
-- Telegram bot tokens (6 trading bots + 1 system bot)
+- Telegram bot tokens (6 trading bots + 2 operations bots)
 
 ### Step 1: Clone Repository
 ```bash
@@ -187,6 +187,27 @@ pip install -r requirements.txt
 
 ### Step 3: Configure Environment
 Create `.env` file with your credentials.
+
+Required Telegram variables:
+
+```bash
+BOT_INDEX_TOKEN=...
+CHANNEL_INDEX_ID=...
+BOT_COMMODITY_TOKEN=...
+CHANNEL_COMMODITY_ID=...
+BOT_NIFTY50_OPTIONS_TOKEN=...
+CHANNEL_NIFTY50_OPTIONS_ID=...
+BOT_NIFTY50_5X_TOKEN=...
+CHANNEL_NIFTY50_5X_ID=...
+BOT_NIFTY50_PAY_LATER_TOKEN=...
+CHANNEL_NIFTY50_PAY_LATER_ID=...
+BOT_CRYPTO_TOKEN=...
+CHANNEL_CRYPTO_ID=...
+BOT_SERVICE_ALERTS_TOKEN=...
+CHANNEL_SERVICE_ALERTS_ID=...
+BOT_TRADE_CONTROL_TOKEN=...
+CHANNEL_TRADE_CONTROL_ID=...
+```
 
 ### Step 4: Deploy to Render
 ```bash

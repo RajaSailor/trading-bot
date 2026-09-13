@@ -54,7 +54,7 @@ Render's Render settings might not have all 6 bot tokens and channels
 ### Check in Render Dashboard:
 1. Go to your web service
 2. Click **Settings** → **Environment**
-3. Verify ALL these variables exist:
+3. Verify all required bot and channel variables exist:
    - ✅ `API_KEY`
    - ✅ `ACCESS_TOKEN`
    - ✅ `TELEGRAM_TOKEN` (system bot)
@@ -95,12 +95,12 @@ Go to Render Dashboard → Your Service → Settings → Environment
 **Add these variables:**
 
 ```
-BOT_INDEX_TOKEN=8601160697:AAFFxscCMfqcrXaf1lw69xK7Ue-RW_8aIzI
-BOT_COMMODITY_TOKEN=8762956800:AAEkQZfYhawfxQEua8OSYcnp3FPRU2xywsc
-BOT_NIFTY50_OPTIONS_TOKEN=8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ
-BOT_NIFTY50_5X_TOKEN=8265739611:AAFbraUdEY01eJOel76S8mMgBiZT4otxkd4
-BOT_NIFTY50_PAY_LATER_TOKEN=8934391945:AAEdycuHV7sZP6eASCU2j7kQ9SBG7e9D4Q0
-BOT_CRYPTO_TOKEN=8921592389:AAF7IKqXz2a7yp0a--m0vP21itKHVKqF-7k
+BOT_INDEX_TOKEN=your_index_bot_token
+BOT_COMMODITY_TOKEN=your_commodity_bot_token
+BOT_NIFTY50_OPTIONS_TOKEN=your_nifty50_options_bot_token
+BOT_NIFTY50_5X_TOKEN=your_nifty50_5x_bot_token
+BOT_NIFTY50_PAY_LATER_TOKEN=your_nifty50_pay_later_bot_token
+BOT_CRYPTO_TOKEN=your_crypto_bot_token
 
 CHANNEL_INDEX_ID=-1003966854994
 CHANNEL_COMMODITY_ID=-1004403277287
@@ -211,7 +211,7 @@ Starting screener_app.py...
 KeyError: 'BOT_INDEX_TOKEN'
 Traceback: screener_background.py line 45
 ```
-**Fix:** Add all 6 bot tokens to Render environment
+**Fix:** Add every required bot token and channel ID to the Render environment
 
 #### Error 2: Import Error
 ```

@@ -52,6 +52,18 @@ class TelegramHandler:
             "token_env": "BOT_CRYPTO_TOKEN",
             "description": "BTCUSD/ETHUSD Crypto (24/7)",
         },
+        "service_alerts": {
+            "channel_id": 0,
+            "channel_env": "CHANNEL_SERVICE_ALERTS_ID",
+            "token_env": "BOT_SERVICE_ALERTS_TOKEN",
+            "description": "Service Health, Errors, and Monitoring",
+        },
+        "trade_control": {
+            "channel_id": 0,
+            "channel_env": "CHANNEL_TRADE_CONTROL_ID",
+            "token_env": "BOT_TRADE_CONTROL_TOKEN",
+            "description": "Trade Approvals and Remote Control",
+        },
     }
     CHANNELS = {category: config["channel_id"] for category, config in BOT_CONFIG.items()}
 
@@ -71,8 +83,7 @@ class TelegramHandler:
         logger.info("=" * 80)
         for category, config in self.BOT_CONFIG.items():
             category_token = os.getenv(config["token_env"]) or self.default_token
-            configured_channel = os.getenv(config["channel_env"])
-            channel_id = int(configured_channel or config["channel_id"])
+            channel_id = self._resolve_channel_id(config)
             status = "✅" if category_token else "⚠️ (missing token)"
             logger.info(
                 "%s [%s] Channel: %s | %s",
@@ -86,6 +97,17 @@ class TelegramHandler:
         self._alert_history: List[dict] = []
         self._alert_keys: set[str] = set()
 
+    def _resolve_channel_id(self, config: dict) -> int:
+        configured_channel = os.getenv(config["channel_env"])
+        fallback_channel = (
+            configured_channel
+            or config["channel_id"]
+            or self.default_chat_id
+            or os.getenv("TELEGRAM_CHAT_ID")
+            or os.getenv("CHAT_ID", "0")
+        )
+        return int(fallback_channel)
+
     def _get_bot_for_category(self, category: str) -> tuple[str, int]:
         if category not in self.BOT_CONFIG:
             logger.warning("⚠️ Unknown Telegram category '%s', using default channel", category)
@@ -94,8 +116,7 @@ class TelegramHandler:
 
         config = self.BOT_CONFIG[category]
         category_token = os.getenv(config["token_env"]) or self.default_token
-        configured_channel = os.getenv(config["channel_env"])
-        channel_id = int(configured_channel or config["channel_id"])
+        channel_id = self._resolve_channel_id(config)
         logger.debug("🔍 [%s] Routed to channel %s", category.upper(), channel_id)
         return category_token, channel_id
 

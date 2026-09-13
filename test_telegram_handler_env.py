@@ -212,6 +212,40 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         mocked_post.assert_called_once()
         self.assertEqual(-3800, mocked_post.call_args.kwargs["json"]["chat_id"])
 
+    def test_get_bot_for_service_alerts_prefers_dedicated_env(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TELEGRAM_BOT_TOKEN": "default-token",
+                "TELEGRAM_CHAT_ID": "-9001",
+                "BOT_SERVICE_ALERTS_TOKEN": "service-token",
+                "CHANNEL_SERVICE_ALERTS_ID": "-4401",
+            },
+            clear=False,
+        ):
+            handler = TelegramHandler()
+            token, channel_id = handler._get_bot_for_category("service_alerts")
+
+        self.assertEqual("service-token", token)
+        self.assertEqual(-4401, channel_id)
+
+    def test_get_bot_for_trade_control_falls_back_to_default_chat(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TELEGRAM_BOT_TOKEN": "default-token",
+                "TELEGRAM_CHAT_ID": "-9001",
+                "BOT_TRADE_CONTROL_TOKEN": "",
+                "CHANNEL_TRADE_CONTROL_ID": "",
+            },
+            clear=False,
+        ):
+            handler = TelegramHandler()
+            token, channel_id = handler._get_bot_for_category("trade_control")
+
+        self.assertEqual("default-token", token)
+        self.assertEqual(-9001, channel_id)
+
     def test_send_to_channel_rejects_unknown_channel(self):
         handler = TelegramHandler(token="default-token")
         with patch("telegram_handler.requests.post") as mocked_post:

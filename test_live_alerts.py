@@ -30,34 +30,34 @@ except ImportError:
     DHANHQ_AVAILABLE = False
     logger.warning("⚠️ DhanHQ not available - using mock prices")
 
-# TELEGRAM CHANNELS
-TELEGRAM_CHANNELS = {
-    "INDEX": {
-        "token": "8601160697:AAFFxscCMfqcrXaf1lw69xK7Ue-RW_8aIzI",
-        "chat_id": "-1003814243881",
-        "symbols": ["NIFTY", "BANKNIFTY", "SENSEX"]
-    },
-    "COMMODITY": {
-        "token": "8762956800:AAEkQZfYhawfxQEua8OSYcnp3FPRU2xywsc",
-        "chat_id": "-1004466883026",
-        "symbols": ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS"]
-    },
-    "NIFTY_50_OPTIONS": {
-        "token": "8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ",
-        "chat_id": "-1003966854933",
-        "symbols": ["RELIANCE", "TCS", "INFY"]
-    },
-    "NIFTY_50_5X": {
-        "token": "8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ",
-        "chat_id": "-1004403277287",
-        "symbols": ["RELIANCE", "TCS", "INFY"]
-    },
-    "NIFTY_50_PAY_LATER": {
-        "token": "8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ",
-        "chat_id": "-1003966854994",
-        "symbols": ["RELIANCE", "TCS", "INFY"]
-    },
-}
+def get_telegram_channels():
+    return {
+        "INDEX": {
+            "token": os.getenv("BOT_INDEX_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_INDEX_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["NIFTY", "BANKNIFTY", "SENSEX"]
+        },
+        "COMMODITY": {
+            "token": os.getenv("BOT_COMMODITY_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_COMMODITY_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS"]
+        },
+        "NIFTY_50_OPTIONS": {
+            "token": os.getenv("BOT_NIFTY50_OPTIONS_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_NIFTY50_OPTIONS_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["RELIANCE", "TCS", "INFY"]
+        },
+        "NIFTY_50_5X": {
+            "token": os.getenv("BOT_NIFTY50_5X_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_NIFTY50_5X_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["RELIANCE", "TCS", "INFY"]
+        },
+        "NIFTY_50_PAY_LATER": {
+            "token": os.getenv("BOT_NIFTY50_PAY_LATER_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+            "chat_id": os.getenv("CHANNEL_NIFTY50_PAY_LATER_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID"),
+            "symbols": ["RELIANCE", "TCS", "INFY"]
+        },
+    }
 
 SYMBOLS = {
     "NIFTY": {"security_id": 13, "exchange": "NSE_FNO", "type": "INDEX"},
@@ -138,10 +138,10 @@ def calculate_atm_options(spot_price, symbol):
         "put_premium": round(base_premium * 0.8, 2)
     }
 
-async def send_message_async(channel_name, message):
+async def send_message_async(channel_name, message, telegram_channels=None):
     """Send message to Telegram channel"""
     try:
-        config = TELEGRAM_CHANNELS[channel_name]
+        config = (telegram_channels or get_telegram_channels())[channel_name]
         bot = Bot(token=config["token"])
         chat_id = int(config["chat_id"])
         
@@ -160,12 +160,12 @@ async def send_message_async(channel_name, message):
         logger.error(f"❌ Error for {channel_name}: {e}")
         return False
 
-def send_message(channel_name, message):
+def send_message(channel_name, message, telegram_channels=None):
     """Send message (blocking wrapper)"""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(send_message_async(channel_name, message))
+        result = loop.run_until_complete(send_message_async(channel_name, message, telegram_channels))
         loop.close()
         return result
     except Exception as e:
@@ -275,9 +275,10 @@ def send_all_test_alerts():
     
     success_count = 0
     total_count = 0
+    telegram_channels = get_telegram_channels()
     
     # Send to each channel
-    for channel_name, config in TELEGRAM_CHANNELS.items():
+    for channel_name, config in telegram_channels.items():
         logger.info(f"\n📢 {channel_name} Channel:")
         logger.info(f"   Chat ID: {config['chat_id']}")
         logger.info(f"   Symbols: {', '.join(config['symbols'])}")
@@ -301,7 +302,7 @@ def send_all_test_alerts():
                 message = format_nifty50_alert(symbol, spot_price, options)
             
             # Send alert
-            if send_message(channel_name, message):
+            if send_message(channel_name, message, telegram_channels):
                 success_count += 1
                 logger.info(f"     ✅ Alert sent for {symbol}")
             else:

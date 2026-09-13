@@ -4,6 +4,7 @@ Runs every day at 5:00 AM IST
 File: daily_self_test.py
 """
 
+import os
 import sqlite3
 import subprocess
 import sys
@@ -20,16 +21,27 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _get_env_int(*names, default=0):
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    return default
+
 # Configuration
 TELEGRAM_BOT_TOKENS = {
-    "INDEX_OPTIONS": "8601160697:AAFFxscCMfqcrXaf1lw69xK7Ue-RW_8aIzI",
-    "COMMODITY_OPTIONS": "8762956800:AAEkQZfYhawfxQEua8OSYcnp3FPRU2xywsc",
-    "NIFTY_50_OPTIONS": "8746059399:AAGfpg6rQfluICaezqiamCujN8_NcXbt1NQ",
+    "INDEX_OPTIONS": os.getenv("BOT_INDEX_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+    "COMMODITY_OPTIONS": os.getenv("BOT_COMMODITY_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
+    "NIFTY_50_OPTIONS": os.getenv("BOT_NIFTY50_OPTIONS_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
 }
 
 TELEGRAM_CHAT_IDS = {
-    "INDEX_OPTIONS": -1003814243881,
-    "COMMODITY_OPTIONS": -1004466883026,
+    "INDEX_OPTIONS": _get_env_int("CHANNEL_INDEX_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
+    "COMMODITY_OPTIONS": _get_env_int("CHANNEL_COMMODITY_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
+    "NIFTY_50_OPTIONS": _get_env_int("CHANNEL_NIFTY50_OPTIONS_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
 }
 
 # ============================================================================
