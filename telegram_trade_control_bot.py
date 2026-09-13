@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from trade_control_handler import TradeControlHandler, TradeRequest
 
@@ -13,10 +13,12 @@ class TelegramTradeControlBot:
         self.telegram_handler = telegram_handler
         self.trade_control = trade_control
 
-    def create_and_send_request(self, signal_data: dict, option_data: dict) -> TradeRequest:
+    def create_and_send_request(self, signal_data: dict, option_data: dict) -> Optional[TradeRequest]:
         request = self.trade_control.create_trade_request(signal_data, option_data)
-        self.send_pre_approval_message(request)
-        return request
+        if self.send_pre_approval_message(request):
+            return request
+        self.trade_control.cancel_trade(request.trade_id)
+        return None
 
     def send_pre_approval_message(self, request: TradeRequest) -> bool:
         return self.telegram_handler.send_to_channel("trade_control", self.build_pre_approval_message(request))
@@ -35,18 +37,27 @@ class TelegramTradeControlBot:
         _, trade_id, action, *params = parts
 
         if action == "approve":
+            existing = self.trade_control.get(trade_id)
+            if not existing or existing.status != "PENDING":
+                return {"ok": False, "trade": asdict(existing) if existing else None}
             request = self.trade_control.approve_trade(trade_id)
             if request:
                 self.send_approval_confirmation(request)
-            return {"ok": request is not None, "trade": asdict(request) if request else None}
+            return {"ok": bool(request and request.status == "APPROVED"), "trade": asdict(request) if request else None}
 
         if action == "reject":
+            existing = self.trade_control.get(trade_id)
+            if not existing or existing.status != "PENDING":
+                return {"ok": False, "trade": asdict(existing) if existing else None}
             request = self.trade_control.reject_trade(trade_id, "Rejected from Telegram")
-            return {"ok": request is not None, "trade": asdict(request) if request else None}
+            return {"ok": bool(request and request.status == "REJECTED"), "trade": asdict(request) if request else None}
 
         if action == "cancel":
+            existing = self.trade_control.get(trade_id)
+            if not existing or existing.status not in {"PENDING", "APPROVED"}:
+                return {"ok": False, "trade": asdict(existing) if existing else None}
             request = self.trade_control.cancel_trade(trade_id)
-            return {"ok": request is not None, "trade": asdict(request) if request else None}
+            return {"ok": bool(request and request.status == "CANCELLED"), "trade": asdict(request) if request else None}
 
         if action in {"intraday", "carry", "regular", "bracket", "cover", "order"}:
             return self._handle_preference_change(trade_id, action, params)
@@ -70,13 +81,18 @@ class TelegramTradeControlBot:
         elif action == "order" and params:
             order_type = params[0]
 
+        existing = self.trade_control.get(trade_id)
+        if not existing or existing.status != "PENDING":
+            return {"ok": False, "trade": asdict(existing) if existing else None}
+        before = (existing.order_type, existing.validity, existing.mode)
         request = self.trade_control.set_order_preferences(
             trade_id,
             order_type=order_type,
             validity=validity,
             mode=mode,
         )
-        return {"ok": request is not None, "trade": asdict(request) if request else None}
+        after = (request.order_type, request.validity, request.mode) if request else before
+        return {"ok": bool(request and request.status == "PENDING" and before != after), "trade": asdict(request) if request else None}
 
     @staticmethod
     def build_pre_approval_message(request: TradeRequest) -> str:

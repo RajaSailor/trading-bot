@@ -35,7 +35,7 @@ class PremiumScreener:
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=7)
         self.spot_engine = StrategyEngine(lookback=7)
-        self.live_signal_detector = live_signal_detector or LiveSignalDetector()
+        self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.stock_option_scan_interval_seconds = 15 * 60
         self.spot_scan_interval_seconds = 15 * 60
         self._processed_signal_keys: set[str] = set()
@@ -172,10 +172,11 @@ class PremiumScreener:
                     signal["signal_date_ist"] = datetime.now(IST).strftime("%d:%m:%Y")
 
                     if self.trade_control_handler and self.trade_control_bot:
-                        self.trade_control_bot.create_and_send_request(signal, option_data)
-                        self._remember_signal_key(signal_key)
-                        alerts += 1
-                        continue
+                        trade_request = self.trade_control_bot.create_and_send_request(signal, option_data)
+                        if trade_request:
+                            self._remember_signal_key(signal_key)
+                            alerts += 1
+                            continue
 
                     accepted = self.position_manager.add_position(
                         symbol=instrument.symbol,
@@ -250,17 +251,6 @@ class PremiumScreener:
                     signal["category"] = primary_category
                     signal["signal_time_ist"] = datetime.now(IST).strftime("%H:%M:%S")
                     signal["signal_date_ist"] = datetime.now(IST).strftime("%d:%m:%Y")
-
-                    if self.trade_control_handler and self.trade_control_bot:
-                        self.trade_control_bot.create_and_send_request(signal, spot_payload := {
-                            "instrument_label": "SPOT",
-                            "spot_ltp": latest["close"],
-                            "option_symbol": f"{instrument.symbol}-SPOT",
-                            "option_type": "SPOT",
-                        })
-                        self._remember_signal_key(signal_key)
-                        alerts += 1
-                        continue
 
                     accepted = self.position_manager.add_position(
                         symbol=instrument.symbol,

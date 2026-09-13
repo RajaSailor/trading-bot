@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import deque
 from datetime import UTC, datetime, timedelta
-from typing import Dict
+from typing import Deque, Dict, Tuple
 
 
 @dataclass
@@ -19,7 +20,7 @@ class LiveSignalDetector:
         self.freshness = timedelta(minutes=freshness_minutes)
         self.cache_size = cache_size
         self._signals: Dict[str, SignalStamp] = {}
-        self._order: list[str] = []
+        self._order: Deque[Tuple[str, str]] = deque()
 
     def should_emit(
         self,
@@ -41,26 +42,37 @@ class LiveSignalDetector:
             breakout_timestamp=breakout_timestamp,
             seen_at=now,
         )
-        self._order.append(key)
+        self._order.append((key, breakout_timestamp))
         self._evict_if_needed()
         return True
 
     def _evict_if_needed(self) -> None:
         while len(self._order) > self.cache_size:
-            expired_key = self._order.pop(0)
-            self._signals.pop(expired_key, None)
+            expired_key, expired_breakout = self._order.popleft()
+            current = self._signals.get(expired_key)
+            if current and current.breakout_timestamp == expired_breakout:
+                self._signals.pop(expired_key, None)
 
     def _is_fresh_timestamp(self, timestamp: str | None, now: datetime) -> bool:
         if not timestamp:
-            return True
+            return False
 
+        reference_now = now if now.tzinfo else now.replace(tzinfo=UTC)
         for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%H:%M", "%H:%M:%S"):
             try:
                 parsed = datetime.strptime(timestamp, fmt)
                 if fmt.startswith("%H"):
-                    return True
-                return abs(now - parsed) <= self.freshness
+                    parsed = reference_now.replace(
+                        hour=parsed.hour,
+                        minute=parsed.minute,
+                        second=parsed.second,
+                        microsecond=0,
+                    )
+                    return abs(reference_now - parsed) <= self.freshness
+
+                parsed = parsed.replace(tzinfo=reference_now.tzinfo)
+                return abs(reference_now - parsed) <= self.freshness
             except ValueError:
                 continue
 
-        return True
+        return False

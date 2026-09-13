@@ -59,6 +59,37 @@ class TradeControlHandlerTests(unittest.TestCase):
             self.assertEqual("CARRY_FORWARD", updated.validity)
             self.assertEqual("BRACKET", updated.mode)
 
+    def test_reject_and_cancel_flow(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            handler = TradeControlHandler(backup_dir=tempdir)
+            first = handler.create_trade_request(
+                {"symbol": "A", "signal": "CALL", "entry": 1, "stop_loss": 0.5, "targets": [2, 3, 4], "category": "index_options"},
+                {"option_symbol": "A-CE", "option_type": "CE"},
+            )
+            second = handler.create_trade_request(
+                {"symbol": "B", "signal": "CALL", "entry": 1, "stop_loss": 0.5, "targets": [2, 3, 4], "category": "index_options"},
+                {"option_symbol": "B-CE", "option_type": "CE"},
+            )
+
+            rejected = handler.reject_trade(first.trade_id, "no")
+            cancelled = handler.cancel_trade(second.trade_id)
+            self.assertEqual("REJECTED", rejected.status)
+            self.assertEqual("CANCELLED", cancelled.status)
+
+    def test_non_pending_trade_cannot_be_updated_or_executed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            handler = TradeControlHandler(backup_dir=tempdir)
+            request = handler.create_trade_request(
+                {"symbol": "A", "signal": "CALL", "entry": 1, "stop_loss": 0.5, "targets": [2, 3, 4], "category": "index_options"},
+                {"option_symbol": "A-CE", "option_type": "CE"},
+            )
+            handler.reject_trade(request.trade_id, "no")
+
+            unchanged = handler.set_order_preferences(request.trade_id, order_type="MARKET_BUY")
+            executed = handler.mark_executed(request.trade_id, "OID-1")
+            self.assertEqual("REJECTED", unchanged.status)
+            self.assertEqual("REJECTED", executed.status)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,8 +18,8 @@ class _FakeDataManager:
 
     def fetch_candles(self, instrument, interval):
         return [
-            {"open": 100, "high": 103, "low": 97, "close": 98, "timestamp": "t1"},
-            {"open": 98, "high": 104, "low": 97, "close": 101, "timestamp": "t2"},
+            {"open": 100, "high": 103, "low": 97, "close": 98, "timestamp": "2026-09-13T10:00:00"},
+            {"open": 98, "high": 104, "low": 97, "close": 101, "timestamp": "2026-09-13T10:05:00"},
         ]
 
 
@@ -87,8 +87,8 @@ class _FakeSpotEngine:
                 "entry": 103,
                 "stop_loss": 97,
                 "targets": [113, 123, 133],
-                "reference_timestamp": "t1",
-                "breakout_timestamp": "t2",
+                "reference_timestamp": "2026-09-13T10:00:00",
+                "breakout_timestamp": "2026-09-13T10:05:00",
             }
         ]
 
@@ -116,7 +116,7 @@ class PremiumScreenerTests(unittest.TestCase):
 
         sent = screener._dispatch_option_alert(
             "nifty50_stock_options",
-            {"signal": "CALL", "symbol": "RELIANCE", "reference_timestamp": "t1", "breakout_timestamp": "t2"},
+            {"signal": "CALL", "symbol": "RELIANCE", "reference_timestamp": "2026-09-13T10:00:00", "breakout_timestamp": "2026-09-13T10:05:00"},
             {"option_symbol": "RELIANCE-2950-CE"},
         )
 
@@ -151,7 +151,7 @@ class PremiumScreenerTests(unittest.TestCase):
 
         sent = screener._dispatch_option_alert(
             "nifty50_stock_options",
-            {"signal": "CALL", "symbol": "RELIANCE", "reference_timestamp": "t1", "breakout_timestamp": "t2"},
+            {"signal": "CALL", "symbol": "RELIANCE", "reference_timestamp": "2026-09-13T10:00:00", "breakout_timestamp": "2026-09-13T10:05:00"},
             {"option_symbol": "RELIANCE-2950-CE"},
         )
 

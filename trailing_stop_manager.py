@@ -35,8 +35,6 @@ class TrailingStopManager:
     def on_entry_filled(self, state: TrailingStopState, fill_price: float) -> TrailingStopState:
         entry = float(fill_price)
         state.entry_price = entry
-        state.current_stop_loss = entry
-        state.c2c_moved = True
         state.next_trigger_price = entry + state.trail_interval if state.side == "CALL" else entry - state.trail_interval
         return state
 
@@ -50,16 +48,21 @@ class TrailingStopManager:
         return self._snapshot(state, price)
 
     def _apply_trailing(self, state: TrailingStopState, price: float) -> None:
-        if not state.c2c_moved:
-            return
-
         if state.side == "CALL":
             while price >= state.next_trigger_price:
-                state.current_stop_loss += state.trail_interval
+                if not state.c2c_moved:
+                    state.current_stop_loss = state.entry_price
+                    state.c2c_moved = True
+                else:
+                    state.current_stop_loss += state.trail_interval
                 state.next_trigger_price += state.trail_interval
         else:
             while price <= state.next_trigger_price:
-                state.current_stop_loss -= state.trail_interval
+                if not state.c2c_moved:
+                    state.current_stop_loss = state.entry_price
+                    state.c2c_moved = True
+                else:
+                    state.current_stop_loss -= state.trail_interval
                 state.next_trigger_price -= state.trail_interval
 
     def _check_target_or_sl(self, state: TrailingStopState, price: float) -> None:

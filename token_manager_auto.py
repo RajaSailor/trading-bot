@@ -30,16 +30,27 @@ class TokenManagerAuto:
         if now.hour < 8 or self.last_refresh_date == refresh_date:
             return False
 
-        token = self.token_generator()
+        token = self._refresh_and_persist_token()
         if not token:
             return False
 
-        os.environ["ACCESS_TOKEN"] = token
-        self._update_render_env("ACCESS_TOKEN", token)
-        self._trigger_render_redeploy()
         self.last_refresh_date = refresh_date
         logger.info("✅ ACCESS_TOKEN refreshed for %s", refresh_date)
         return True
+
+    def refresh_now(self) -> str:
+        return self._refresh_and_persist_token()
+
+    def _refresh_and_persist_token(self) -> str:
+        token = self.token_generator()
+        if not token:
+            return ""
+
+        os.environ["ACCESS_TOKEN"] = token
+        self._update_render_env("ACCESS_TOKEN", token)
+        if os.getenv("RENDER_TRIGGER_REDEPLOY", "false").lower() == "true":
+            self._trigger_render_redeploy()
+        return token
 
     def run_forever(self, poll_seconds: int = 30) -> None:
         while not self._stop_event.is_set():

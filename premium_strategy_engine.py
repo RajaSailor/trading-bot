@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Dict, List
 
-from live_signal_detector import LiveSignalDetector
-
 logger = logging.getLogger(__name__)
 
 
@@ -15,7 +13,6 @@ class PremiumStrategyEngine:
         self.lookback = lookback
         self.ce_candle_cache: Dict[str, List[dict]] = {}
         self.pe_candle_cache: Dict[str, List[dict]] = {}
-        self.live_signal_detector = LiveSignalDetector()
         logger.info("✅ Premium Strategy Engine initialized (lookback=%s)", lookback)
 
     def add_ce_candle(self, symbol: str, candle: dict) -> bool:
@@ -50,19 +47,7 @@ class PremiumStrategyEngine:
             )
         )
         logger.debug("📊 [%s] Total signals after evaluation: %s", symbol, len(signals))
-        live_signals: List[dict] = []
-        for signal in signals:
-            key = (
-                f"{category}:{symbol}:{signal.get('option_type')}:{signal.get('signal')}:"
-                f"{signal.get('reference_timestamp')}:{signal.get('breakout_timestamp')}"
-            )
-            if self.live_signal_detector.should_emit(
-                key,
-                str(signal.get("reference_timestamp", "")),
-                str(signal.get("breakout_timestamp", "")),
-            ):
-                live_signals.append(signal)
-        return live_signals
+        return signals
 
     def _add_candle(self, cache: Dict[str, List[dict]], symbol: str, candle: dict) -> bool:
         bucket = cache.setdefault(symbol, [])

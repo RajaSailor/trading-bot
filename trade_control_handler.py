@@ -44,10 +44,12 @@ class TradeControlHandler:
     }
     VALIDITY_TYPES = {"INTRADAY", "CARRY_FORWARD"}
     MODES = {"REGULAR", "BRACKET", "COVER"}
+    _file_lock = threading.Lock()
 
     def __init__(self, backup_dir: str = "./trade_logs") -> None:
         self._lock = threading.Lock()
         self._counter = 0
+        self._session_prefix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
         self._requests: Dict[str, TradeRequest] = {}
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(parents=True, exist_ok=True)
@@ -55,7 +57,7 @@ class TradeControlHandler:
     def create_trade_request(self, signal: dict, option_data: dict, quantity: int = 1) -> TradeRequest:
         with self._lock:
             self._counter += 1
-            trade_id = f"TRADE_{self._counter:03d}"
+            trade_id = f"TRADE_{self._session_prefix}_{self._counter:03d}"
             request = TradeRequest(
                 trade_id=trade_id,
                 symbol=signal["symbol"],
@@ -138,64 +140,68 @@ class TradeControlHandler:
             return request
 
     def pending_requests(self) -> List[TradeRequest]:
-        return [request for request in self._requests.values() if request.status == "PENDING"]
+        with self._lock:
+            return [request for request in self._requests.values() if request.status == "PENDING"]
 
     def approved_for_execution(self) -> List[TradeRequest]:
-        return [request for request in self._requests.values() if request.status == "APPROVED"]
+        with self._lock:
+            return [request for request in self._requests.values() if request.status == "APPROVED"]
 
     def summary(self) -> dict:
-        statuses = {"PENDING": 0, "APPROVED": 0, "REJECTED": 0, "CANCELLED": 0, "EXECUTED": 0}
-        for request in self._requests.values():
-            statuses[request.status] = statuses.get(request.status, 0) + 1
-        return statuses
+        with self._lock:
+            statuses = {"PENDING": 0, "APPROVED": 0, "REJECTED": 0, "CANCELLED": 0, "EXECUTED": 0}
+            for request in self._requests.values():
+                statuses[request.status] = statuses.get(request.status, 0) + 1
+            return statuses
 
     def _log_trade_event(self, request: TradeRequest, event: str) -> None:
-        file_path = self.backup_dir / f"trades_{datetime.now(UTC).strftime('%Y%m%d')}.xlsx"
-        workbook = load_workbook(file_path) if file_path.exists() else Workbook()
-        sheet = workbook.active
-        sheet.title = "trade_log"
+        with self._file_lock:
+            file_path = self.backup_dir / f"trades_{datetime.now(UTC).strftime('%Y%m%d')}.xlsx"
+            workbook = load_workbook(file_path) if file_path.exists() else Workbook()
+            sheet = workbook.active
+            sheet.title = "trade_log"
 
-        if sheet.max_row == 1 and sheet.cell(1, 1).value is None:
+            if sheet.max_row == 1 and sheet.cell(1, 1).value is None:
+                sheet.append(
+                    [
+                        "timestamp",
+                        "event",
+                        "trade_id",
+                        "symbol",
+                        "signal",
+                        "entry",
+                        "stop_loss",
+                        "target_1",
+                        "target_2",
+                        "target_3",
+                        "quantity",
+                        "order_type",
+                        "validity",
+                        "mode",
+                        "status",
+                        "order_id",
+                    ]
+                )
+
+            targets = (request.targets + [None, None, None])[:3]
             sheet.append(
                 [
-                    "timestamp",
-                    "event",
-                    "trade_id",
-                    "symbol",
-                    "signal",
-                    "entry",
-                    "stop_loss",
-                    "target_1",
-                    "target_2",
-                    "target_3",
-                    "quantity",
-                    "order_type",
-                    "validity",
-                    "mode",
-                    "status",
-                    "order_id",
+                    datetime.now(UTC).isoformat(),
+                    event,
+                    request.trade_id,
+                    request.symbol,
+                    request.signal,
+                    request.entry,
+                    request.stop_loss,
+                    targets[0],
+                    targets[1],
+                    targets[2],
+                    request.quantity,
+                    request.order_type,
+                    request.validity,
+                    request.mode,
+                    request.status,
+                    request.order_id,
                 ]
             )
-
-        targets = (request.targets + [None, None, None])[:3]
-        sheet.append(
-            [
-                datetime.now(UTC).isoformat(),
-                event,
-                request.trade_id,
-                request.symbol,
-                request.signal,
-                request.entry,
-                request.stop_loss,
-                targets[0],
-                targets[1],
-                targets[2],
-                request.quantity,
-                request.order_type,
-                request.validity,
-                request.mode,
-                request.status,
-                request.order_id,
-            ]
-        )
-        workbook.save(file_path)
+            workbook.save(file_path)
