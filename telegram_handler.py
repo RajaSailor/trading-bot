@@ -52,6 +52,18 @@ class TelegramHandler:
             "token_env": "BOT_CRYPTO_TOKEN",
             "description": "BTCUSD/ETHUSD Crypto (24/7)",
         },
+        "trade_control": {
+            "channel_id": -1001234567894,
+            "channel_env": "CHANNEL_TRADE_CONTROL_ID",
+            "token_env": "BOT_TRADE_CONTROL_TOKEN",
+            "description": "Semi-auto trade approvals + execution updates",
+        },
+        "service_alerts": {
+            "channel_id": -1001234567895,
+            "channel_env": "CHANNEL_SERVICE_ALERTS_ID",
+            "token_env": "BOT_SERVICE_ALERTS_TOKEN",
+            "description": "Service health, errors, and status alerts",
+        },
     }
     CHANNELS = {category: config["channel_id"] for category, config in BOT_CONFIG.items()}
 
@@ -157,6 +169,8 @@ class TelegramHandler:
                 "nifty50_options": "nifty50_stock_options",
                 "nifty50_5x": "nifty50_intraday_5x",
                 "nifty50_paylater": "nifty50_pay_later",
+                "trade": "trade_control",
+                "service": "service_alerts",
             }
             normalized_channel = channel_aliases.get(channel_type, channel_type)
             if normalized_channel not in self.BOT_CONFIG:

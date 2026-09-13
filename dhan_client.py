@@ -7,10 +7,12 @@ Supports:
 """
 
 import logging
+import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
 import json
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -51,15 +53,33 @@ class DhanAPIClient:
         },
     }
     
-    def __init__(self, access_token: str):
+    def __init__(self, access_token: str, token_refresh_callback: Optional[Callable[[], str]] = None):
         """Initialize DhanHQ API client with access token"""
         self.access_token = access_token
+        self.token_refresh_callback = token_refresh_callback
         self.headers = {
             "access-token": access_token,
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
         logger.info("✅ DhanHQ client initialized successfully")
+
+    def set_access_token(self, access_token: str) -> None:
+        self.access_token = access_token
+        self.headers["access-token"] = access_token
+        os.environ["ACCESS_TOKEN"] = access_token
+
+    def _request(self, method: str, url: str, **kwargs):
+        response = requests.request(method, url, headers=self.headers, timeout=10, **kwargs)
+        if response.status_code != 401 or not self.token_refresh_callback:
+            return response
+
+        refreshed_token = self.token_refresh_callback()
+        if not refreshed_token:
+            return response
+
+        self.set_access_token(refreshed_token)
+        return requests.request(method, url, headers=self.headers, timeout=10, **kwargs)
     
     def get_historical_candles(self, symbol: str, interval: str = "5min", days_back: int = 5) -> list:
         """
@@ -100,12 +120,7 @@ class DhanAPIClient:
             
             # Make API request
             url = f"{self.BASE_URL}{self.HISTORICAL_CHARTS_ENDPOINT}"
-            response = requests.post(
-                url,
-                json=payload,
-                headers=self.headers,
-                timeout=10
-            )
+            response = self._request("POST", url, json=payload)
             
             # Check response status
             if response.status_code != 200:
@@ -175,11 +190,7 @@ class DhanAPIClient:
         """
         try:
             url = f"{self.BASE_URL}/globalstocks/marketstatus"
-            response = requests.get(
-                url,
-                headers=self.headers,
-                timeout=5
-            )
+            response = self._request("GET", url)
             
             if response.status_code == 200:
                 return response.json()
@@ -200,11 +211,7 @@ class DhanAPIClient:
         """
         try:
             url = f"{self.BASE_URL}/globalstocks/fundlimit"
-            response = requests.get(
-                url,
-                headers=self.headers,
-                timeout=5
-            )
+            response = self._request("GET", url)
             
             if response.status_code == 200:
                 return response.json()
@@ -258,12 +265,7 @@ class DhanAPIClient:
             logger.info(f"📝 Placing order: {symbol} {transaction_type} {quantity} @ {order_type}")
             
             url = f"{self.BASE_URL}/globalstocks/orders"
-            response = requests.post(
-                url,
-                json=payload,
-                headers=self.headers,
-                timeout=10
-            )
+            response = self._request("POST", url, json=payload)
             
             if response.status_code == 200:
                 result = response.json()
@@ -286,11 +288,7 @@ class DhanAPIClient:
         """
         try:
             url = f"{self.BASE_URL}/globalstocks/holdings"
-            response = requests.get(
-                url,
-                headers=self.headers,
-                timeout=5
-            )
+            response = self._request("GET", url)
             
             if response.status_code == 200:
                 return response.json()
