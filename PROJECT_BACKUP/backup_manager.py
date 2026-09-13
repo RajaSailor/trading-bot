@@ -25,12 +25,22 @@ logger = logging.getLogger(__name__)
 # Configuration
 load_dotenv()
 
+def _get_env_int(*names, default=0):
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            try:
+                return int(value)
+            except ValueError:
+                return default
+    return default
+
 TELEGRAM_BOT_TOKENS = {
     "INDEX_OPTIONS": os.getenv("BOT_INDEX_TOKEN") or os.getenv("TELEGRAM_BOT_INDEX") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
 }
 
 TELEGRAM_CHAT_IDS = {
-    "INDEX_OPTIONS": int(os.getenv("CHANNEL_INDEX_ID") or os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or 0),
+    "INDEX_OPTIONS": _get_env_int("CHANNEL_INDEX_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
 }
 
 # AWS S3 Configuration (Free tier)

@@ -21,6 +21,14 @@ def _get_channel_id(*names, default=0):
                 return default
     return default
 
+
+def _get_token(*names):
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return ""
+
 TELEGRAM_BOTS = {
     # ============================================
     # BOT 1: INDEX OPTIONS ALERTS
@@ -42,9 +50,9 @@ TELEGRAM_BOTS = {
     "COMMODITY_OPTIONS": {
         "bot_name": "wincommodityoptionsalertsbot",
         "bot_url": "t.me/wincommodityoptionsalertsbot",
-        "token": os.getenv("BOT_COMMODITY_TOKEN", ""),
+        "token": _get_token("BOT_COMMODITY_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"),
         "channel_name": "⚫ COMMODITY OPTIONS ALERTS",
-        "channel_chat_id": _get_channel_id("CHANNEL_COMMODITY_ID"),
+        "channel_chat_id": _get_channel_id("CHANNEL_COMMODITY_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
         "description": "Real-time CRUDE OIL, GOLD, SILVER & NATURAL GAS Options Signals",
         "symbols": ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS"],
         "asset_type": "COMMODITY"
@@ -56,9 +64,9 @@ TELEGRAM_BOTS = {
     "NIFTY_50_STOCKS_OPTIONS": {
         "bot_name": "winnifty50stocksoptionsalertsbot",
         "bot_url": "t.me/winnifty50stocksoptionsalertsbot",
-        "token": os.getenv("BOT_NIFTY50_OPTIONS_TOKEN", ""),
+        "token": _get_token("BOT_NIFTY50_OPTIONS_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"),
         "channel_name": "📈 NIFTY 50 STOCKS OPTIONS",
-        "channel_chat_id": _get_channel_id("CHANNEL_NIFTY50_OPTIONS_ID"),
+        "channel_chat_id": _get_channel_id("CHANNEL_NIFTY50_OPTIONS_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
         "description": "All 50 NIFTY stocks Options (ATM/ITM Premium >= 10 LTP)",
         "symbols": [
             "ADANIENTERPRISES", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
@@ -80,9 +88,9 @@ TELEGRAM_BOTS = {
     "NIFTY_50_INTRADAY_5X": {
         "bot_name": "winnifty50intraday5xalertsbot",
         "bot_url": "t.me/winnifty50intraday5xalertsbot",
-        "token": os.getenv("BOT_NIFTY50_5X_TOKEN", ""),
+        "token": _get_token("BOT_NIFTY50_5X_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"),
         "channel_name": "⚡ NIFTY 50 INTRADAY 5X",
-        "channel_chat_id": _get_channel_id("CHANNEL_NIFTY50_5X_ID"),
+        "channel_chat_id": _get_channel_id("CHANNEL_NIFTY50_5X_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
         "description": "NIFTY 50 Stocks Intraday Signals with 5X Leverage (High Risk/Reward)",
         "symbols": [
             "ADANIENTERPRISES", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
@@ -105,9 +113,9 @@ TELEGRAM_BOTS = {
     "NIFTY_50_PAY_LATER": {
         "bot_name": "winnifty50paylateralertsbot",
         "bot_url": "t.me/winnifty50paylateralertsbot",
-        "token": os.getenv("BOT_NIFTY50_PAY_LATER_TOKEN", ""),
+        "token": _get_token("BOT_NIFTY50_PAY_LATER_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"),
         "channel_name": "🏦 NIFTY 50 PAY LATER",
-        "channel_chat_id": _get_channel_id("CHANNEL_NIFTY50_PAY_LATER_ID"),
+        "channel_chat_id": _get_channel_id("CHANNEL_NIFTY50_PAY_LATER_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
         "description": "NIFTY 50 Stocks - Buy Now Pay Later (Margin) Trading Signals",
         "symbols": [
             "ADANIENTERPRISES", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",

@@ -41,6 +41,7 @@ TELEGRAM_BOT_TOKENS = {
 TELEGRAM_CHAT_IDS = {
     "INDEX_OPTIONS": _get_env_int("CHANNEL_INDEX_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
     "COMMODITY_OPTIONS": _get_env_int("CHANNEL_COMMODITY_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
+    "NIFTY_50_OPTIONS": _get_env_int("CHANNEL_NIFTY50_OPTIONS_ID", "TELEGRAM_CHAT_ID", "CHAT_ID"),
 }
 
 # ============================================================================

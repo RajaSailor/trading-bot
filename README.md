@@ -95,8 +95,8 @@ A sophisticated, multi-channel trading bot that monitors multiple financial inst
 ┌──────────────────┐          ┌────────────────┐
 │ DHAN HQ API      │          │ TELEGRAM BOTS  │
 │ • Market Data    │          │ • 8 Bots/Channels │
-│ • 10-min candles │          │ • Alerts       │
-│ • OHLC data      │          │ • System Ch    │
+│ • 10-min candles │          │ • Trading Alerts │
+│ • OHLC data      │          │ • Ops + Control │
 └──────────────────┘          └────────────────┘
     │
     ▼
