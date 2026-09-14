@@ -8,7 +8,8 @@ import os
 class DhanHQConfig:
     """Centralized DhanHQ endpoint and timeout settings."""
 
-    API_BASE_URL = os.getenv("DHANHQ_API_BASE_URL", "https://api.dhan.co/v2")
+    DEFAULT_API_BASE_URL = "https://api.dhan.co/v2"
+    API_BASE_URL = os.getenv("DHANHQ_API_BASE_URL", DEFAULT_API_BASE_URL)
 
     ENDPOINTS = {
         "orders": "/orders",
@@ -32,4 +33,5 @@ class DhanHQConfig:
             valid_keys = ", ".join(sorted(cls.ENDPOINTS))
             raise ValueError(f"Unknown DhanHQ endpoint key '{key}'. Valid keys: {valid_keys}")
         path = cls.ENDPOINTS[key]
-        return f"{cls.API_BASE_URL}{path}"
+        base_url = os.getenv("DHANHQ_API_BASE_URL", cls.DEFAULT_API_BASE_URL)
+        return f"{base_url}{path}"
