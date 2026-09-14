@@ -26,7 +26,7 @@ RUN groupadd --system app && useradd --system --gid app --create-home app && \
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -fsS http://localhost:5000/health || exit 1
+    CMD python deployment/health_check.py
 
 USER app
 

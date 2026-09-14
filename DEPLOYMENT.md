@@ -24,7 +24,7 @@ docker compose --profile cache up -d --build
 
 ## 3) Verify health
 ```bash
-python deployment/health_check.py
+docker compose exec -T trading-bot python deployment/health_check.py
 ```
 
 ## 4) Backup database
