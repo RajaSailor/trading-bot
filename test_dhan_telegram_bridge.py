@@ -55,6 +55,11 @@ class DhanTelegramBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.bridge.app.process_update.assert_awaited_once_with(parsed_update)
 
+    async def test_handle_webhook_update_rejects_bad_secret(self):
+        self.bridge.webhook_secret = "expected-secret"
+        ok = await self.bridge.handle_webhook_update({"update_id": 1}, secret_token="bad-secret")
+        self.assertFalse(ok)
+
     async def test_send_alert_retries_then_succeeds(self):
         send_message = AsyncMock(
             side_effect=[RuntimeError("temporary"), RuntimeError("temporary"), None]
@@ -77,6 +82,10 @@ class DhanTelegramBridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(3, send_message.await_count)
         self.assertEqual(2, sleep_mock.await_count)
+
+    async def test_send_alert_rejects_invalid_retry_count(self):
+        with self.assertRaises(ValueError):
+            await self.bridge.send_alert("hello", retries=0)
 
 
 if __name__ == "__main__":

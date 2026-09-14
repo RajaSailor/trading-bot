@@ -21,6 +21,7 @@ Features:
 import logging
 import asyncio
 import os
+import hmac
 from typing import Dict, Tuple, Optional, Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -180,9 +181,14 @@ class DhanTelegramBridge:
         await self.bot.delete_webhook(drop_pending_updates=False)
         self.logger.info("✅ Telegram webhook cleared")
 
-    async def handle_webhook_update(self, payload: Dict) -> bool:
+    async def handle_webhook_update(self, payload: Dict, secret_token: str = None) -> bool:
         """Process Telegram webhook update payload"""
         try:
+            if self.webhook_secret:
+                if not secret_token or not hmac.compare_digest(secret_token, self.webhook_secret):
+                    self.logger.warning("❌ Telegram webhook secret validation failed")
+                    return False
+
             if self.app is None:
                 await self.initialize_telegram_app()
 
@@ -438,6 +444,9 @@ class DhanTelegramBridge:
         retry_delay: float = 1.0
     ) -> None:
         """Send alert message with retry support"""
+        if retries < 1:
+            raise ValueError("retries must be at least 1")
+
         target_chat_id = chat_id if chat_id is not None else self.alert_chat_id
         if target_chat_id in (None, "", 0):
             raise ValueError("TELEGRAM_CHAT_ID required for alerts")
