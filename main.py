@@ -118,7 +118,13 @@ def health_check():
 
 @app.route('/dhan/health', methods=['GET'])
 def dhan_health():
-    """DhanHQ-specific health check"""
+    """
+    DhanHQ-specific health check
+    
+    Official DhanHQ API Reference:
+    GET https://api.dhan.co/v2/account
+    Returns: {"status": "success", "data": {...account info...}}
+    """
     try:
         if dhan_integration is None:
             return jsonify({
@@ -127,21 +133,27 @@ def dhan_health():
                 "timestamp": datetime.now().isoformat()
             }), 503
         
-        # Test DhanHQ connection
-        success, msg, account = dhan_integration.get_account_info()
+        # Test DhanHQ connection by fetching account info
+        # dhan_integration.get_account_info() returns Dict (not tuple)
+        account = dhan_integration.get_account_info()
         
-        if success:
+        if account and isinstance(account, dict) and account.get('dhanClientId'):
             return jsonify({
                 "status": "healthy",
                 "dhan_connected": True,
-                "account_info": account,
+                "account_info": {
+                    "dhanClientId": account.get('dhanClientId'),
+                    "ledgerBalance": account.get('ledgerBalance'),
+                    "marginAvailable": account.get('marginAvailable'),
+                    "marginUsed": account.get('marginUsed')
+                },
                 "timestamp": datetime.now().isoformat()
             }), 200
         else:
             return jsonify({
                 "status": "unhealthy",
                 "dhan_connected": False,
-                "message": msg,
+                "message": "Could not fetch account information from DhanHQ",
                 "timestamp": datetime.now().isoformat()
             }), 503
             
