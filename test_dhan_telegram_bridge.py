@@ -60,6 +60,24 @@ class DhanTelegramBridgeTests(unittest.IsolatedAsyncioTestCase):
         ok = await self.bridge.handle_webhook_update({"update_id": 1}, secret_token="bad-secret")
         self.assertFalse(ok)
 
+    async def test_set_webhook_uses_configured_secret(self):
+        self.bridge.webhook_secret = "sec-token"
+        set_webhook = AsyncMock()
+        self.bridge.bot = SimpleNamespace(set_webhook=set_webhook)
+
+        await self.bridge.set_webhook("https://example.com/webhook")
+        set_webhook.assert_awaited_once_with(
+            url="https://example.com/webhook",
+            secret_token="sec-token",
+        )
+
+    async def test_clear_webhook_uses_expected_drop_pending_setting(self):
+        delete_webhook = AsyncMock()
+        self.bridge.bot = SimpleNamespace(delete_webhook=delete_webhook)
+
+        await self.bridge.clear_webhook()
+        delete_webhook.assert_awaited_once_with(drop_pending_updates=False)
+
     async def test_send_alert_retries_then_succeeds(self):
         send_message = AsyncMock(
             side_effect=[RuntimeError("temporary"), RuntimeError("temporary"), None]

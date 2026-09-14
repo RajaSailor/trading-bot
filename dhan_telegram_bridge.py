@@ -20,9 +20,9 @@ Features:
 
 import logging
 import asyncio
-import os
 import hmac
-from typing import Dict, Tuple, Optional, Callable
+import os
+from typing import Dict, Tuple, Optional, Callable, Union
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from enum import Enum
@@ -76,11 +76,11 @@ class DhanTelegramBridge:
 
     def __init__(
         self,
-        telegram_bot_token: str = None,
-        dhan_integration: DhanIntegration = None,
-        postback_handler: DhanPostbackHandler = None,
-        alert_chat_id: int = None,
-        webhook_secret: str = None
+        telegram_bot_token: Optional[str] = None,
+        dhan_integration: Optional[DhanIntegration] = None,
+        postback_handler: Optional[DhanPostbackHandler] = None,
+        alert_chat_id: Optional[Union[int, str]] = None,
+        webhook_secret: Optional[str] = None
     ):
         """
         Initialize Telegram bridge
@@ -438,7 +438,7 @@ class DhanTelegramBridge:
     async def send_alert(
         self,
         message: str,
-        chat_id: int = None,
+        chat_id: Optional[Union[int, str]] = None,
         parse_mode: str = "Markdown",
         retries: int = 3,
         retry_delay: float = 1.0
