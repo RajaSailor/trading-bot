@@ -414,19 +414,24 @@ class DhanAPIClient:
         try:
             self.logger.info("💰 Fetching account info from DhanHQ...")
             
+            # Use root account endpoint (not /summary which doesn't exist)
             response = requests.get(
-                f"{self.ACCOUNT_ENDPOINT}/summary",
+                self.ACCOUNT_ENDPOINT,
                 headers=self.headers,
                 timeout=10
             )
             
             if response.status_code == 200:
-                account = response.json().get("data", {})
+                # Handle both wrapped and unwrapped responses
+                response_data = response.json()
+                
+                # Try to get data from "data" key first (official format)
+                account = response_data.get("data", response_data)
                 
                 self.logger.info(f"✅ Account Info:")
-                self.logger.info(f"   Client ID: {account.get('dhanClientId')}")
-                self.logger.info(f"   Ledger Balance: {account.get('ledgerBalance')}")
-                self.logger.info(f"   Available: {account.get('marginAvailable')}")
+                self.logger.info(f"   Client ID: {account.get('dhanClientId', 'N/A')}")
+                self.logger.info(f"   Ledger Balance: {account.get('ledgerBalance', 'N/A')}")
+                self.logger.info(f"   Available: {account.get('marginAvailable', 'N/A')}")
                 
                 return True, "Account info fetched", account
                 
