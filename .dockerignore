@@ -18,3 +18,4 @@ build/
 .dockerignore
 .env
 .env.*.local
+config/.env.*

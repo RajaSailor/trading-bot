@@ -15,7 +15,7 @@ def check_endpoint(base_url: str, path: str) -> tuple[bool, str]:
         if 200 <= response.status_code < 300:
             return True, f"OK {url} ({response.status_code})"
         return False, f"FAIL {url} ({response.status_code})"
-    except Exception as exc:  # pragma: no cover - defensive in runtime script
+    except requests.RequestException as exc:  # pragma: no cover - defensive in runtime script
         return False, f"FAIL {url} ({exc})"
 
 

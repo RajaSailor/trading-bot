@@ -12,6 +12,6 @@ POSTGRES_USER="${POSTGRES_USER:-trading_bot}"
 POSTGRES_DB="${POSTGRES_DB:-trading_bot}"
 
 cd "${ROOT_DIR}"
-docker compose exec -T postgres pg_dump -U "${POSTGRES_USER}" "${POSTGRES_DB}" > "${BACKUP_FILE}"
+docker compose exec -T postgres pg_dump -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" > "${BACKUP_FILE}"
 
 echo "Backup created: ${BACKUP_FILE}"

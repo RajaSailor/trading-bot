@@ -14,13 +14,11 @@ cd "${ROOT_DIR}"
 export COMPOSE_DOCKER_CLI_BUILD=1
 export DOCKER_BUILDKIT=1
 
-cp "${ENV_FILE}" .env
-
-docker compose down --remove-orphans
-if grep -Eq '^REDIS_URL=.+$' .env; then
-  docker compose --profile cache up -d --build
+docker compose --env-file "${ENV_FILE}" down --remove-orphans
+if grep -Eq '^REDIS_URL=.+$' "${ENV_FILE}"; then
+  docker compose --env-file "${ENV_FILE}" --profile cache up -d --build
 else
-  docker compose up -d --build
+  docker compose --env-file "${ENV_FILE}" up -d --build
 fi
 
 echo "Waiting for application health checks..."

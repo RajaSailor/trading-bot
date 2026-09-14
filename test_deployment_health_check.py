@@ -24,6 +24,15 @@ class DeploymentHealthCheckTests(unittest.TestCase):
         self.assertIn("FAIL", message)
 
     @patch("deployment.health_check.check_endpoint")
+    def test_main_returns_zero_when_all_checks_pass(self, mock_check_endpoint):
+        mock_check_endpoint.side_effect = [
+            (True, "OK"),
+            (True, "OK"),
+        ]
+
+        self.assertEqual(0, health_check.main())
+
+    @patch("deployment.health_check.check_endpoint")
     def test_main_returns_non_zero_on_failed_check(self, mock_check_endpoint):
         mock_check_endpoint.side_effect = [
             (True, "OK"),
