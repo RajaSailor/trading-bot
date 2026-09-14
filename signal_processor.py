@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
 import time
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -235,3 +236,56 @@ class SignalProcessor:
             return dt.strftime("%H:%M:%S")
         except Exception:
             return datetime.now().strftime("%H:%M:%S")
+
+
+class SignalQueueProcessor:
+    """
+    Webhook signal parsing, validation and queue-based processing.
+    """
+
+    def __init__(self):
+        self._queue = deque()
+
+    def parse_webhook_signal(self, payload: Dict) -> Optional[Dict]:
+        symbol = payload.get("symbol")
+        action = str(payload.get("action", "")).upper()
+        if not symbol or action not in {"BUY", "SELL", "EXIT"}:
+            return None
+        return {
+            "symbol": symbol,
+            "action": action,
+            "strategy": payload.get("strategy", "default"),
+            "timestamp": payload.get("timestamp", datetime.utcnow().isoformat()),
+            "metadata": payload.get("metadata", {}),
+        }
+
+    def validate_signal(self, signal: Dict) -> bool:
+        if not signal:
+            return False
+        if signal.get("action") not in {"BUY", "SELL", "EXIT"}:
+            return False
+        return bool(signal.get("symbol"))
+
+    def enqueue_signal(self, signal: Dict) -> bool:
+        if not self.validate_signal(signal):
+            return False
+        self._queue.append(signal)
+        return True
+
+    def process_next_signal(self) -> Optional[Dict]:
+        if not self._queue:
+            return None
+        signal = self._queue.popleft()
+        signal["processed_at"] = datetime.utcnow().isoformat()
+        return signal
+
+    def process_queue(self, limit: Optional[int] = None) -> List[Dict]:
+        processed = []
+        while self._queue and (limit is None or len(processed) < limit):
+            next_signal = self.process_next_signal()
+            if next_signal:
+                processed.append(next_signal)
+        return processed
+
+    def queue_size(self) -> int:
+        return len(self._queue)
