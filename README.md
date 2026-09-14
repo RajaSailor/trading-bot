@@ -66,6 +66,27 @@ python main.py
 
 ---
 
+## 📈 Monitoring & Analytics
+
+- `monitoring/metrics.py` — trade/order/API/error/system metrics collection
+- `monitoring/alerts.py` — critical/performance/connection/risk alert workflows
+- `monitoring/dashboard.py` — Flask dashboard endpoints for metrics and P&L charts
+- `monitoring/swagger_ui.py` — OpenAPI/Swagger UI bootstrap for API exploration
+- `tools/performance_analyzer.py` — win rate, drawdown, sharpe and trade stats
+- `tools/log_analyzer.py` — log error pattern and latency trend analysis
+
+## 📚 Documentation Hub
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [API Reference](docs/API_REFERENCE.md)
+- [Trading Logic](docs/TRADING_LOGIC.md)
+- [Deployment Guide](docs/DEPLOYMENT_GUIDE.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Contributing](docs/CONTRIBUTING.md)
+- [OpenAPI Spec](docs/openapi.yaml)
+
+---
+
 ## 📊 System Architecture
 
 ```
