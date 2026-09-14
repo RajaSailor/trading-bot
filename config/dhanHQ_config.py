@@ -28,5 +28,8 @@ class DhanHQConfig:
     @classmethod
     def endpoint_url(cls, key: str) -> str:
         """Return a fully-qualified URL for a configured endpoint key."""
+        if key not in cls.ENDPOINTS:
+            valid_keys = ", ".join(sorted(cls.ENDPOINTS))
+            raise ValueError(f"Unknown DhanHQ endpoint key '{key}'. Valid keys: {valid_keys}")
         path = cls.ENDPOINTS[key]
         return f"{cls.API_BASE_URL}{path}"

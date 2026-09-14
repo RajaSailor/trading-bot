@@ -6,14 +6,15 @@ from dhan_position_tracker import DhanPositionTracker
 from market_data import DataManager as Phase2DataManager
 from orders import DhanOrderManager as Phase2OrderManager
 from positions import DhanPositionTracker as Phase2PositionTracker
-from webhooks import WebhookHandler
+from webhook_handler import WebhookHandler as CoreWebhookHandler
+from webhooks import WebhookHandler as Phase2WebhookHandler
 
 
 def test_phase2_wrapper_exports_map_to_existing_implementations():
     assert Phase2DataManager is DataManager
     assert Phase2OrderManager is DhanOrderManager
     assert Phase2PositionTracker is DhanPositionTracker
-    assert callable(WebhookHandler)
+    assert Phase2WebhookHandler is CoreWebhookHandler
 
 
 def test_phase2_dhanhq_client_exports_core_client():
