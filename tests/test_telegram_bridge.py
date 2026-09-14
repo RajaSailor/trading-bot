@@ -77,6 +77,7 @@ async def test_handle_trade_signal_success(bridge, mock_dhan_integration):
         strategy="",
     )
     assert update.message.reply_text.await_count == 2
+    assert "ORD001" in update.message.reply_text.await_args_list[1].args[0]
     assert "Trade Placed Successfully" in update.message.reply_text.await_args_list[1].args[0]
 
 
@@ -87,6 +88,15 @@ async def test_handle_trade_signal_trade_failure(bridge, mock_dhan_integration):
 
     await bridge.handle_trade_signal(update, _make_context())
 
+    mock_dhan_integration.place_trade.assert_called_once_with(
+        symbol="BANKNIFTY",
+        transaction_type="SELL",
+        quantity=2,
+        entry_price=45000.0,
+        sl_price=45100.0,
+        target_price=44900.0,
+        strategy="",
+    )
     assert update.message.reply_text.await_count == 2
     assert "Trade failed: exchange rejected" in update.message.reply_text.await_args_list[1].args[0]
 
