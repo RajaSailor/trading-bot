@@ -1,0 +1,137 @@
+openapi: 3.0.3
+info:
+  title: DhanHQ Trading Bot API
+  version: 1.0.0
+  description: REST API for health, monitoring, screener control, and webhook processing.
+servers:
+  - url: https://trading-bot-0p7j.onrender.com
+paths:
+  /health:
+    get:
+      summary: Service health status
+      responses:
+        '200':
+          description: Service is reachable
+  /api/status:
+    get:
+      summary: Runtime status
+      responses:
+        '200':
+          description: Runtime state payload
+  /api/stats:
+    get:
+      summary: Screener metrics
+      responses:
+        '200':
+          description: Stats payload
+  /api/positions:
+    get:
+      summary: Active positions
+      responses:
+        '200':
+          description: Position list payload
+  /api/alerts:
+    get:
+      summary: Recent alerts
+      responses:
+        '200':
+          description: Alert list payload
+  /api/control/start:
+    post:
+      summary: Start screener process
+      responses:
+        '200':
+          description: Start acknowledged
+        '409':
+          description: Already running
+  /api/control/stop:
+    post:
+      summary: Stop screener process
+      responses:
+        '200':
+          description: Stop acknowledged
+  /webhook/tradingview:
+    post:
+      summary: Ingest TradingView signal payload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TradingViewSignal'
+      responses:
+        '200':
+          description: Accepted
+        '400':
+          description: Validation error
+        '500':
+          description: Internal processing error
+  /api/webhook/test:
+    post:
+      summary: Trigger webhook processing in test mode
+      description: Authenticate using `X-Webhook-Secret` header or JSON body field `secret`.
+      security:
+        - WebhookSecret: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              properties:
+                secret:
+                  type: string
+                  description: Optional webhook admin secret when provided in payload.
+      responses:
+        '200':
+          description: Test payload processed
+        '403':
+          description: Unauthorized
+  /api/webhook/history:
+    get:
+      summary: Read protected webhook history records
+      security:
+        - WebhookSecret: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+      responses:
+        '200':
+          description: Webhook history response
+        '400':
+          description: Invalid query parameter
+        '403':
+          description: Unauthorized
+components:
+  securitySchemes:
+    WebhookSecret:
+      type: apiKey
+      in: header
+      name: X-Webhook-Secret
+  schemas:
+    TradingViewSignal:
+      type: object
+      additionalProperties: true
+      properties:
+        ticker:
+          type: string
+        signal_type:
+          type: string
+        category:
+          type: string
+        entry_price:
+          type: number
+        stop_loss:
+          type: number
+        target_1:
+          type: number
+        target_2:
+          type: number
+        target_3:
+          type: number
+      required: [ticker, signal_type]
