@@ -1,3 +1,5 @@
+import pytest
+
 from config.dhanHQ_config import DhanHQConfig
 from data_manager import DataManager
 from dhan_api_client import DhanAPIClient as CoreDhanApiClient
@@ -28,3 +30,12 @@ def test_dhanhq_config_defaults_and_endpoints_are_available():
     assert DhanHQConfig.TIMEOUT_SECONDS > 0
     assert DhanHQConfig.MAX_RETRIES >= 0
     assert DhanHQConfig.endpoint_url("orders").endswith("/orders")
+
+
+def test_dhanhq_config_invalid_endpoint_key_raises_helpful_error():
+    with pytest.raises(ValueError) as exc_info:
+        DhanHQConfig.endpoint_url("unknown")
+
+    error_message = str(exc_info.value)
+    assert "Unknown DhanHQ endpoint key 'unknown'" in error_message
+    assert "orders" in error_message
