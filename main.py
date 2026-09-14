@@ -371,11 +371,27 @@ def shutdown_handler():
     logger.info("=" * 70)
 
 # ============================================================================
-# MAIN ENTRY POINT
+# WSGI APPLICATION ENTRY POINT (For Gunicorn)
+# ============================================================================
+
+def create_app():
+    """Application factory for WSGI servers"""
+    if not initialize_app():
+        logger.error("❌ Failed to initialize application")
+        raise RuntimeError("Application initialization failed")
+    return app
+
+# Initialize app for Gunicorn
+if os.getenv('FLASK_ENV') != 'development':
+    # Production mode: Initialize for Gunicorn
+    initialize_app()
+
+# ============================================================================
+# MAIN ENTRY POINT (For Direct Python Execution)
 # ============================================================================
 
 def main():
-    """Main entry point"""
+    """Main entry point for direct Python execution"""
     
     # Display startup banner
     logger.info("=" * 70)
@@ -385,6 +401,7 @@ def main():
     logger.info(f"🌍 Timezone: {os.getenv('TIMEZONE', 'Asia/Kolkata')}")
     logger.info(f"🧪 Practice Mode: {os.getenv('PRACTICE_MODE', 'true')}")
     logger.info(f"⚙️  Port: {os.getenv('PORT', '5000')}")
+    logger.info(f"📡 Server Mode: Direct Python Execution")
     logger.info("=" * 70)
     
     # Initialize application
