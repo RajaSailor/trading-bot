@@ -1,15 +1,137 @@
-# Ignore virtual environment
-venv/
+# Git Ignore File - Prevent secrets and unnecessary files from being committed
+# Copy this file as .gitignore in repository root
 
-# Ignore Python cache
-__pycache__/
-*.pyc
+# ============================================================================
+# ENVIRONMENT & SECRETS (CRITICAL - NEVER COMMIT!)
+# ============================================================================
+.env                    # Local environment file with real credentials
+.env.local              # Local override
+.env.*.local            # Environment-specific overrides
+.env.production         # Production secrets
+.env.staging            # Staging secrets
 
-# Ignore VS Code settings
-.vscode/
+# ============================================================================
+# STATE & DATA FILES (RUNTIME GENERATED)
+# ============================================================================
+dhan_state.json         # Position state (contains sensitive trading data)
+*.json.bak              # State backups
+trading_history.json    # Trade history
 
-# Ignore system files
-.DS_Store
-Thumbs.db
-screener_state.json
-.env
+# ============================================================================
+# LOGS (SENSITIVE - May contain API calls, tokens, errors)
+# ============================================================================
+logs/                   # Application logs directory
+*.log                   # Log files
+*.log.*                 # Rotated logs
+debug.log              # Debug logs
+error.log              # Error logs
+
+# ============================================================================
+# BACKUPS (SENSITIVE - Contains state snapshots)
+# ============================================================================
+backups/                # Backup directory
+*.backup                # Backup files
+*.bak                   # Backup files
+*.tar.gz               # Compressed backups
+*.zip                  # Zipped backups
+
+# ============================================================================
+# PYTHON & VIRTUAL ENVIRONMENT
+# ============================================================================
+venv/                   # Virtual environment directory
+env/                    # Alternative venv name
+ENV/                    # Alternative venv name
+__pycache__/            # Python cache
+*.py[cod]              # Compiled Python files
+*.so                   # C extensions
+*.egg                  # Egg distributions
+*.egg-info/            # Egg info
+dist/                  # Distribution
+build/                 # Build artifacts
+.Python             # Python binary
+
+# ============================================================================
+# IDE & EDITOR
+# ============================================================================
+.vscode/               # VSCode settings
+.idea/                 # PyCharm/IntelliJ
+*.swp                 # Vim swap files
+*.swo                 # Vim swap files
+*~                    # Backup files
+.DS_Store             # macOS
+.env.swp              # Vim swap on .env
+
+# ============================================================================
+# OS SPECIFIC
+# ============================================================================
+.DS_Store             # macOS
+.AppleDouble          # macOS
+.LSOverride           # macOS
+Thumbs.db             # Windows
+*.cab                 # Windows
+
+# ============================================================================
+# TESTING
+# ============================================================================
+.pytest_cache/        # Pytest cache
+.coverage             # Coverage reports
+coverage.xml          # Coverage XML
+htmlcov/              # HTML coverage reports
+.tox/                 # Tox testing
+.hypothesis/          # Hypothesis cache
+
+# ============================================================================
+# TEMPORARY FILES
+# ============================================================================
+*.tmp                 # Temporary files
+*.temp                # Temporary files
+*.cache              # Cache files
+.cache/              # Cache directory
+tmp/                 # Temporary directory
+temp/                # Temporary directory
+
+# ============================================================================
+# DATABASE & DATA FILES (if applicable)
+# ============================================================================
+*.db                 # SQLite databases
+*.sqlite             # SQLite databases
+*.sqlite3            # SQLite3 databases
+*.pkl                # Pickle files
+*.pickle             # Pickle files
+
+# ============================================================================
+# CREDENTIALS (Belt & Suspenders)
+# ============================================================================
+credentials.txt      # Credentials file
+secrets.txt          # Secrets file
+keys.txt             # Keys file
+tokens.txt           # Tokens file
+api_keys.txt         # API keys file
+
+# ============================================================================
+# DOCKER (optional - uncomment if not using Docker)
+# ============================================================================
+# docker-compose.override.yml  # Local docker-compose overrides
+# Dockerfile.dev               # Development Dockerfile
+
+# ============================================================================
+# RENDER (Cloud deployment)
+# ============================================================================
+render.yaml         # Render config (optional, can be in git if no secrets)
+.render/            # Render cache
+
+# ============================================================================
+# GITHUB (optional)
+# ============================================================================
+.github/workflows/**/secrets.yml  # GitHub secrets (shouldn't exist, but just in case)
+
+# ============================================================================
+# ALLOWED FILES (Whitelist important config files)
+# ============================================================================
+# .env.example     # ✅ KEEP - Template with no secrets
+# .gitignore       # ✅ KEEP - This file
+# requirements.txt # ✅ KEEP - Dependencies
+# Dockerfile       # ✅ KEEP - Container config
+# docker-compose.yml # ✅ KEEP - Compose config
+# README.md        # ✅ KEEP - Documentation
+# deployment_guide.md # ✅ KEEP - Deployment docs
