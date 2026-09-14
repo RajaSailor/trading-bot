@@ -31,10 +31,18 @@ class DhanHQConfig:
         "quotes": "/marketfeed/quote",
     }
 
-    TIMEOUT_SECONDS = int(os.getenv("DHANHQ_TIMEOUT_SECONDS", "10"))
-    CONNECT_TIMEOUT_SECONDS = int(os.getenv("DHANHQ_CONNECT_TIMEOUT_SECONDS", "5"))
-    READ_TIMEOUT_SECONDS = int(os.getenv("DHANHQ_READ_TIMEOUT_SECONDS", "10"))
-    MAX_RETRIES = int(os.getenv("DHANHQ_MAX_RETRIES", "3"))
+    TIMEOUT_SECONDS = _ClassProperty(
+        lambda _cls: int(os.getenv("DHANHQ_TIMEOUT_SECONDS", "10"))
+    )
+    CONNECT_TIMEOUT_SECONDS = _ClassProperty(
+        lambda _cls: int(os.getenv("DHANHQ_CONNECT_TIMEOUT_SECONDS", "5"))
+    )
+    READ_TIMEOUT_SECONDS = _ClassProperty(
+        lambda _cls: int(os.getenv("DHANHQ_READ_TIMEOUT_SECONDS", "10"))
+    )
+    MAX_RETRIES = _ClassProperty(
+        lambda _cls: int(os.getenv("DHANHQ_MAX_RETRIES", "3"))
+    )
 
     @classmethod
     def endpoint_url(cls, key: str) -> str:
