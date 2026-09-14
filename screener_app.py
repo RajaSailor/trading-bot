@@ -184,7 +184,7 @@ def health_check():
 
 @app.route('/dhan/health', methods=['GET'])
 def dhan_health():
-    required_env = ("ACCESS_TOKEN", "DHAN_CLIENT_ID", "API_KEY")
+    required_env = ("ACCESS_TOKEN", "DHAN_CLIENT_ID")
     configured = all(os.getenv(key) for key in required_env)
     return jsonify({
         "status": "healthy" if configured else "not_configured",

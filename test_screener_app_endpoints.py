@@ -18,7 +18,6 @@ def test_root_endpoint_returns_endpoint_catalog():
 def test_dhan_health_reports_not_configured_without_credentials(monkeypatch):
     monkeypatch.delenv("ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("DHAN_CLIENT_ID", raising=False)
-    monkeypatch.delenv("API_KEY", raising=False)
 
     with app.test_client() as client:
         response = client.get("/dhan/health")
@@ -32,7 +31,6 @@ def test_dhan_health_reports_not_configured_without_credentials(monkeypatch):
 def test_dhan_health_reports_healthy_with_credentials(monkeypatch):
     monkeypatch.setenv("ACCESS_TOKEN", "token")
     monkeypatch.setenv("DHAN_CLIENT_ID", "client")
-    monkeypatch.setenv("API_KEY", "key")
 
     with app.test_client() as client:
         response = client.get("/dhan/health")
@@ -45,8 +43,7 @@ def test_dhan_health_reports_healthy_with_credentials(monkeypatch):
 
 def test_dhan_health_requires_all_credentials(monkeypatch):
     monkeypatch.setenv("ACCESS_TOKEN", "token")
-    monkeypatch.setenv("DHAN_CLIENT_ID", "client")
-    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("DHAN_CLIENT_ID", raising=False)
 
     with app.test_client() as client:
         response = client.get("/dhan/health")
