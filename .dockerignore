@@ -17,5 +17,6 @@ dist/
 build/
 .dockerignore
 .env
+.env.*
 .env.*.local
 config/.env.*
