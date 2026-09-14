@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
@@ -71,7 +72,7 @@ class EmailAlertChannel:
         message["To"] = self.recipient
 
         with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10) as smtp:
-            smtp.starttls()
+            smtp.starttls(context=ssl.create_default_context())
             if self.username and self.password:
                 smtp.login(self.username, self.password)
             smtp.send_message(message)

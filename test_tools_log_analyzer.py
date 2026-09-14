@@ -29,3 +29,5 @@ def test_log_analyzer_exports_report(tmp_path):
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["total_lines"] == 1
     assert payload["error_rate"] == 0.0
+    assert payload["avg_latency_ms"] == 100.0
+    assert payload["p95_latency_ms"] == 100.0
