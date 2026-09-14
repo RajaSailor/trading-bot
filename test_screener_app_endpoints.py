@@ -52,12 +52,12 @@ def test_health_and_api_status_still_work_with_existing_shapes(monkeypatch):
     monkeypatch.setattr(
         screener_app.screener_controller,
         "get_status",
-        lambda: {"running": False},
+        lambda *args, **kwargs: {"running": False},
     )
     monkeypatch.setattr(
         screener_app.screener_controller,
         "get_stats",
-        lambda: {"total_alerts": 0},
+        lambda *args, **kwargs: {"total_alerts": 0},
     )
 
     with app.test_client() as client:
