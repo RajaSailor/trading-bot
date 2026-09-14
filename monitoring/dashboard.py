@@ -9,7 +9,7 @@ from monitoring.metrics import MetricsCollector
 
 try:
     import plotly.graph_objects as go
-except Exception:  # pragma: no cover - optional at runtime
+except ImportError:  # pragma: no cover - optional at runtime
     go = None
 
 

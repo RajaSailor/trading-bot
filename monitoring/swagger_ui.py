@@ -7,7 +7,7 @@ from flask import Flask, jsonify, send_file
 
 try:
     from flasgger import Swagger
-except Exception:  # pragma: no cover - optional at runtime
+except ImportError:  # pragma: no cover - optional at runtime
     Swagger = None
 
 

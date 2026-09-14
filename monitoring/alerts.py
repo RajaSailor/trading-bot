@@ -42,8 +42,8 @@ class TelegramAlertChannel:
 
     def send(self, alert: Alert) -> bool:
         payload = {"chat_id": self._chat_id, "text": _format_alert(alert)}
-        response = requests.post(self._url, json=payload, timeout=5)
-        return response.ok
+        response = requests.post(self._url, json=payload, timeout=5, allow_redirects=False)
+        return 200 <= response.status_code < 300
 
 
 class SlackAlertChannel:
@@ -52,8 +52,8 @@ class SlackAlertChannel:
 
     def send(self, alert: Alert) -> bool:
         payload = {"text": _format_alert(alert)}
-        response = requests.post(self._webhook_url, json=payload, timeout=5)
-        return response.ok
+        response = requests.post(self._webhook_url, json=payload, timeout=5, allow_redirects=False)
+        return 200 <= response.status_code < 300
 
 
 class EmailAlertChannel:
