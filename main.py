@@ -79,7 +79,8 @@ def initialize_app():
         
         # 3. Initialize Postback Handler
         logger.info("3️⃣ Initializing Postback Handler...")
-        postback_handler = DhanPostbackHandler(dhan_integration, dhan_bridge)
+        webhook_secret = os.getenv("WEBHOOK_SECRET", "")
+        postback_handler = DhanPostbackHandler(webhook_secret)
         logger.info("   ✅ Postback Handler initialized")
         
         logger.info("=" * 70)
