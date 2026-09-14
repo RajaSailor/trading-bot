@@ -23,8 +23,11 @@ class StateManager:
     def _load(self) -> None:
         if not os.path.exists(self.state_file):
             return
-        with open(self.state_file, "r", encoding="utf-8") as handle:
-            loaded = json.load(handle)
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return
         if isinstance(loaded, dict):
             self.state.update(loaded)
 

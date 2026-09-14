@@ -1,4 +1,5 @@
 import unittest
+import json
 
 from database import TradingDatabase
 
@@ -28,6 +29,8 @@ class DatabaseLayerTests(unittest.TestCase):
         self.assertEqual(len(db.fetch_all("position_snapshots")), 1)
         self.assertEqual(len(db.fetch_all("signals")), 1)
         self.assertEqual(len(db.fetch_all("performance_metrics")), 1)
+        stored_signal = db.fetch_all("signals")[0]
+        self.assertEqual(json.loads(stored_signal["payload"])["action"], "BUY")
 
     def test_fetch_all_rejects_unknown_table(self):
         db = TradingDatabase()
