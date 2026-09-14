@@ -90,6 +90,12 @@ class DhanTelegramBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(3, send_message.await_count)
         self.assertEqual(2, sleep_mock.await_count)
 
+    async def test_send_alert_coerces_numeric_string_chat_id(self):
+        send_message = AsyncMock(return_value=None)
+        self.bridge.bot = SimpleNamespace(send_message=send_message)
+        await self.bridge.send_alert("hello", chat_id=" 12345 ")
+        self.assertEqual(12345, send_message.await_args.kwargs["chat_id"])
+
     async def test_send_alert_raises_after_retry_exhaustion(self):
         send_message = AsyncMock(side_effect=RuntimeError("permanent"))
         self.bridge.bot = SimpleNamespace(send_message=send_message)

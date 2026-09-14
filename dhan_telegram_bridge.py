@@ -447,7 +447,7 @@ class DhanTelegramBridge:
         if retries < 1:
             raise ValueError("retries must be at least 1")
 
-        target_chat_id = chat_id if chat_id is not None else self.alert_chat_id
+        target_chat_id = self._coerce_chat_id(chat_id) if chat_id is not None else self.alert_chat_id
         if target_chat_id in (None, "", 0):
             raise ValueError("TELEGRAM_CHAT_ID required for alerts")
 
