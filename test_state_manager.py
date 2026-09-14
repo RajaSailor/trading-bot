@@ -31,6 +31,14 @@ class StateManagerTests(unittest.TestCase):
             recovered = manager.recover()
             self.assertEqual(recovered["bot_status"], "stopped")
 
+    def test_recover_returns_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "state.json")
+            manager = StateManager(path)
+            recovered = manager.recover()
+            recovered["bot_status"] = "mutated"
+            self.assertEqual(manager.recover()["bot_status"], "stopped")
+
 
 if __name__ == "__main__":
     unittest.main()

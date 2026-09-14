@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from datetime import datetime
 from typing import Any, Dict, Optional
+from copy import deepcopy
 
 
 class StateManager:
@@ -37,8 +39,11 @@ class StateManager:
 
     def save(self) -> None:
         self.state["updated_at"] = datetime.utcnow().isoformat()
-        with open(self.state_file, "w", encoding="utf-8") as handle:
+        state_dir = os.path.dirname(self.state_file) or "."
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=state_dir, delete=False) as handle:
             json.dump(self.state, handle, indent=2)
+            temp_path = handle.name
+        os.replace(temp_path, self.state_file)
 
     def set_bot_status(self, status: str) -> None:
         self.state["bot_status"] = status
@@ -73,4 +78,4 @@ class StateManager:
 
     def recover(self) -> Dict[str, Any]:
         self._load()
-        return self.state
+        return deepcopy(self.state)

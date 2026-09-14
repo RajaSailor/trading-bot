@@ -21,6 +21,15 @@ class OrderExecutorTests(unittest.TestCase):
         self.assertEqual(updated.status, OrderStatus.FILLED)
         self.assertEqual(updated.filled_quantity, 10)
 
+    def test_partial_fill_ignored_for_cancelled_order(self):
+        executor = OrderExecutor()
+        order = Order(symbol="NIFTY", side="BUY", quantity=10, price=100)
+        result = executor.execute_order(order, available_liquidity=2)
+        executor.cancel_order(result.order_id)
+        updated = executor.handle_partial_fill(result.order_id, additional_fill=8)
+        self.assertEqual(updated.status, OrderStatus.CANCELLED)
+        self.assertEqual(updated.filled_quantity, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

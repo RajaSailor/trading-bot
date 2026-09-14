@@ -80,6 +80,8 @@ class OrderExecutor:
 
     def handle_partial_fill(self, order_id: str, additional_fill: int) -> Order:
         order = self.orders[order_id]
+        if order.status not in {OrderStatus.ROUTED, OrderStatus.PARTIALLY_FILLED}:
+            return order
         order.filled_quantity = min(order.quantity, order.filled_quantity + max(0, additional_fill))
         if order.filled_quantity == order.quantity:
             order.status = OrderStatus.FILLED
