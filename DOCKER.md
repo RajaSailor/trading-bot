@@ -19,6 +19,7 @@ docker compose up -d --build
 ```bash
 docker compose --profile cache up -d
 ```
+Set `REDIS_URL=redis://redis:6379/0` in your env file when enabling the `cache` profile.
 
 ## Manage containers
 ```bash

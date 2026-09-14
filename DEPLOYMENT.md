@@ -16,6 +16,10 @@ bash deployment/deploy.sh config/.env.production
 ```
 
 This command builds containers, starts services, and runs health checks.
+If you want Redis, set `REDIS_URL=redis://redis:6379/0` and start with the `cache` profile:
+```bash
+docker compose --profile cache up -d --build
+```
 
 ## 3) Verify health
 ```bash
