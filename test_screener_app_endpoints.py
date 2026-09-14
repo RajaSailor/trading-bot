@@ -43,6 +43,20 @@ def test_dhan_health_reports_healthy_with_credentials(monkeypatch):
     assert payload["dhan_connected"] is True
 
 
+def test_dhan_health_requires_all_credentials(monkeypatch):
+    monkeypatch.setenv("ACCESS_TOKEN", "token")
+    monkeypatch.setenv("DHAN_CLIENT_ID", "client")
+    monkeypatch.delenv("API_KEY", raising=False)
+
+    with app.test_client() as client:
+        response = client.get("/dhan/health")
+
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert payload["status"] == "not_configured"
+    assert payload["dhan_connected"] is False
+
+
 def test_health_and_api_status_still_work_with_existing_shapes(monkeypatch):
     monkeypatch.setattr(
         screener_app.MarketCalendar,
