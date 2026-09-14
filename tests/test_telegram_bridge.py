@@ -148,3 +148,29 @@ async def test_send_target_hit_alert_uses_telegram_bot_api(bridge, monkeypatch):
     assert kwargs["chat_id"] == 12345
     assert kwargs["parse_mode"] == "Markdown"
     assert "TARGET HIT" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_target_hit_alert_handles_telegram_api_error(bridge, monkeypatch):
+    send_message = AsyncMock(side_effect=RuntimeError("telegram down"))
+
+    class FakeBot:
+        def __init__(self, token):
+            self.token = token
+
+        async def send_message(self, **kwargs):
+            await send_message(**kwargs)
+
+    monkeypatch.setattr(dhan_telegram_bridge, "Bot", FakeBot)
+
+    await bridge.send_target_hit_alert(
+        {
+            "symbol": "NIFTY50",
+            "transactionType": "BUY",
+            "entryPrice": 19400,
+            "targetPrice": 19600,
+            "finalPnL": 2000,
+        }
+    )
+
+    send_message.assert_awaited_once()
