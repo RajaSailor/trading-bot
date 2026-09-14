@@ -412,6 +412,19 @@ class DhanAPIClient:
             (success, message, account_info)
         """
         try:
+            # Check for paper mode first
+            if self.practice_mode:
+                self.logger.info("📄 [PAPER MODE] Fetching account info (mock data)")
+                mock_account = {
+                    "dhanClientId": self.client_id,
+                    "ledgerBalance": 100000.00,
+                    "marginAvailable": 100000.00,
+                    "marginUsed": 0.00,
+                    "status": "Active",
+                    "mode": "PAPER_TRADING"
+                }
+                return True, "Paper mode account info", mock_account
+            
             self.logger.info("💰 Fetching account info from DhanHQ...")
             
             # Use root account endpoint (not /summary which doesn't exist)
@@ -450,6 +463,17 @@ class DhanAPIClient:
             (success, message, funds_info)
         """
         try:
+            # Check for paper mode first
+            if self.practice_mode:
+                self.logger.info("📄 [PAPER MODE] Fetching funds (mock data)")
+                mock_funds = {
+                    "ledgerBalance": 100000.00,
+                    "marginUsed": 0.00,
+                    "marginAvailable": 100000.00,
+                    "mode": "PAPER_TRADING"
+                }
+                return True, "Paper mode funds info", mock_funds
+            
             self.logger.info("💳 Fetching funds from DhanHQ...")
             
             response = requests.get(
