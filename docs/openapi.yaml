@@ -66,6 +66,42 @@ paths:
           description: Validation error
         '500':
           description: Internal processing error
+  /api/webhook/test:
+    post:
+      summary: Trigger webhook processing in test mode
+      security:
+        - WebhookSecret: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Test payload processed
+        '403':
+          description: Unauthorized
+  /api/webhook/history:
+    get:
+      summary: Read protected webhook history records
+      security:
+        - WebhookSecret: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+      responses:
+        '200':
+          description: Webhook history response
+        '400':
+          description: Invalid query parameter
+        '403':
+          description: Unauthorized
 components:
   securitySchemes:
     WebhookSecret:

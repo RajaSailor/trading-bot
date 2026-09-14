@@ -71,8 +71,17 @@ class EmailAlertChannel:
         message["From"] = self.sender
         message["To"] = self.recipient
 
+        context = ssl.create_default_context()
+        if self.smtp_port == 465:
+            with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10, context=context) as smtp:
+                if self.username and self.password:
+                    smtp.login(self.username, self.password)
+                smtp.send_message(message)
+            return True
+
         with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10) as smtp:
-            smtp.starttls(context=ssl.create_default_context())
+            if smtp.has_extn("starttls"):
+                smtp.starttls(context=context)
             if self.username and self.password:
                 smtp.login(self.username, self.password)
             smtp.send_message(message)

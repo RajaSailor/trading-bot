@@ -22,3 +22,11 @@ def test_performance_analyzer_handles_empty_trades():
 
     assert stats["total_trades"] == 0
     assert stats["sharpe_ratio"] == 0.0
+
+
+def test_performance_analyzer_sharpe_zero_when_variance_is_zero():
+    analyzer = PerformanceAnalyzer()
+    for _ in range(4):
+        analyzer.add_trade(50)
+
+    assert analyzer.sharpe_ratio() == 0.0

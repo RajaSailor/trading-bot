@@ -18,7 +18,9 @@ def test_metrics_collector_snapshot_calculates_trade_and_api_metrics():
     assert snapshot["trade_performance"]["winning_trades"] == 1
     assert snapshot["trade_performance"]["gross_pnl"] == 60.0
     assert snapshot["order_execution"]["count"] == 2
+    assert snapshot["order_execution"]["p95_latency_ms"] == 218.0
     assert snapshot["api_latency"]["/orders"]["calls"] == 2.0
+    assert snapshot["api_latency"]["/orders"]["p95_latency_ms"] == 118.0
     assert snapshot["api_latency"]["/orders"]["error_rate"] == 0.5
     assert snapshot["error_monitoring"]["critical_errors"] == 1
     assert snapshot["system_resources"]["cpu_percent"] == 45.0
