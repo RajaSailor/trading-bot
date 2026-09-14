@@ -1,84 +1,29 @@
-version: '3.8'
-
 services:
   trading-bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: trading-bot
+    restart: unless-stopped
     ports:
       - "5000:5000"
+    env_file:
+      - config/.env.development
     environment:
-      # DhanHQ Credentials
-      - ACCESS_TOKEN=${ACCESS_TOKEN}
-      - DHAN_CLIENT_ID=${DHAN_CLIENT_ID}
-      - API_KEY=${API_KEY}
-      - DHAN_PIN=${DHAN_PIN}
-      - DHAN_TOTP_SECRET=${DHAN_TOTP_SECRET}
-      - DHAN_WEBHOOK_SECRET=${DHAN_WEBHOOK_SECRET}
-      
-      # Telegram Configuration
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - CHANNEL_TRADE_CONTROL_ID=${CHANNEL_TRADE_CONTROL_ID}
-      - CHANNEL_COMMODITY_ID=${CHANNEL_COMMODITY_ID}
-      - CHANNEL_CRYPTO_ID=${CHANNEL_CRYPTO_ID}
-      - CHANNEL_INDEX_ID=${CHANNEL_INDEX_ID}
-      - CHANNEL_NIFTY50_5X_ID=${CHANNEL_NIFTY50_5X_ID}
-      - CHANNEL_NIFTY50_OPTIONS_ID=${CHANNEL_NIFTY50_OPTIONS_ID}
-      - CHANNEL_NIFTY50_PAY_LATER_ID=${CHANNEL_NIFTY50_PAY_LATER_ID}
-      - CHANNEL_SERVICE_ALERTS_ID=${CHANNEL_SERVICE_ALERTS_ID}
-      
-      # Trading Parameters
-      - PRACTICE_MODE=${PRACTICE_MODE:-true}
-      - MAX_LOSS_PER_TRADE=${MAX_LOSS_PER_TRADE:-500}
-      - MAX_POSITION_SIZE=${MAX_POSITION_SIZE:-5}
-      - MIN_RR_RATIO=${MIN_RR_RATIO:-1.0}
-      
-      # Server Configuration
       - FLASK_ENV=${FLASK_ENV:-production}
       - PORT=5000
       - SERVER_HOST=0.0.0.0
-      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
-      
-      # Time & Timezone
-      - TIMEZONE=${TIMEZONE:-Asia/Kolkata}
-      - MARKET_START_TIME=${MARKET_START_TIME:-09:00}
-      - MARKET_END_TIME=${MARKET_END_TIME:-23:30}
-      
-      # State & Persistence
-      - STATE_FILE=${STATE_FILE:-dhan_state.json}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    
+      - DATABASE_URL=${DATABASE_URL:-postgresql://trading_bot:trading_bot@postgres:5432/trading_bot}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     volumes:
-      # Persist state file
-      - ./dhan_state.json:/app/dhan_state.json
-      # Persist logs
       - ./logs:/app/logs
-      # Persist backups (optional)
       - ./backups:/app/backups
-    
-    restart: unless-stopped
+      - trading_state:/app/state
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - trading-network
-    
-    # Resource limits
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 512M
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-    
-    # Logging configuration
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -86,10 +31,42 @@ services:
       retries: 3
       start_period: 40s
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-bot-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-trading_bot}
+      - POSTGRES_USER=${POSTGRES_USER:-trading_bot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-trading_bot}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trading_bot} -d ${POSTGRES_DB:-trading_bot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading-bot-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - trading-network
+    profiles:
+      - cache
+
 networks:
   trading-network:
     driver: bridge
 
 volumes:
-  trading-data:
-    driver: local
+  trading_state:
+  postgres_data:
+  redis_data:
