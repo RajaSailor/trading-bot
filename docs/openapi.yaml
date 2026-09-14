@@ -69,6 +69,7 @@ paths:
   /api/webhook/test:
     post:
       summary: Trigger webhook processing in test mode
+      description: Authenticate using `X-Webhook-Secret` header or JSON body field `secret`.
       security:
         - WebhookSecret: []
       requestBody:
@@ -78,6 +79,10 @@ paths:
             schema:
               type: object
               additionalProperties: true
+              properties:
+                secret:
+                  type: string
+                  description: Optional webhook admin secret when provided in payload.
       responses:
         '200':
           description: Test payload processed
