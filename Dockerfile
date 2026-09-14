@@ -20,7 +20,7 @@ RUN pip install --upgrade pip setuptools wheel && \
 COPY . .
 
 RUN groupadd --system app && useradd --system --gid app --create-home app && \
-    mkdir -p /app/logs /app/backups && \
+    mkdir -p /app/logs /app/backups /app/state && \
     chown -R app:app /app
 
 EXPOSE 5000

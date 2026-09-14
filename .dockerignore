@@ -19,4 +19,4 @@ build/
 .env
 .env.*
 .env.*.local
-config/.env.*
+config/.env.production

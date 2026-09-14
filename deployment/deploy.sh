@@ -30,7 +30,7 @@ SLEEP_SECONDS="${DEPLOY_HEALTH_INTERVAL:-5}"
 ATTEMPT=1
 
 while true; do
-  if docker compose --env-file "${ENV_FILE}" exec -T trading-bot python deployment/health_check.py; then
+  if curl -fsS "http://localhost:5000/health" >/dev/null && curl -fsS "http://localhost:5000/dhan/health" >/dev/null; then
     break
   fi
   if [[ "${ATTEMPT}" -ge "${MAX_ATTEMPTS}" ]]; then
