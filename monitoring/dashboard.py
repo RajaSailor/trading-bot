@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from flask import Flask, jsonify
+from flask import Flask, Response, jsonify
 
 from monitoring.metrics import MetricsCollector
 
@@ -36,7 +36,7 @@ class AnalyticsDashboard:
 
             fig = go.Figure(data=[go.Bar(x=["Gross P&L"], y=[gross_pnl])])
             fig.update_layout(title="Trading P&L", xaxis_title="Metric", yaxis_title="Value")
-            return jsonify(fig.to_plotly_json())
+            return Response(fig.to_json(), mimetype="application/json")
 
         @app.route("/dashboard/system-health", methods=["GET"])
         def system_health():

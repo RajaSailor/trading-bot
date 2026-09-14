@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,7 +32,7 @@ class LogAnalyzer:
 
         latencies.sort()
         if latencies:
-            p95_index = int(0.95 * (len(latencies) - 1))
+            p95_index = max(0, math.ceil(0.95 * len(latencies)) - 1)
             p95 = latencies[p95_index]
             avg = sum(latencies) / len(latencies)
         else:

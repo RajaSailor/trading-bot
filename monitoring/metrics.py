@@ -12,6 +12,21 @@ try:
 except Exception:  # pragma: no cover - optional at runtime
     Counter = Gauge = Histogram = None
 
+_PROM_TRADE_COUNTER = Counter("trades_total", "Total trades") if Counter else None
+_PROM_ERROR_COUNTER = Counter("errors_total", "Total errors", ["component", "error_type"]) if Counter else None
+_PROM_ORDER_LATENCY = Histogram(
+    "order_execution_ms",
+    "Order execution latency",
+    buckets=(10, 50, 100, 250, 500, 1000, 2500, 5000),
+) if Histogram else None
+_PROM_API_LATENCY = Histogram(
+    "api_latency_ms",
+    "API latency by endpoint",
+    ["endpoint"],
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+) if Histogram else None
+_PROM_SYSTEM_GAUGE = Gauge("system_resource_percent", "System resource usage", ["resource"]) if Gauge else None
+
 
 @dataclass
 class TradeMetric:
@@ -34,11 +49,11 @@ class MetricsCollector:
         self._system_resources: dict[str, float] = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0}
         self._critical_errors = 0
 
-        self._prom_trade_counter = Counter("trades_total", "Total trades") if Counter else None
-        self._prom_error_counter = Counter("errors_total", "Total errors", ["component", "error_type"]) if Counter else None
-        self._prom_order_latency = Histogram("order_execution_ms", "Order execution latency", buckets=(10, 50, 100, 250, 500, 1000, 2500, 5000)) if Histogram else None
-        self._prom_api_latency = Histogram("api_latency_ms", "API latency by endpoint", ["endpoint"], buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000)) if Histogram else None
-        self._prom_system_gauge = Gauge("system_resource_percent", "System resource usage", ["resource"]) if Gauge else None
+        self._prom_trade_counter = _PROM_TRADE_COUNTER
+        self._prom_error_counter = _PROM_ERROR_COUNTER
+        self._prom_order_latency = _PROM_ORDER_LATENCY
+        self._prom_api_latency = _PROM_API_LATENCY
+        self._prom_system_gauge = _PROM_SYSTEM_GAUGE
 
     def record_trade(self, pnl: float, duration_ms: float, slippage: float = 0.0, strategy: str = "default") -> None:
         with self._lock:

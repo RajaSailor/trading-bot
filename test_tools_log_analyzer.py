@@ -16,7 +16,7 @@ def test_log_analyzer_detects_error_lines_and_latency():
     assert report.total_lines == 3
     assert report.error_lines == 2
     assert report.avg_latency_ms == (100 + 250 + 300) / 3
-    assert report.p95_latency_ms == 250
+    assert report.p95_latency_ms == 300
 
 
 def test_log_analyzer_exports_report(tmp_path):

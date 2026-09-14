@@ -18,8 +18,10 @@ def create_swagger_app(openapi_path: str | None = None) -> Flask:
     with spec_path.open("r", encoding="utf-8") as spec_file:
         spec = yaml.safe_load(spec_file)
 
-    if Swagger is not None:
-        Swagger(app, template=spec)
+    if Swagger is None:
+        raise RuntimeError("flasgger is required to serve Swagger UI")
+
+    Swagger(app, template=spec)
 
     @app.route("/openapi.yaml", methods=["GET"])
     def openapi_spec():
