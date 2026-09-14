@@ -29,7 +29,10 @@ MAX_ATTEMPTS="${DEPLOY_HEALTH_RETRIES:-20}"
 SLEEP_SECONDS="${DEPLOY_HEALTH_INTERVAL:-5}"
 ATTEMPT=1
 
-until docker compose --env-file "${ENV_FILE}" exec -T trading-bot python deployment/health_check.py; do
+while true; do
+  if docker compose --env-file "${ENV_FILE}" exec -T trading-bot python deployment/health_check.py; then
+    break
+  fi
   if [[ "${ATTEMPT}" -ge "${MAX_ATTEMPTS}" ]]; then
     echo "Deployment failed: health checks did not pass after ${MAX_ATTEMPTS} attempts."
     exit 1

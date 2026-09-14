@@ -16,9 +16,13 @@ fi
 
 POSTGRES_USER="${POSTGRES_USER:-trading_bot}"
 POSTGRES_DB="${POSTGRES_DB:-trading_bot}"
+if [[ ! "${POSTGRES_USER}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  echo "Invalid POSTGRES_USER value: ${POSTGRES_USER}"
+  exit 1
+fi
 
 cd "${ROOT_DIR}"
-docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO ${POSTGRES_USER}; GRANT ALL ON SCHEMA public TO public;"
+docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO \"${POSTGRES_USER}\"; GRANT ALL ON SCHEMA public TO public;"
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" < "${BACKUP_FILE}"
 
 echo "Restore complete from: ${BACKUP_FILE}"
