@@ -7,8 +7,12 @@ docker build -t trading-bot:latest .
 
 ## Run container directly
 ```bash
-docker run --rm -p 5000:5000 --env-file config/.env.development trading-bot:latest
+docker run --rm -p 5000:5000 \
+  --env-file config/.env.development \
+  -e DATABASE_URL=******host.docker.internal:5432/trading_bot_dev \
+  trading-bot:latest
 ```
+Use a reachable PostgreSQL host in `DATABASE_URL` when running a single container.
 
 ## Run full stack with Compose
 ```bash

@@ -18,6 +18,6 @@ POSTGRES_USER="${POSTGRES_USER:-trading_bot}"
 POSTGRES_DB="${POSTGRES_DB:-trading_bot}"
 
 cd "${ROOT_DIR}"
-cat "${BACKUP_FILE}" | docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"
+docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" < "${BACKUP_FILE}"
 
 echo "Restore complete from: ${BACKUP_FILE}"

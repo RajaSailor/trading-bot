@@ -27,7 +27,7 @@ services:
       - FLASK_ENV=${FLASK_ENV:-production}
       - PORT=5000
       - SERVER_HOST=0.0.0.0
-      - DATABASE_URL=${DATABASE_URL:-postgresql://trading_bot:trading_bot@postgres:5432/trading_bot}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
       - REDIS_URL=${REDIS_URL:-}
     volumes:
       - ./logs:/app/logs
@@ -39,7 +39,7 @@ services:
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "python", "deployment/health_check.py"]
       interval: 30s
       timeout: 10s
       retries: 3
