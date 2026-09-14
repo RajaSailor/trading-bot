@@ -20,6 +20,7 @@ Features:
 
 import logging
 import asyncio
+import os
 from typing import Dict, Tuple, Optional, Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -59,10 +60,11 @@ class DhanTelegramBridge:
     
     def __init__(
         self,
-        telegram_bot_token: str,
+        telegram_bot_token: str = None,
         dhan_integration: DhanIntegration = None,
         postback_handler: DhanPostbackHandler = None,
-        alert_chat_id: int = None
+        alert_chat_id: int = None,
+        webhook_secret: str = None
     ):
         """
         Initialize Telegram bridge
@@ -74,8 +76,19 @@ class DhanTelegramBridge:
             alert_chat_id: Chat ID for alerts
         """
         self.logger = logging.getLogger(__name__)
-        self.bot_token = telegram_bot_token
-        self.alert_chat_id = alert_chat_id
+
+        # Backward compatibility for old call style: DhanTelegramBridge(dhan_integration)
+        if isinstance(telegram_bot_token, DhanIntegration) and dhan_integration is None:
+            dhan_integration = telegram_bot_token
+            telegram_bot_token = None
+
+        self.bot_token = telegram_bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if not self.bot_token:
+            raise ValueError("TELEGRAM_BOT_TOKEN required")
+
+        default_chat_id = os.getenv("TELEGRAM_CHAT_ID", "0")
+        self.alert_chat_id = alert_chat_id if alert_chat_id is not None else int(default_chat_id or "0")
+        self.webhook_secret = webhook_secret or os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
         
         # Get or create integrations
         self.dhan = dhan_integration or get_dhan_integration()
@@ -138,6 +151,31 @@ class DhanTelegramBridge:
             self.logger.info("🛑 Telegram polling stopped")
         except Exception as e:
             self.logger.error(f"❌ Stop error: {e}")
+
+    async def set_webhook(self, webhook_url: str) -> None:
+        """Set Telegram webhook URL"""
+        bot = Bot(token=self.bot_token)
+        await bot.set_webhook(url=webhook_url, secret_token=self.webhook_secret or None)
+        self.logger.info(f"✅ Telegram webhook configured: {webhook_url}")
+
+    async def clear_webhook(self) -> None:
+        """Clear Telegram webhook"""
+        bot = Bot(token=self.bot_token)
+        await bot.delete_webhook(drop_pending_updates=False)
+        self.logger.info("✅ Telegram webhook cleared")
+
+    async def handle_webhook_update(self, payload: Dict) -> bool:
+        """Process Telegram webhook update payload"""
+        try:
+            if self.app is None:
+                await self.initialize_telegram_app()
+
+            update = Update.de_json(payload, self.app.bot)
+            await self.app.process_update(update)
+            return True
+        except Exception as e:
+            self.logger.error(f"❌ Webhook update error: {e}")
+            return False
     
     # =========================================================================
     # TRADE SIGNAL PARSING
@@ -374,6 +412,38 @@ class DhanTelegramBridge:
     # =========================================================================
     # ALERT SENDING
     # =========================================================================
+
+    async def send_alert(
+        self,
+        message: str,
+        chat_id: int = None,
+        parse_mode: str = "Markdown",
+        retries: int = 3,
+        retry_delay: float = 1.0
+    ) -> None:
+        """Send alert message with retry support"""
+        target_chat_id = chat_id if chat_id is not None else self.alert_chat_id
+        if not target_chat_id:
+            raise ValueError("TELEGRAM_CHAT_ID required for alerts")
+
+        bot = Bot(token=self.bot_token)
+
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                await bot.send_message(
+                    chat_id=target_chat_id,
+                    text=message,
+                    parse_mode=parse_mode
+                )
+                return
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"Alert send failed (attempt {attempt}/{retries}): {e}")
+                if attempt < retries:
+                    await asyncio.sleep(retry_delay)
+
+        raise last_error
     
     async def _send_trade_confirmation(
         self,
@@ -415,13 +485,7 @@ class DhanTelegramBridge:
                 f"P&L: ₹{position.get('finalPnL', 0):.2f}\n"
                 f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
             )
-            
-            bot = Bot(token=self.bot_token)
-            await bot.send_message(
-                chat_id=self.alert_chat_id,
-                text=message,
-                parse_mode="Markdown"
-            )
+            await self.send_alert(message)
             
             self.logger.info(f"✅ SL hit alert sent for {position['symbol']}")
             
@@ -443,13 +507,7 @@ class DhanTelegramBridge:
                 f"P&L: ₹{position.get('finalPnL', 0):.2f}\n"
                 f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
             )
-            
-            bot = Bot(token=self.bot_token)
-            await bot.send_message(
-                chat_id=self.alert_chat_id,
-                text=message,
-                parse_mode="Markdown"
-            )
+            await self.send_alert(message)
             
             self.logger.info(f"✅ Target hit alert sent for {position['symbol']}")
             
