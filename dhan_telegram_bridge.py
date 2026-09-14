@@ -101,7 +101,7 @@ class DhanTelegramBridge:
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN required")
 
-        default_chat_id = self._coerce_chat_id(os.getenv("TELEGRAM_CHAT_ID", "0"))
+        default_chat_id = self._coerce_chat_id(os.getenv("TELEGRAM_CHAT_ID"))
         self.alert_chat_id = self._coerce_chat_id(alert_chat_id)
         if self.alert_chat_id is None:
             self.alert_chat_id = default_chat_id
@@ -173,7 +173,7 @@ class DhanTelegramBridge:
     async def set_webhook(self, webhook_url: str) -> None:
         """Set Telegram webhook URL"""
         await self.bot.set_webhook(url=webhook_url, secret_token=self.webhook_secret or None)
-        self.logger.info(f"✅ Telegram webhook configured: {webhook_url}")
+        self.logger.info("✅ Telegram webhook configured")
 
     async def clear_webhook(self) -> None:
         """Clear Telegram webhook"""
