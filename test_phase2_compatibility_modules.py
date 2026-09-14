@@ -43,4 +43,5 @@ def test_dhanhq_config_invalid_endpoint_key_raises_helpful_error():
 
 def test_dhanhq_config_endpoint_url_uses_latest_environment_value(monkeypatch):
     monkeypatch.setenv("DHANHQ_API_BASE_URL", "https://example.com/v2")
+    assert DhanHQConfig.API_BASE_URL == "https://example.com/v2"
     assert DhanHQConfig.endpoint_url("orders") == "https://example.com/v2/orders"

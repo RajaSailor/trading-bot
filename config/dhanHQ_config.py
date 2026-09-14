@@ -5,11 +5,21 @@ from __future__ import annotations
 import os
 
 
+class _ClassProperty:
+    def __init__(self, getter):
+        self.getter = getter
+
+    def __get__(self, _instance, owner):
+        return self.getter(owner)
+
+
 class DhanHQConfig:
     """Centralized DhanHQ endpoint and timeout settings."""
 
     DEFAULT_API_BASE_URL = "https://api.dhan.co/v2"
-    API_BASE_URL = os.getenv("DHANHQ_API_BASE_URL", DEFAULT_API_BASE_URL)
+    API_BASE_URL = _ClassProperty(
+        lambda cls: os.getenv("DHANHQ_API_BASE_URL", cls.DEFAULT_API_BASE_URL)
+    )
 
     ENDPOINTS = {
         "orders": "/orders",
@@ -33,5 +43,4 @@ class DhanHQConfig:
             valid_keys = ", ".join(sorted(cls.ENDPOINTS))
             raise ValueError(f"Unknown DhanHQ endpoint key '{key}'. Valid keys: {valid_keys}")
         path = cls.ENDPOINTS[key]
-        base_url = os.getenv("DHANHQ_API_BASE_URL", cls.DEFAULT_API_BASE_URL)
-        return f"{base_url}{path}"
+        return f"{cls.API_BASE_URL}{path}"
