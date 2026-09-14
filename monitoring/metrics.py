@@ -8,24 +8,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 try:
-    from prometheus_client import Counter, Gauge, Histogram
+    from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 except Exception:  # pragma: no cover - optional at runtime
-    Counter = Gauge = Histogram = None
-
-_PROM_TRADE_COUNTER = Counter("trades_total", "Total trades") if Counter else None
-_PROM_ERROR_COUNTER = Counter("errors_total", "Total errors", ["component", "error_type"]) if Counter else None
-_PROM_ORDER_LATENCY = Histogram(
-    "order_execution_ms",
-    "Order execution latency",
-    buckets=(10, 50, 100, 250, 500, 1000, 2500, 5000),
-) if Histogram else None
-_PROM_API_LATENCY = Histogram(
-    "api_latency_ms",
-    "API latency by endpoint",
-    ["endpoint"],
-    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
-) if Histogram else None
-_PROM_SYSTEM_GAUGE = Gauge("system_resource_percent", "System resource usage", ["resource"]) if Gauge else None
+    REGISTRY = Counter = Gauge = Histogram = None
 
 
 @dataclass
@@ -49,11 +34,20 @@ class MetricsCollector:
         self._system_resources: dict[str, float] = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0}
         self._critical_errors = 0
 
-        self._prom_trade_counter = _PROM_TRADE_COUNTER
-        self._prom_error_counter = _PROM_ERROR_COUNTER
-        self._prom_order_latency = _PROM_ORDER_LATENCY
-        self._prom_api_latency = _PROM_API_LATENCY
-        self._prom_system_gauge = _PROM_SYSTEM_GAUGE
+        self._prom_trade_counter = _get_or_create_counter("trades_total", "Total trades")
+        self._prom_error_counter = _get_or_create_counter("errors_total", "Total errors", ["component", "error_type"])
+        self._prom_order_latency = _get_or_create_histogram(
+            "order_execution_ms",
+            "Order execution latency",
+            buckets=(10, 50, 100, 250, 500, 1000, 2500, 5000),
+        )
+        self._prom_api_latency = _get_or_create_histogram(
+            "api_latency_ms",
+            "API latency by endpoint",
+            ["endpoint"],
+            buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+        )
+        self._prom_system_gauge = _get_or_create_gauge("system_resource_percent", "System resource usage", ["resource"])
 
     def record_trade(self, pnl: float, duration_ms: float, slippage: float = 0.0, strategy: str = "default") -> None:
         with self._lock:
@@ -150,3 +144,39 @@ def _percentile(values: list[float], percentile: float) -> float:
     lower_value = sorted_values[lower]
     upper_value = sorted_values[upper]
     return float(lower_value + (upper_value - lower_value) * (rank - lower))
+
+
+def _get_existing_collector(name: str):
+    if REGISTRY is None or not hasattr(REGISTRY, "_names_to_collectors"):
+        return None
+    return REGISTRY._names_to_collectors.get(name)
+
+
+def _get_or_create_counter(name: str, documentation: str, labelnames: list[str] | None = None):
+    if Counter is None:
+        return None
+    existing = _get_existing_collector(name)
+    if existing is not None:
+        return existing
+    return Counter(name, documentation, labelnames or [])
+
+
+def _get_or_create_histogram(name: str, documentation: str, labelnames: list[str] | None = None, buckets: tuple[float, ...] | None = None):
+    if Histogram is None:
+        return None
+    existing = _get_existing_collector(name)
+    if existing is not None:
+        return existing
+    kwargs: dict[str, Any] = {}
+    if buckets is not None:
+        kwargs["buckets"] = buckets
+    return Histogram(name, documentation, labelnames or [], **kwargs)
+
+
+def _get_or_create_gauge(name: str, documentation: str, labelnames: list[str] | None = None):
+    if Gauge is None:
+        return None
+    existing = _get_existing_collector(name)
+    if existing is not None:
+        return existing
+    return Gauge(name, documentation, labelnames or [])
