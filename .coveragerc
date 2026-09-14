@@ -1,0 +1,9 @@
+[run]
+branch = True
+source =
+    dhan_telegram_bridge
+    live_screener_main
+
+[report]
+show_missing = True
+skip_covered = False
