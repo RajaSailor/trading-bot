@@ -29,6 +29,12 @@ class DatabaseLayerTests(unittest.TestCase):
         self.assertEqual(len(db.fetch_all("signals")), 1)
         self.assertEqual(len(db.fetch_all("performance_metrics")), 1)
 
+    def test_fetch_all_rejects_unknown_table(self):
+        db = TradingDatabase()
+        self.addCleanup(db.close)
+        with self.assertRaises(ValueError):
+            db.fetch_all("unknown_table")
+
 
 if __name__ == "__main__":
     unittest.main()

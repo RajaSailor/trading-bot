@@ -73,7 +73,7 @@ class StrategyManager:
 
         for candle in historical_data:
             signal = strategy.generate_signal(candle, **config.params)
-            if not signal:
+            if not signal or not self.validate_signal(signal):
                 continue
             trades += 1
             pnl += float(signal.get("pnl", 0.0))

@@ -275,7 +275,7 @@ class SignalQueueProcessor:
     def process_next_signal(self) -> Optional[Dict]:
         if not self._queue:
             return None
-        signal = self._queue.popleft()
+        signal = dict(self._queue.popleft())
         signal["processed_at"] = datetime.utcnow().isoformat()
         return signal
 

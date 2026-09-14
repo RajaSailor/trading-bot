@@ -15,6 +15,7 @@ class SignalProcessingPipelineTests(unittest.TestCase):
         self.assertEqual(len(processed), 1)
         self.assertEqual(processed[0]["action"], "BUY")
         self.assertIn("processed_at", processed[0])
+        self.assertNotIn("processed_at", signal)
 
     def test_invalid_signal_rejected(self):
         processor = SignalQueueProcessor()

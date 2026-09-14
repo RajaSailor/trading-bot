@@ -74,8 +74,14 @@ class TradingDatabase:
     def save_order(self, order: Dict[str, Any]) -> None:
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO orders (order_id, symbol, side, quantity, price, status)
+            INSERT INTO orders (order_id, symbol, side, quantity, price, status)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(order_id) DO UPDATE SET
+                symbol = excluded.symbol,
+                side = excluded.side,
+                quantity = excluded.quantity,
+                price = excluded.price,
+                status = excluded.status
             """,
             (order["order_id"], order["symbol"], order["side"], order["quantity"], order["price"], order["status"]),
         )
@@ -111,6 +117,15 @@ class TradingDatabase:
         self.conn.commit()
 
     def fetch_all(self, table: str) -> List[sqlite3.Row]:
+        allowed_tables = {
+            "trades",
+            "orders",
+            "position_snapshots",
+            "signals",
+            "performance_metrics",
+        }
+        if table not in allowed_tables:
+            raise ValueError(f"Unsupported table: {table}")
         cursor = self.conn.execute(f"SELECT * FROM {table}")
         return list(cursor.fetchall())
 
