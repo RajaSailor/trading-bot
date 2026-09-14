@@ -31,6 +31,15 @@ class SignalProcessingPipelineTests(unittest.TestCase):
         processed = processor.process_next_signal()
         self.assertEqual(processed["action"], "BUY")
 
+    def test_queue_preserves_nested_metadata_snapshot(self):
+        processor = SignalQueueProcessor()
+        signal = processor.parse_webhook_signal({"symbol": "NIFTY", "action": "buy", "metadata": {"source": "tv"}})
+        self.assertTrue(processor.enqueue_signal(signal))
+
+        signal["metadata"]["source"] = "mutated"
+        processed = processor.process_next_signal()
+        self.assertEqual(processed["metadata"]["source"], "tv")
+
 
 if __name__ == "__main__":
     unittest.main()

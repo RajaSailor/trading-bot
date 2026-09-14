@@ -53,7 +53,8 @@ class StrategyManager:
             signal = strategy.generate_signal(market_data, **config.params)
             if signal and self.validate_signal(signal):
                 payload = dict(signal)
-                payload["strategy"] = name
+                payload.setdefault("strategy", name)
+                payload["strategy_name"] = name
                 signals.append(payload)
         return signals
 

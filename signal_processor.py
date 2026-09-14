@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from enum import Enum
 import time
 from collections import deque
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +257,7 @@ class SignalQueueProcessor:
             "action": action,
             "strategy": payload.get("strategy", "default"),
             "timestamp": payload.get("timestamp", datetime.utcnow().isoformat()),
-            "metadata": payload.get("metadata", {}),
+            "metadata": deepcopy(payload.get("metadata", {})),
         }
 
     def validate_signal(self, signal: Dict) -> bool:
@@ -269,7 +270,7 @@ class SignalQueueProcessor:
     def enqueue_signal(self, signal: Dict) -> bool:
         if not self.validate_signal(signal):
             return False
-        self._queue.append(dict(signal))
+        self._queue.append(deepcopy(signal))
         return True
 
     def process_next_signal(self) -> Optional[Dict]:
