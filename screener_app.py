@@ -182,6 +182,32 @@ def health_check():
     }), 200
 
 
+@app.route('/dhan/health', methods=['GET'])
+def dhan_health():
+    required_env = ("ACCESS_TOKEN", "DHAN_CLIENT_ID")
+    configured = all((app.config.get(key) or os.getenv(key)) for key in required_env)
+    return jsonify({
+        "status": "healthy" if configured else "not_configured",
+        "dhan_connected": configured,
+        "timestamp": datetime.utcnow().isoformat(),
+    }), 200 if configured else 503
+
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "name": "Trading Bot Screener Service",
+        "status": "running",
+        "timestamp": datetime.utcnow().isoformat(),
+        "endpoints": {
+            "health": "/health",
+            "dhan_health": "/dhan/health",
+            "api_status": "/api/status",
+            "api_stats": "/api/stats",
+        },
+    }), 200
+
+
 @app.route('/api/status', methods=['GET'])
 def api_status():
     return jsonify({
