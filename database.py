@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 
@@ -14,55 +15,11 @@ class TradingDatabase:
         self._initialize_schema()
 
     def _initialize_schema(self) -> None:
+        migration_path = os.path.join(os.path.dirname(__file__), "migrations", "001_init.sql")
+        with open(migration_path, "r", encoding="utf-8") as handle:
+            schema_sql = handle.read()
         cursor = self.conn.cursor()
-        cursor.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                quantity INTEGER NOT NULL,
-                price REAL NOT NULL,
-                pnl REAL DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id TEXT UNIQUE NOT NULL,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                quantity INTEGER NOT NULL,
-                price REAL NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS position_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                quantity INTEGER NOT NULL,
-                average_price REAL NOT NULL,
-                snapshot_time TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                strategy TEXT,
-                symbol TEXT NOT NULL,
-                action TEXT NOT NULL,
-                payload TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                metric_name TEXT NOT NULL,
-                metric_value REAL NOT NULL,
-                recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-        )
+        cursor.executescript(schema_sql)
         self.conn.commit()
 
     def log_trade(self, trade: Dict[str, Any]) -> None:

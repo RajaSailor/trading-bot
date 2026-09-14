@@ -22,6 +22,15 @@ class SignalProcessingPipelineTests(unittest.TestCase):
         signal = processor.parse_webhook_signal({"symbol": "NIFTY", "action": "hold"})
         self.assertIsNone(signal)
 
+    def test_queue_preserves_enqueued_snapshot(self):
+        processor = SignalQueueProcessor()
+        signal = processor.parse_webhook_signal({"symbol": "NIFTY", "action": "buy"})
+        self.assertTrue(processor.enqueue_signal(signal))
+
+        signal["action"] = "SELL"
+        processed = processor.process_next_signal()
+        self.assertEqual(processed["action"], "BUY")
+
 
 if __name__ == "__main__":
     unittest.main()

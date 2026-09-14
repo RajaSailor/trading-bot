@@ -269,7 +269,7 @@ class SignalQueueProcessor:
     def enqueue_signal(self, signal: Dict) -> bool:
         if not self.validate_signal(signal):
             return False
-        self._queue.append(signal)
+        self._queue.append(dict(signal))
         return True
 
     def process_next_signal(self) -> Optional[Dict]:

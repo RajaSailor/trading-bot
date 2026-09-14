@@ -29,7 +29,11 @@ class StateManager:
         except (json.JSONDecodeError, OSError):
             return
         if isinstance(loaded, dict):
-            self.state.update(loaded)
+            for key, value in loaded.items():
+                if isinstance(value, dict) and isinstance(self.state.get(key), dict):
+                    self.state[key].update(value)
+                else:
+                    self.state[key] = value
 
     def save(self) -> None:
         self.state["updated_at"] = datetime.utcnow().isoformat()
