@@ -15,7 +15,7 @@ export COMPOSE_DOCKER_CLI_BUILD=1
 export DOCKER_BUILDKIT=1
 
 docker compose --env-file "${ENV_FILE}" down --remove-orphans
-if grep -Eq '^REDIS_URL=.+$' "${ENV_FILE}"; then
+if grep -Eq '^REDIS_URL=redis://redis(:6379)?(/.*)?$' "${ENV_FILE}"; then
   docker compose --env-file "${ENV_FILE}" --profile cache up -d --build
 else
   docker compose --env-file "${ENV_FILE}" up -d --build
