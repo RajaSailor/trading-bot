@@ -58,6 +58,21 @@ class DhanTelegramBridge:
     - Handle errors
     """
     
+    @staticmethod
+    def _coerce_chat_id(value):
+        """Accept numeric chat IDs and @channel usernames."""
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lstrip("-").isdigit():
+            return int(text)
+        return text
+
     def __init__(
         self,
         telegram_bot_token: str = None,
@@ -86,9 +101,12 @@ class DhanTelegramBridge:
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN required")
 
-        default_chat_id = os.getenv("TELEGRAM_CHAT_ID", "0")
-        self.alert_chat_id = alert_chat_id if alert_chat_id is not None else int(default_chat_id or "0")
+        default_chat_id = self._coerce_chat_id(os.getenv("TELEGRAM_CHAT_ID", "0"))
+        self.alert_chat_id = self._coerce_chat_id(alert_chat_id)
+        if self.alert_chat_id is None:
+            self.alert_chat_id = default_chat_id
         self.webhook_secret = webhook_secret or os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+        self.bot = Bot(token=self.bot_token)
         
         # Get or create integrations
         self.dhan = dhan_integration or get_dhan_integration()
@@ -154,14 +172,12 @@ class DhanTelegramBridge:
 
     async def set_webhook(self, webhook_url: str) -> None:
         """Set Telegram webhook URL"""
-        bot = Bot(token=self.bot_token)
-        await bot.set_webhook(url=webhook_url, secret_token=self.webhook_secret or None)
+        await self.bot.set_webhook(url=webhook_url, secret_token=self.webhook_secret or None)
         self.logger.info(f"✅ Telegram webhook configured: {webhook_url}")
 
     async def clear_webhook(self) -> None:
         """Clear Telegram webhook"""
-        bot = Bot(token=self.bot_token)
-        await bot.delete_webhook(drop_pending_updates=False)
+        await self.bot.delete_webhook(drop_pending_updates=False)
         self.logger.info("✅ Telegram webhook cleared")
 
     async def handle_webhook_update(self, payload: Dict) -> bool:
@@ -423,15 +439,13 @@ class DhanTelegramBridge:
     ) -> None:
         """Send alert message with retry support"""
         target_chat_id = chat_id if chat_id is not None else self.alert_chat_id
-        if not target_chat_id:
+        if target_chat_id in (None, "", 0):
             raise ValueError("TELEGRAM_CHAT_ID required for alerts")
-
-        bot = Bot(token=self.bot_token)
 
         last_error = None
         for attempt in range(1, retries + 1):
             try:
-                await bot.send_message(
+                await self.bot.send_message(
                     chat_id=target_chat_id,
                     text=message,
                     parse_mode=parse_mode

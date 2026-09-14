@@ -40,6 +40,9 @@ class DhanTelegramBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertEqual({}, signal)
 
+    def test_coerce_chat_id_accepts_channel_usernames(self):
+        self.assertEqual("@my_channel", self.bridge._coerce_chat_id("@my_channel"))
+
     async def test_handle_webhook_update_processes_update(self):
         self.bridge.app = Mock()
         self.bridge.app.bot = object()
@@ -56,12 +59,21 @@ class DhanTelegramBridgeTests(unittest.IsolatedAsyncioTestCase):
         send_message = AsyncMock(
             side_effect=[RuntimeError("temporary"), RuntimeError("temporary"), None]
         )
+        self.bridge.bot = SimpleNamespace(send_message=send_message)
 
-        with patch(
-            "dhan_telegram_bridge.Bot",
-            return_value=SimpleNamespace(send_message=send_message),
-        ), patch("dhan_telegram_bridge.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        with patch("dhan_telegram_bridge.asyncio.sleep", new=AsyncMock()) as sleep_mock:
             await self.bridge.send_alert("hello", retries=3, retry_delay=0.01)
+
+        self.assertEqual(3, send_message.await_count)
+        self.assertEqual(2, sleep_mock.await_count)
+
+    async def test_send_alert_raises_after_retry_exhaustion(self):
+        send_message = AsyncMock(side_effect=RuntimeError("permanent"))
+        self.bridge.bot = SimpleNamespace(send_message=send_message)
+
+        with patch("dhan_telegram_bridge.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            with self.assertRaises(RuntimeError):
+                await self.bridge.send_alert("hello", retries=3, retry_delay=0.01)
 
         self.assertEqual(3, send_message.await_count)
         self.assertEqual(2, sleep_mock.await_count)
