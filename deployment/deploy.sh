@@ -13,6 +13,7 @@ cd "${ROOT_DIR}"
 
 export COMPOSE_DOCKER_CLI_BUILD=1
 export DOCKER_BUILDKIT=1
+export ENV_FILE_PATH="${ENV_FILE}"
 
 docker compose --env-file "${ENV_FILE}" down --remove-orphans
 REDIS_URL_VALUE="$(grep -E '^[[:space:]]*REDIS_URL[[:space:]]*=' "${ENV_FILE}" | tail -n 1 | cut -d= -f2- || true)"
@@ -28,7 +29,7 @@ MAX_ATTEMPTS="${DEPLOY_HEALTH_RETRIES:-20}"
 SLEEP_SECONDS="${DEPLOY_HEALTH_INTERVAL:-5}"
 ATTEMPT=1
 
-until python deployment/health_check.py; do
+until docker compose --env-file "${ENV_FILE}" exec -T trading-bot python deployment/health_check.py; do
   if [[ "${ATTEMPT}" -ge "${MAX_ATTEMPTS}" ]]; then
     echo "Deployment failed: health checks did not pass after ${MAX_ATTEMPTS} attempts."
     exit 1

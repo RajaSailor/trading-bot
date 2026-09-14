@@ -37,6 +37,7 @@ Backups are written to `backups/`.
 ```bash
 bash deployment/restore.sh backups/<backup-file>.sql
 ```
+Note: restore resets the `public` schema before importing the backup.
 
 ## Troubleshooting
 - Service logs:

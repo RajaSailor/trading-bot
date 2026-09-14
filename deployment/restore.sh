@@ -18,6 +18,7 @@ POSTGRES_USER="${POSTGRES_USER:-trading_bot}"
 POSTGRES_DB="${POSTGRES_DB:-trading_bot}"
 
 cd "${ROOT_DIR}"
+docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" < "${BACKUP_FILE}"
 
 echo "Restore complete from: ${BACKUP_FILE}"
