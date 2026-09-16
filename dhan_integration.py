@@ -16,6 +16,7 @@ Features:
 
 import logging
 import json
+import base64
 from typing import Dict, Tuple, Optional, List
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -63,7 +64,7 @@ class DhanIntegration:
         
         Args:
             access_token: DhanHQ JWT token
-            client_id: DhanHQ client ID
+            client_id: DhanHQ client ID (optional, will extract from JWT if not provided)
             practice_mode: Paper trading mode
             max_loss_per_trade: Max loss per trade (₹)
             max_position_size: Max position size (lots)
@@ -76,9 +77,18 @@ class DhanIntegration:
         access_token = access_token or os.getenv("ACCESS_TOKEN", "")
         client_id = client_id or os.getenv("DHAN_CLIENT_ID", "")
         
-        if not access_token or not client_id:
-            self.logger.error("❌ ACCESS_TOKEN and DHAN_CLIENT_ID required!")
-            raise ValueError("Missing DhanHQ credentials")
+        if not access_token:
+            self.logger.error("❌ ACCESS_TOKEN required!")
+            raise ValueError("Missing DhanHQ ACCESS_TOKEN")
+        
+        # Try to extract client_id from JWT token if not provided
+        if not client_id:
+            client_id = self._extract_client_id_from_jwt(access_token)
+            if not client_id:
+                self.logger.error("❌ DHAN_CLIENT_ID not found in JWT token or environment!")
+                raise ValueError("Missing DhanHQ DHAN_CLIENT_ID")
+        
+        self.logger.info(f"✅ Using CLIENT_ID: {client_id}")
         
         # Initialize modules
         self.logger.info("🚀 Initializing DhanHQ Integration...")
@@ -109,6 +119,51 @@ class DhanIntegration:
         self.logger.info(f"   Mode: {'📄 PAPER' if practice_mode else '💰 REAL'}")
         self.logger.info(f"   Max Loss/Trade: ₹{max_loss_per_trade}")
         self.logger.info(f"   Max Position Size: {max_position_size}")
+    
+    # =========================================================================
+    # JWT PARSING
+    # =========================================================================
+    
+    def _extract_client_id_from_jwt(self, jwt_token: str) -> Optional[str]:
+        """
+        Extract DHAN_CLIENT_ID from JWT token
+        
+        JWT structure: header.payload.signature
+        We need the payload which contains dhanClientId
+        
+        Args:
+            jwt_token: JWT access token from DhanHQ
+            
+        Returns:
+            dhanClientId from token or None
+        """
+        try:
+            # JWT format: header.payload.signature
+            parts = jwt_token.split('.')
+            if len(parts) != 3:
+                self.logger.warning("⚠️  Invalid JWT format")
+                return None
+            
+            # Decode payload (add padding if needed)
+            payload = parts[1]
+            padding = 4 - len(payload) % 4
+            if padding != 4:
+                payload += '=' * padding
+            
+            decoded = base64.urlsafe_b64decode(payload)
+            payload_json = json.loads(decoded)
+            
+            client_id = payload_json.get('dhanClientId')
+            if client_id:
+                self.logger.info(f"✅ Extracted dhanClientId from JWT: {client_id}")
+                return client_id
+            else:
+                self.logger.warning("⚠️  dhanClientId not found in JWT payload")
+                return None
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️  Failed to extract dhanClientId from JWT: {e}")
+            return None
     
     # =========================================================================
     # TRADING INTERFACE
@@ -507,7 +562,7 @@ def get_dhan_integration(
     
     Args:
         access_token: DhanHQ JWT token
-        client_id: DhanHQ client ID
+        client_id: DhanHQ client ID (optional, will extract from JWT if not provided)
         practice_mode: Paper trading mode
         max_loss: Max loss per trade
         max_position: Max position size

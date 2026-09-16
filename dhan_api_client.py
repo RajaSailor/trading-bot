@@ -412,21 +412,39 @@ class DhanAPIClient:
             (success, message, account_info)
         """
         try:
+            # Check for paper mode first
+            if self.practice_mode:
+                self.logger.info("📄 [PAPER MODE] Fetching account info (mock data)")
+                mock_account = {
+                    "dhanClientId": self.client_id,
+                    "ledgerBalance": 100000.00,
+                    "marginAvailable": 100000.00,
+                    "marginUsed": 0.00,
+                    "status": "Active",
+                    "mode": "PAPER_TRADING"
+                }
+                return True, "Paper mode account info", mock_account
+            
             self.logger.info("💰 Fetching account info from DhanHQ...")
             
+            # Use root account endpoint (not /summary which doesn't exist)
             response = requests.get(
-                f"{self.ACCOUNT_ENDPOINT}/summary",
+                self.ACCOUNT_ENDPOINT,
                 headers=self.headers,
                 timeout=10
             )
             
             if response.status_code == 200:
-                account = response.json().get("data", {})
+                # Handle both wrapped and unwrapped responses
+                response_data = response.json()
+                
+                # Try to get data from "data" key first (official format)
+                account = response_data.get("data", response_data)
                 
                 self.logger.info(f"✅ Account Info:")
-                self.logger.info(f"   Client ID: {account.get('dhanClientId')}")
-                self.logger.info(f"   Ledger Balance: {account.get('ledgerBalance')}")
-                self.logger.info(f"   Available: {account.get('marginAvailable')}")
+                self.logger.info(f"   Client ID: {account.get('dhanClientId', 'N/A')}")
+                self.logger.info(f"   Ledger Balance: {account.get('ledgerBalance', 'N/A')}")
+                self.logger.info(f"   Available: {account.get('marginAvailable', 'N/A')}")
                 
                 return True, "Account info fetched", account
                 
@@ -445,6 +463,17 @@ class DhanAPIClient:
             (success, message, funds_info)
         """
         try:
+            # Check for paper mode first
+            if self.practice_mode:
+                self.logger.info("📄 [PAPER MODE] Fetching funds (mock data)")
+                mock_funds = {
+                    "ledgerBalance": 100000.00,
+                    "marginUsed": 0.00,
+                    "marginAvailable": 100000.00,
+                    "mode": "PAPER_TRADING"
+                }
+                return True, "Paper mode funds info", mock_funds
+            
             self.logger.info("💳 Fetching funds from DhanHQ...")
             
             response = requests.get(
