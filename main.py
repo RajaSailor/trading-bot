@@ -143,7 +143,7 @@ def _load_runtime_config() -> dict:
     return {
         "practice_mode": _env_bool("PRACTICE_MODE", True),
         "max_loss_per_trade": _env_float("MAX_LOSS_PER_TRADE", 0.01),
-        "max_position_size": _env_int("MAX_POSITION_SIZE", 5),
+        "max_position_size": max(1, _env_int("MAX_POSITION_SIZE", 5)),
         "min_rr_ratio": _env_float("MIN_RR_RATIO", 1.5),
         "starting_capital": _env_float("STARTING_CAPITAL", 100000.0),
         "daily_loss_limit": _env_float("DAILY_LOSS_LIMIT", 0.05),
@@ -177,7 +177,31 @@ def initialize_app():
     global phase_components, runtime_config, initialized
 
     if initialized:
-        return True
+        logger.info("♻️ Re-initializing application components...")
+        if trading_db:
+            try:
+                trading_db.close()
+            except Exception:
+                pass
+        if state_manager:
+            try:
+                state_manager.set_bot_status("stopped")
+                state_manager.end_session()
+            except Exception:
+                pass
+        dhan_bridge = None
+        postback_handler = None
+        dhan_integration = None
+        strategy_manager = None
+        risk_manager = None
+        order_executor = None
+        signal_queue_processor = None
+        trading_db = None
+        state_manager = None
+        metrics_collector = None
+        alert_manager = None
+        phase_components.clear()
+        initialized = False
     
     logger.info("=" * 70)
     logger.info("🚀 DhanHQ Trading Bot - Initializing...")
@@ -307,8 +331,11 @@ def initialize_app():
 
         if AlertManager is not None:
             alert_manager = AlertManager(channels=channels)
-            phase_components["alert_manager"] = True
-            logger.info("   ✅ Alert Manager initialized")
+            phase_components["alert_manager"] = len(channels) > 0
+            if channels:
+                logger.info("   ✅ Alert Manager initialized")
+            else:
+                logger.warning("   ⚠️ Alert Manager initialized without delivery channels")
         else:
             phase_components["alert_manager"] = False
             logger.warning("   ⚠️ Alert manager module unavailable")
@@ -316,7 +343,8 @@ def initialize_app():
         logger.info("=" * 70)
         logger.info("✅ All components initialized successfully!")
         logger.info(f"🧪 Practice Mode: {runtime_config['practice_mode']}")
-        logger.info(f"📣 Channel IDs loaded: {runtime_config['channels']}")
+        configured_channels = [name for name, value in runtime_config["channels"].items() if value]
+        logger.info(f"📣 Channel keys configured: {configured_channels}")
         logger.info("=" * 70)
         initialized = True
         return True
@@ -504,11 +532,41 @@ def process_signal_webhook():
             return jsonify({"status": "error", "message": "Invalid signal payload"}), 400
 
         accepted, reason = True, "queued"
+        entry_price = 0.0
+        stop_loss = 0.0
+        quantity = 0
+        if signal.get("action") in {"BUY", "SELL"}:
+            raw_entry = payload.get("entry_price", payload.get("price"))
+            if raw_entry is not None:
+                try:
+                    entry_price = float(raw_entry)
+                except (TypeError, ValueError):
+                    return jsonify({"status": "error", "message": "Invalid entry price"}), 400
+            if entry_price <= 0:
+                return jsonify({"status": "error", "message": "Missing or invalid entry price"}), 400
+
+            raw_stop = payload.get("stop_loss", entry_price)
+            try:
+                stop_loss = float(raw_stop)
+            except (TypeError, ValueError):
+                return jsonify({"status": "error", "message": "Invalid stop loss"}), 400
+
+            raw_quantity = payload.get("quantity")
+            if raw_quantity is not None:
+                try:
+                    quantity = int(raw_quantity)
+                except (TypeError, ValueError):
+                    return jsonify({"status": "error", "message": "Invalid quantity"}), 400
+            if quantity < 0:
+                return jsonify({"status": "error", "message": "Invalid quantity"}), 400
+            if quantity <= 0 and risk_manager is not None:
+                quantity = risk_manager.calculate_position_size(entry_price, stop_loss)
+            if quantity <= 0:
+                quantity = 1
+            quantity = min(quantity, int(runtime_config.get("max_position_size", quantity)))
+
         if risk_manager is not None and signal.get("action") in {"BUY", "SELL"}:
-            entry_price = float(payload.get("entry_price") or payload.get("price") or 0)
-            stop_loss = float(payload.get("stop_loss") or entry_price)
-            quantity = int(payload.get("quantity") or 0)
-            proposed_trade_risk = max(0.0, abs(entry_price - stop_loss) * max(quantity, 1))
+            proposed_trade_risk = max(0.0, abs(entry_price - stop_loss) * quantity)
             accepted, reason = risk_manager.can_take_trade(proposed_trade_risk, [])
             if not accepted:
                 if alert_manager is not None:
@@ -519,66 +577,34 @@ def process_signal_webhook():
             return jsonify({"status": "error", "message": "Signal rejected by queue"}), 400
 
         if trading_db is not None:
-            trading_db.log_signal(signal)
-
-        order_response = None
-        if order_executor is not None and Order is not None and signal.get("action") in {"BUY", "SELL"}:
-            entry_price = float(payload.get("entry_price") or payload.get("price") or 0)
-            stop_loss = float(payload.get("stop_loss") or entry_price)
-            quantity = int(payload.get("quantity") or 0)
-            if quantity <= 0 and risk_manager is not None and entry_price > 0:
-                quantity = risk_manager.calculate_position_size(entry_price, stop_loss)
-            if quantity <= 0:
-                quantity = 1
-            quantity = min(quantity, int(runtime_config.get("max_position_size", quantity)))
-            order = Order(
-                symbol=str(signal["symbol"]),
-                side=str(signal["action"]),
-                quantity=quantity,
-                price=max(entry_price, 0.01),
-            )
-            executed = order_executor.execute_order(order)
-            order_response = {
-                "order_id": executed.order_id,
-                "status": executed.status.value,
-                "route": executed.route,
-                "filled_quantity": executed.filled_quantity,
-            }
-            if trading_db is not None:
-                trading_db.save_order(
-                    {
-                        "order_id": executed.order_id,
-                        "symbol": executed.symbol,
-                        "side": executed.side,
-                        "quantity": executed.quantity,
-                        "price": executed.price,
-                        "status": executed.status.value,
-                    }
-                )
-            if metrics_collector is not None:
-                metrics_collector.record_order_execution(1)
+            try:
+                trading_db.log_signal(signal)
+            except Exception as db_error:
+                logger.warning("Signal accepted but could not be persisted: %s", db_error)
 
         return jsonify({
             "status": "accepted",
             "signal": signal,
             "queue_size": signal_queue_processor.queue_size(),
+            "proposed_quantity": quantity if signal.get("action") in {"BUY", "SELL"} else 0,
             "risk": {"accepted": accepted, "reason": reason},
-            "order": order_response,
         }), 202
     except Exception as e:
         logger.error(f"Webhook processing failed: {str(e)}", exc_info=True)
         if metrics_collector is not None:
             metrics_collector.record_error("webhook", "processing_error")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return jsonify({"status": "error", "error": "Webhook processing failed"}), 500
 
 @app.route('/strategy', methods=['GET'])
 def strategy_status():
     if strategy_manager is None:
         return jsonify({"status": "unavailable", "strategies": []}), 503
+    registered = strategy_manager.get_registered_strategies() if hasattr(strategy_manager, "get_registered_strategies") else []
+    configs = strategy_manager.get_strategy_configs() if hasattr(strategy_manager, "get_strategy_configs") else {}
     return jsonify({
         "status": "ok",
-        "strategy_count": len(strategy_manager._strategies),
-        "config_count": len(strategy_manager._configs),
+        "strategy_count": len(registered),
+        "config_count": len(configs),
     }), 200
 
 @app.route('/risk', methods=['GET'])
@@ -620,8 +646,15 @@ def order_status():
 def positions_status():
     if trading_db is None:
         return jsonify({"status": "unavailable", "positions": []}), 503
-    rows = trading_db.fetch_all("position_snapshots")
-    positions = [dict(row) for row in rows]
+    if hasattr(trading_db, "fetch_latest_positions"):
+        rows = trading_db.fetch_latest_positions()
+        positions = [dict(row) for row in rows]
+    else:
+        rows = [dict(row) for row in trading_db.fetch_all("position_snapshots")]
+        latest_by_symbol = {}
+        for row in rows:
+            latest_by_symbol[row["symbol"]] = row
+        positions = list(latest_by_symbol.values())
     return jsonify({"status": "ok", "count": len(positions), "positions": positions}), 200
 
 @app.route('/metrics', methods=['GET'])

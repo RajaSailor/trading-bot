@@ -53,6 +53,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
+                "MAX_POSITION_SIZE": "2",
             }
             with patch.dict(os.environ, env, clear=False):
                 os.environ.pop("PRACTICE_MODE", None)
@@ -81,6 +82,25 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             payload = webhook_response.get_json()
                             self.assertEqual(payload["status"], "accepted")
                             self.assertEqual(payload["signal"]["action"], "BUY")
+                            self.assertEqual(payload["queue_size"], 1)
+                            self.assertEqual(payload["proposed_quantity"], 2)
+                            self.assertEqual(client.get("/orders").get_json()["count"], 0)
+
+                            before_signals = len(main_module.trading_db.fetch_all("signals"))
+                            with patch.object(main_module.signal_queue_processor, "enqueue_signal", return_value=False):
+                                rejected_webhook = client.post(
+                                    "/webhook",
+                                    json={"symbol": "NIFTY", "action": "buy", "price": 101, "stop_loss": 99},
+                                )
+                            self.assertEqual(rejected_webhook.status_code, 400)
+                            after_signals = len(main_module.trading_db.fetch_all("signals"))
+                            self.assertEqual(before_signals, after_signals)
+
+                            bad_webhook_response = client.post(
+                                "/webhook",
+                                json={"symbol": "NIFTY", "action": "buy", "price": "bad-number"},
+                            )
+                            self.assertEqual(bad_webhook_response.status_code, 400)
 
     def test_main_handles_missing_optional_phase_modules(self):
         main_module = _load_main()

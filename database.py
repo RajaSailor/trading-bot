@@ -87,5 +87,20 @@ class TradingDatabase:
         cursor = self.conn.execute(f"SELECT * FROM {table}")
         return list(cursor.fetchall())
 
+    def fetch_latest_positions(self) -> List[sqlite3.Row]:
+        cursor = self.conn.execute(
+            """
+            SELECT ps.*
+            FROM position_snapshots ps
+            INNER JOIN (
+                SELECT symbol, MAX(id) AS max_id
+                FROM position_snapshots
+                GROUP BY symbol
+            ) latest ON latest.max_id = ps.id
+            ORDER BY ps.symbol
+            """
+        )
+        return list(cursor.fetchall())
+
     def close(self) -> None:
         self.conn.close()

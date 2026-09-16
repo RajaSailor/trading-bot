@@ -61,6 +61,12 @@ class StrategyManager:
     def validate_signal(self, signal: Dict[str, Any]) -> bool:
         return bool(signal.get("symbol") and signal.get("action") in {"BUY", "SELL"})
 
+    def get_registered_strategies(self) -> List[str]:
+        return list(self._strategies.keys())
+
+    def get_strategy_configs(self) -> Dict[str, StrategyConfig]:
+        return dict(self._configs)
+
     def backtest_strategy(
         self,
         name: str,
