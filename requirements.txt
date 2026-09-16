@@ -71,3 +71,4 @@ colorama==0.4.6
 # - flasgger==0.9.7.1 (Phase 5: API docs)
 # - PyYAML==6.0.1 (Phase 5: config)
 # - supervisor==4.2.4 (Phase 4: process management)
+supervisor==4.2.5
