@@ -2,9 +2,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import dhan_telegram_bridge
-
-
 def _make_update(message_text: str):
     message = MagicMock()
     message.text = message_text
@@ -131,7 +128,7 @@ async def test_handle_close_command_without_args(bridge):
 
 
 @pytest.mark.asyncio
-async def test_send_target_hit_alert_uses_telegram_bot_api(bridge, monkeypatch):
+async def test_send_target_hit_alert_uses_telegram_bot_api(bridge):
     send_message = AsyncMock()
 
     class FakeBot:
@@ -141,7 +138,7 @@ async def test_send_target_hit_alert_uses_telegram_bot_api(bridge, monkeypatch):
         async def send_message(self, **kwargs):
             await send_message(**kwargs)
 
-    monkeypatch.setattr(dhan_telegram_bridge, "Bot", FakeBot)
+    bridge.bot = FakeBot(token=bridge.bot_token)
 
     await bridge.send_target_hit_alert(
         {
@@ -161,7 +158,7 @@ async def test_send_target_hit_alert_uses_telegram_bot_api(bridge, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_target_hit_alert_handles_telegram_api_error(bridge, monkeypatch):
+async def test_send_target_hit_alert_handles_telegram_api_error(bridge):
     send_message = AsyncMock(side_effect=RuntimeError("telegram down"))
     bridge.logger.error = MagicMock()
 
@@ -172,7 +169,7 @@ async def test_send_target_hit_alert_handles_telegram_api_error(bridge, monkeypa
         async def send_message(self, **kwargs):
             await send_message(**kwargs)
 
-    monkeypatch.setattr(dhan_telegram_bridge, "Bot", FakeBot)
+    bridge.bot = FakeBot(token=bridge.bot_token)
 
     await bridge.send_target_hit_alert(
         {
@@ -184,6 +181,6 @@ async def test_send_target_hit_alert_handles_telegram_api_error(bridge, monkeypa
         }
     )
 
-    send_message.assert_awaited_once()
+    assert send_message.await_count == 3
     bridge.logger.error.assert_called_once()
     assert "Target alert error" in bridge.logger.error.call_args.args[0]
