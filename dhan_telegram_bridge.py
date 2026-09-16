@@ -20,7 +20,9 @@ Features:
 
 import logging
 import asyncio
-from typing import Dict, Tuple, Optional, Callable
+import hmac
+import os
+from typing import Dict, Tuple, Optional, Callable, Union
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from enum import Enum
@@ -57,12 +59,28 @@ class DhanTelegramBridge:
     - Handle errors
     """
     
+    @staticmethod
+    def _coerce_chat_id(value):
+        """Accept numeric chat IDs and @channel usernames."""
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lstrip("-").isdigit():
+            return int(text)
+        return text
+
     def __init__(
         self,
-        telegram_bot_token: str,
-        dhan_integration: DhanIntegration = None,
-        postback_handler: DhanPostbackHandler = None,
-        alert_chat_id: int = None
+        telegram_bot_token: Optional[str] = None,
+        dhan_integration: Optional[DhanIntegration] = None,
+        postback_handler: Optional[DhanPostbackHandler] = None,
+        alert_chat_id: Optional[Union[int, str]] = None,
+        webhook_secret: Optional[str] = None
     ):
         """
         Initialize Telegram bridge
@@ -74,8 +92,22 @@ class DhanTelegramBridge:
             alert_chat_id: Chat ID for alerts
         """
         self.logger = logging.getLogger(__name__)
-        self.bot_token = telegram_bot_token
-        self.alert_chat_id = alert_chat_id
+
+        # Backward compatibility for old call style: DhanTelegramBridge(dhan_integration)
+        if isinstance(telegram_bot_token, DhanIntegration) and dhan_integration is None:
+            dhan_integration = telegram_bot_token
+            telegram_bot_token = None
+
+        self.bot_token = telegram_bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if not self.bot_token:
+            raise ValueError("TELEGRAM_BOT_TOKEN required")
+
+        default_chat_id = self._coerce_chat_id(os.getenv("TELEGRAM_CHAT_ID"))
+        self.alert_chat_id = self._coerce_chat_id(alert_chat_id)
+        if self.alert_chat_id is None:
+            self.alert_chat_id = default_chat_id
+        self.webhook_secret = webhook_secret or os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+        self.bot = Bot(token=self.bot_token)
         
         # Get or create integrations
         self.dhan = dhan_integration or get_dhan_integration()
@@ -138,6 +170,34 @@ class DhanTelegramBridge:
             self.logger.info("🛑 Telegram polling stopped")
         except Exception as e:
             self.logger.error(f"❌ Stop error: {e}")
+
+    async def set_webhook(self, webhook_url: str) -> None:
+        """Set Telegram webhook URL"""
+        await self.bot.set_webhook(url=webhook_url, secret_token=self.webhook_secret or None)
+        self.logger.info("✅ Telegram webhook configured")
+
+    async def clear_webhook(self) -> None:
+        """Clear Telegram webhook"""
+        await self.bot.delete_webhook(drop_pending_updates=False)
+        self.logger.info("✅ Telegram webhook cleared")
+
+    async def handle_webhook_update(self, payload: Dict, secret_token: str = None) -> bool:
+        """Process Telegram webhook update payload"""
+        try:
+            if self.webhook_secret:
+                if not secret_token or not hmac.compare_digest(secret_token, self.webhook_secret):
+                    self.logger.warning("❌ Telegram webhook secret validation failed")
+                    return False
+
+            if self.app is None:
+                await self.initialize_telegram_app()
+
+            update = Update.de_json(payload, self.app.bot)
+            await self.app.process_update(update)
+            return True
+        except Exception as e:
+            self.logger.error(f"❌ Webhook update error: {e}")
+            return False
     
     # =========================================================================
     # TRADE SIGNAL PARSING
@@ -374,6 +434,39 @@ class DhanTelegramBridge:
     # =========================================================================
     # ALERT SENDING
     # =========================================================================
+
+    async def send_alert(
+        self,
+        message: str,
+        chat_id: Optional[Union[int, str]] = None,
+        parse_mode: str = "Markdown",
+        retries: int = 3,
+        retry_delay: float = 1.0
+    ) -> None:
+        """Send alert message with retry support"""
+        if retries < 1:
+            raise ValueError("retries must be at least 1")
+
+        target_chat_id = self._coerce_chat_id(chat_id) if chat_id is not None else self.alert_chat_id
+        if target_chat_id in (None, "", 0):
+            raise ValueError("TELEGRAM_CHAT_ID required for alerts")
+
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                await self.bot.send_message(
+                    chat_id=target_chat_id,
+                    text=message,
+                    parse_mode=parse_mode
+                )
+                return
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"Alert send failed (attempt {attempt}/{retries}): {e}")
+                if attempt < retries:
+                    await asyncio.sleep(retry_delay)
+
+        raise last_error
     
     async def _send_trade_confirmation(
         self,
@@ -415,13 +508,7 @@ class DhanTelegramBridge:
                 f"P&L: ₹{position.get('finalPnL', 0):.2f}\n"
                 f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
             )
-            
-            bot = Bot(token=self.bot_token)
-            await bot.send_message(
-                chat_id=self.alert_chat_id,
-                text=message,
-                parse_mode="Markdown"
-            )
+            await self.send_alert(message)
             
             self.logger.info(f"✅ SL hit alert sent for {position['symbol']}")
             
@@ -443,13 +530,7 @@ class DhanTelegramBridge:
                 f"P&L: ₹{position.get('finalPnL', 0):.2f}\n"
                 f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
             )
-            
-            bot = Bot(token=self.bot_token)
-            await bot.send_message(
-                chat_id=self.alert_chat_id,
-                text=message,
-                parse_mode="Markdown"
-            )
+            await self.send_alert(message)
             
             self.logger.info(f"✅ Target hit alert sent for {position['symbol']}")
             
