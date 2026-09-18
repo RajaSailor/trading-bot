@@ -254,6 +254,7 @@ class SignalQueueProcessor:
         self._lock = threading.RLock()
         self._queued_ids: set[str] = set()
         self._processed_ids: set[str] = set()
+        self._inflight_ids: set[str] = set()
 
     @staticmethod
     def _signal_id_for_payload(payload: Dict) -> str:
@@ -302,7 +303,7 @@ class SignalQueueProcessor:
             return False
         signal_id = signal.get("signal_id")
         with self._lock:
-            if signal_id and (signal_id in self._queued_ids or signal_id in self._processed_ids):
+            if signal_id and (signal_id in self._queued_ids or signal_id in self._processed_ids or signal_id in self._inflight_ids):
                 return False
             cloned_signal = deepcopy(signal)
             self._queue.append(cloned_signal)
@@ -317,7 +318,7 @@ class SignalQueueProcessor:
             signal = dict(self._queue.popleft())
             signal_id = signal.get("signal_id")
             if signal_id:
-                self._queued_ids.discard(signal_id)
+                self._inflight_ids.add(signal_id)
             signal["processed_at"] = now_local_iso()
             return signal
 
@@ -337,6 +338,8 @@ class SignalQueueProcessor:
         if not signal_id:
             return
         with self._lock:
+            self._queued_ids.discard(signal_id)
+            self._inflight_ids.discard(signal_id)
             self._processed_ids.add(signal_id)
 
     def requeue_signal(self, signal: Dict) -> bool:
@@ -349,5 +352,6 @@ class SignalQueueProcessor:
             self._queue.appendleft(cloned_signal)
             if signal_id:
                 self._processed_ids.discard(signal_id)
+                self._inflight_ids.discard(signal_id)
                 self._queued_ids.add(signal_id)
             return True

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from monitoring.metrics import MetricsCollector
 from order_executor import Order
@@ -17,3 +18,7 @@ class TimezoneRuntimeTests(unittest.TestCase):
     def test_metrics_snapshot_timestamp_is_timezone_aware(self):
         snapshot = MetricsCollector().snapshot()
         self.assertIn("+05:30", snapshot["timestamp"])
+
+    def test_now_local_iso_respects_configured_timezone(self):
+        with patch.dict("os.environ", {"TIMEZONE": "UTC"}, clear=False):
+            self.assertTrue(now_local_iso().endswith("+00:00"))

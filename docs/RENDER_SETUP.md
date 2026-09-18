@@ -80,6 +80,7 @@ python main.py
 ```
 TELEGRAM_BOT_TOKEN = your_default_telegram_bot_token
 TELEGRAM_CHAT_ID = your_default_telegram_chat_id
+TELEGRAM_TEST_SECRET = your_private_telegram_test_secret
 CHANNEL_TRADE_CONTROL_ID = your_trade_control_channel_id
 CHANNEL_SERVICE_ALERTS_ID = your_service_alerts_channel_id
 ```

@@ -56,6 +56,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
                 "MAX_POSITION_SIZE": "2",
                 "WEBHOOK_SECRET": "secret-1",
+                "TELEGRAM_TEST_SECRET": "admin-secret",
             }
             with patch.dict(os.environ, env, clear=False):
                 os.environ.pop("PRACTICE_MODE", None)
@@ -103,7 +104,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                 200,
                                 client.post(
                                     "/telegram/test",
-                                    headers={"X-Webhook-Secret": "secret-1"},
+                                    headers={"X-Webhook-Secret": "admin-secret"},
                                     json={"channel": "service_alerts", "message": "probe"},
                                 ).status_code,
                             )

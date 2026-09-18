@@ -222,6 +222,7 @@ BOT_NIFTY50_5X_TOKEN=your_nifty50_5x_bot_token
 BOT_NIFTY50_PAY_LATER_TOKEN=your_nifty50_pay_later_bot_token
 BOT_CRYPTO_TOKEN=your_crypto_bot_token
 BOT_SERVICE_ALERTS_TOKEN=your_service_alerts_bot_token
+TELEGRAM_TEST_SECRET=your_private_telegram_test_secret
 
 # ============================================================================
 # TRADING PARAMETERS
