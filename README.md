@@ -189,39 +189,51 @@ Edit `.env` with your credentials:
 # ============================================================================
 # DHANHQ TRADING (From your DhanHQ account)
 # ============================================================================
-ACCESS_TOKEN=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJ1c2VyUmVnaW9uIjoiUjEiLCJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzg5MzE5MDY4LCJpYXQiOjE3ODkyMzI2NjgsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTExNzc4NDQyIn0.tc6_YQVBnZeiep_Kg5js_bQjGNoiIsHX-e3V0LM2qGSlQtUhyWbqmyT5rgBpaZG9dmweD2dTXqe4E9PBTMINew
-DHAN_CLIENT_ID=1111778442
-API_KEY=f6c12cb2
-DHAN_PIN=8144444
-DHAN_TOTP_SECRET=APATWXGV4LDO2XBLEJQDEFTQKNSXMM3K
-DHAN_WEBHOOK_SECRET=7kJ9mL2pQ5xR8tV1wY3nB6cD9hF2jG5kL8mN
+ACCESS_TOKEN=your_dhanhq_jwt_token
+ACCESS_TOKEN_EXPIRES_AT=2026-09-19T08:00:00+05:30
+DHAN_CLIENT_ID=your_dhan_client_id
+API_KEY=your_dhan_api_key
+DHAN_PIN=your_dhan_pin
+DHAN_TOTP_SECRET=your_totp_secret
+DHAN_WEBHOOK_SECRET=your_random_webhook_secret
 
 # ============================================================================
 # TELEGRAM - TRADE CONTROL CHANNEL (PRIMARY - For trading)
 # ============================================================================
 # Use ONE bot for all trading + alerts (see "Do I need separate bot?" FAQ)
-TELEGRAM_BOT_TOKEN=8654404135:AAGHqdH81h1t1_RzjfqBSsbRk8O5l-ozRdc
-TELEGRAM_CHAT_ID=-1003966854994
-CHANNEL_TRADE_CONTROL_ID=-1003704821776
+TELEGRAM_BOT_TOKEN=your_default_telegram_bot_token
+TELEGRAM_CHAT_ID=your_default_telegram_chat_id
+CHANNEL_TRADE_CONTROL_ID=your_trade_control_channel_id
 
 # ============================================================================
 # TELEGRAM - ALERT CHANNELS (Optional - Secondary notification channels)
 # ============================================================================
-CHANNEL_COMMODITY_ID=-1004403277287
-CHANNEL_CRYPTO_ID=-1004482078964
-CHANNEL_INDEX_ID=-1003966854994
-CHANNEL_NIFTY50_5X_ID=-1004466883026
-CHANNEL_NIFTY50_OPTIONS_ID=-1003804613787
-CHANNEL_NIFTY50_PAY_LATER_ID=-1003814243881
-CHANNEL_SERVICE_ALERTS_ID=-1004402571102
+CHANNEL_COMMODITY_ID=your_commodity_channel_id
+CHANNEL_CRYPTO_ID=your_crypto_channel_id
+CHANNEL_INDEX_ID=your_index_channel_id
+CHANNEL_NIFTY50_5X_ID=your_nifty50_5x_channel_id
+CHANNEL_NIFTY50_OPTIONS_ID=your_nifty50_options_channel_id
+CHANNEL_NIFTY50_PAY_LATER_ID=your_nifty50_pay_later_channel_id
+CHANNEL_SERVICE_ALERTS_ID=your_service_alerts_channel_id
+BOT_COMMODITY_TOKEN=your_commodity_bot_token
+BOT_INDEX_TOKEN=your_index_bot_token
+BOT_NIFTY50_OPTIONS_TOKEN=your_nifty50_options_bot_token
+BOT_NIFTY50_5X_TOKEN=your_nifty50_5x_bot_token
+BOT_NIFTY50_PAY_LATER_TOKEN=your_nifty50_pay_later_bot_token
+BOT_CRYPTO_TOKEN=your_crypto_bot_token
+BOT_SERVICE_ALERTS_TOKEN=your_service_alerts_bot_token
+TELEGRAM_TEST_SECRET=your_private_telegram_test_secret
 
 # ============================================================================
 # TRADING PARAMETERS
 # ============================================================================
-PRACTICE_MODE=true                # Set to false for REAL trading
-MAX_LOSS_PER_TRADE=500           # Maximum loss per trade (₹)
-MAX_POSITION_SIZE=5              # Maximum position size (lots)
-MIN_RR_RATIO=1.0                 # Minimum risk-reward ratio
+PRACTICE_MODE=true                # Keep true for safe practice trading
+AUTO_TRADING_ENABLED=false        # Must also be true before any live order API call
+ENABLE_MARKET_SCANNER=false       # Enable only after market-data config is verified
+ENABLE_DHAN_TOKEN_RENEWAL=true    # Runtime-only renewal; secrets still live in Render
+MAX_LOSS_PER_TRADE=500            # Maximum loss per trade (₹)
+MAX_POSITION_SIZE=5               # Maximum position size (lots)
+MIN_RR_RATIO=1.0                  # Minimum risk-reward ratio
 
 # ============================================================================
 # SERVER CONFIGURATION
@@ -229,7 +241,7 @@ MIN_RR_RATIO=1.0                 # Minimum risk-reward ratio
 FLASK_ENV=production
 PORT=5000
 SERVER_HOST=0.0.0.0
-WEBHOOK_SECRET=7kJ9mL2pQ5xR8tV1wY3nB6cD9hF2jG5kL8mN
+WEBHOOK_SECRET=your_random_webhook_secret
 
 # ============================================================================
 # TIME & TIMEZONE
@@ -242,6 +254,7 @@ MARKET_END_TIME=23:30
 # STATE & PERSISTENCE
 # ============================================================================
 STATE_FILE=dhan_state.json
+TRADING_DB_PATH=/var/data/trading.db
 LOG_LEVEL=INFO
 ```
 
