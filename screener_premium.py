@@ -26,6 +26,7 @@ class PremiumScreener:
         trade_control_handler=None,
         trade_control_bot=None,
         live_signal_detector: LiveSignalDetector | None = None,
+        signal_callback=None,
     ) -> None:
         self.data_manager = data_manager
         self.telegram_handler = telegram_handler
@@ -36,6 +37,7 @@ class PremiumScreener:
         self.engine = PremiumStrategyEngine(lookback=7)
         self.spot_engine = StrategyEngine(lookback=7)
         self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
+        self.signal_callback = signal_callback
         self.stock_option_scan_interval_seconds = 15 * 60
         self.spot_scan_interval_seconds = 15 * 60
         self._processed_signal_keys: set[str] = set()
@@ -178,6 +180,19 @@ class PremiumScreener:
                             alerts += 1
                             continue
 
+                    if self.signal_callback and self.signal_callback(
+                        self._build_queue_payload(
+                            instrument=instrument,
+                            signal=signal,
+                            route_category=instrument.category,
+                            strategy_name="premium_screener",
+                            option_data=option_data,
+                        )
+                    ):
+                        self._remember_signal_key(signal_key)
+                        alerts += 1
+                        continue
+
                     accepted = self.position_manager.add_position(
                         symbol=instrument.symbol,
                         side=signal["signal"],
@@ -252,6 +267,19 @@ class PremiumScreener:
                     signal["signal_time_ist"] = datetime.now(IST).strftime("%H:%M:%S")
                     signal["signal_date_ist"] = datetime.now(IST).strftime("%d:%m:%Y")
 
+                    if self.signal_callback and self.signal_callback(
+                        self._build_queue_payload(
+                            instrument=instrument,
+                            signal=signal,
+                            route_category=primary_category,
+                            strategy_name="spot_screener",
+                            option_data={"instrument_label": "SPOT", "spot_ltp": latest["close"]},
+                        )
+                    ):
+                        self._remember_signal_key(signal_key)
+                        alerts += 1
+                        continue
+
                     accepted = self.position_manager.add_position(
                         symbol=instrument.symbol,
                         side=signal["signal"],
@@ -297,6 +325,43 @@ class PremiumScreener:
             return engine_class(lookback=getattr(self.spot_engine, "lookback", 7))
         except TypeError:
             return engine_class()
+
+    @staticmethod
+    def _build_queue_payload(
+        instrument,
+        signal: dict,
+        route_category: str,
+        strategy_name: str,
+        option_data: dict,
+    ) -> dict:
+        return {
+            "symbol": instrument.symbol,
+            "action": "BUY" if signal.get("signal") == "CALL" else "SELL",
+            "entry_price": signal.get("entry"),
+            "target_price": (signal.get("targets") or [signal.get("entry")])[0],
+            "stop_loss": signal.get("stop_loss"),
+            "quantity": 1,
+            "strategy": strategy_name,
+            "timestamp": signal.get("breakout_timestamp") or datetime.now(IST).isoformat(),
+            "category": route_category,
+            "reference_timestamp": signal.get("reference_timestamp"),
+            "breakout_timestamp": signal.get("breakout_timestamp"),
+            "metadata": {
+                "source": "scanner",
+                "route_category": route_category,
+                "signal": signal.get("signal"),
+                "timeframe": signal.get("timeframe"),
+                "reference_timestamp": signal.get("reference_timestamp"),
+                "breakout_timestamp": signal.get("breakout_timestamp"),
+                "premium_strategy": bool(signal.get("premium_strategy")),
+                "spot_strategy": bool(signal.get("spot_strategy")),
+                "targets": list(signal.get("targets", [])),
+                "option_symbol": option_data.get("option_symbol"),
+                "option_type": option_data.get("option_type"),
+                "premium_ltp": option_data.get("premium_ltp"),
+                "spot_ltp": option_data.get("spot_ltp"),
+            },
+        }
 
     @staticmethod
     def _signal_key(category: str, signal: dict) -> str:

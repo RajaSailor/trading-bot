@@ -8,6 +8,11 @@ from enum import Enum
 import time
 from collections import deque
 from copy import deepcopy
+import hashlib
+import json
+import threading
+
+from timezone_utils import ensure_timezone, now_local_iso
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +181,7 @@ class SignalProcessor:
     def validate_signal(self, signal: Dict, symbol: str) -> bool:
         """Validate signal to avoid duplicates"""
         signal_key = f"{symbol}:{signal['type'].value}"
-        current_time = datetime.now().timestamp()
+        current_time = ensure_timezone().timestamp()
         
         if signal_key in self.last_signal_time:
             time_diff = current_time - self.last_signal_time[signal_key]
@@ -198,7 +203,7 @@ class SignalProcessor:
             "breakout_timestamp": signal.get("breakout_timestamp"),
             "timeframe": "5-MIN BREAKOUT",
             "source": source,
-            "signal_time_ist": datetime.now().strftime("%H:%M:%S"),
+            "signal_time_ist": ensure_timezone().strftime("%H:%M:%S"),
         }
         
         return formatted_signal, option_data
@@ -230,13 +235,13 @@ class SignalProcessor:
     def _timestamp_to_ist(timestamp) -> str:
         """Convert timestamp to IST format"""
         if timestamp is None:
-            return datetime.now().strftime("%H:%M:%S")
+            return ensure_timezone().strftime("%H:%M:%S")
         
         try:
             dt = datetime.fromtimestamp(float(timestamp))
-            return dt.strftime("%H:%M:%S")
+            return ensure_timezone(dt).strftime("%H:%M:%S")
         except Exception:
-            return datetime.now().strftime("%H:%M:%S")
+            return ensure_timezone().strftime("%H:%M:%S")
 
 
 class SignalQueueProcessor:
@@ -246,17 +251,42 @@ class SignalQueueProcessor:
 
     def __init__(self):
         self._queue = deque()
+        self._lock = threading.RLock()
+        self._queued_ids: set[str] = set()
+        self._processed_ids: set[str] = set()
+
+    @staticmethod
+    def _signal_id_for_payload(payload: Dict) -> str:
+        material = {
+            "symbol": payload.get("symbol"),
+            "action": str(payload.get("action", "")).upper(),
+            "strategy": payload.get("strategy", "default"),
+            "category": payload.get("category"),
+            "entry_price": payload.get("entry_price", payload.get("price")),
+            "target_price": payload.get("target_price"),
+            "stop_loss": payload.get("stop_loss"),
+            "quantity": payload.get("quantity"),
+            "reference_timestamp": payload.get("reference_timestamp"),
+            "breakout_timestamp": payload.get("breakout_timestamp"),
+            "metadata": payload.get("metadata", {}),
+        }
+        encoded = json.dumps(material, sort_keys=True, default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
 
     def parse_webhook_signal(self, payload: Dict) -> Optional[Dict]:
         symbol = payload.get("symbol")
         action = str(payload.get("action", "")).upper()
         if not symbol or action not in {"BUY", "SELL", "EXIT"}:
             return None
+        timestamp = payload.get("timestamp") or now_local_iso()
+        signal_id = payload.get("signal_id") or payload.get("idempotency_key") or self._signal_id_for_payload(payload)
         return {
+            "signal_id": signal_id,
             "symbol": symbol,
             "action": action,
             "strategy": payload.get("strategy", "default"),
-            "timestamp": payload.get("timestamp", datetime.utcnow().isoformat()),
+            "timestamp": timestamp,
+            "category": payload.get("category"),
             "metadata": deepcopy(payload.get("metadata", {})),
         }
 
@@ -270,15 +300,27 @@ class SignalQueueProcessor:
     def enqueue_signal(self, signal: Dict) -> bool:
         if not self.validate_signal(signal):
             return False
-        self._queue.append(deepcopy(signal))
-        return True
+        signal_id = signal.get("signal_id")
+        with self._lock:
+            if signal_id and (signal_id in self._queued_ids or signal_id in self._processed_ids):
+                return False
+            cloned_signal = deepcopy(signal)
+            self._queue.append(cloned_signal)
+            if signal_id:
+                self._queued_ids.add(signal_id)
+            return True
 
     def process_next_signal(self) -> Optional[Dict]:
-        if not self._queue:
-            return None
-        signal = dict(self._queue.popleft())
-        signal["processed_at"] = datetime.utcnow().isoformat()
-        return signal
+        with self._lock:
+            if not self._queue:
+                return None
+            signal = dict(self._queue.popleft())
+            signal_id = signal.get("signal_id")
+            if signal_id:
+                self._queued_ids.discard(signal_id)
+                self._processed_ids.add(signal_id)
+            signal["processed_at"] = now_local_iso()
+            return signal
 
     def process_queue(self, limit: Optional[int] = None) -> List[Dict]:
         processed = []
@@ -289,4 +331,5 @@ class SignalQueueProcessor:
         return processed
 
     def queue_size(self) -> int:
-        return len(self._queue)
+        with self._lock:
+            return len(self._queue)

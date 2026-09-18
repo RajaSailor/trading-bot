@@ -1,6 +1,7 @@
 import importlib
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -84,7 +85,15 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             self.assertEqual(payload["signal"]["action"], "BUY")
                             self.assertEqual(payload["queue_size"], 1)
                             self.assertEqual(payload["proposed_quantity"], 2)
-                            self.assertEqual(client.get("/orders").get_json()["count"], 0)
+                            deadline = time.time() + 2
+                            orders_payload = client.get("/orders").get_json()
+                            while orders_payload["count"] == 0 and time.time() < deadline:
+                                time.sleep(0.05)
+                                orders_payload = client.get("/orders").get_json()
+                            self.assertEqual(orders_payload["count"], 1)
+                            self.assertIn("+05:30", orders_payload["orders"][0]["created_at"])
+                            self.assertTrue(client.get("/health").get_json()["workers"]["queue_consumer"]["running"])
+                            self.assertIn("telegram_routing", client.get("/api/status").get_json()["bot"])
 
                             before_signals = len(main_module.trading_db.fetch_all("signals"))
                             with patch.object(main_module.signal_queue_processor, "enqueue_signal", return_value=False):
@@ -92,7 +101,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                     "/webhook",
                                     json={"symbol": "NIFTY", "action": "buy", "price": 101, "stop_loss": 99},
                                 )
-                            self.assertEqual(rejected_webhook.status_code, 400)
+                            self.assertEqual(rejected_webhook.status_code, 409)
                             after_signals = len(main_module.trading_db.fetch_all("signals"))
                             self.assertEqual(before_signals, after_signals)
 

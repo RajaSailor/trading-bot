@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
+import threading
 from typing import Dict, Optional, Tuple
 from uuid import uuid4
+
+from timezone_utils import now_local_iso
 
 
 class OrderStatus(Enum):
@@ -26,14 +28,15 @@ class Order:
     status: OrderStatus = OrderStatus.PENDING
     filled_quantity: int = 0
     route: Optional[str] = None
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=now_local_iso)
+    updated_at: str = field(default_factory=now_local_iso)
 
 
 class OrderExecutor:
     """Validates, routes and tracks order lifecycle."""
 
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self.orders: Dict[str, Order] = {}
 
     def validate_order(self, order: Order) -> Tuple[bool, str]:
@@ -56,43 +59,46 @@ class OrderExecutor:
 
     def execute_order(self, order: Order, available_liquidity: Optional[int] = None) -> Order:
         valid, reason = self.validate_order(order)
-        if not valid:
-            order.status = OrderStatus.REJECTED
-            order.updated_at = datetime.utcnow().isoformat()
+        with self._lock:
+            if not valid:
+                order.status = OrderStatus.REJECTED
+                order.updated_at = now_local_iso()
+                self.orders[order.order_id] = order
+                return order
+
+            order.route = self.route_order(order)
+            order.status = OrderStatus.ROUTED
+
+            fill_qty = order.quantity if available_liquidity is None else min(order.quantity, max(0, available_liquidity))
+            order.filled_quantity = fill_qty
+            if fill_qty == order.quantity:
+                order.status = OrderStatus.FILLED
+            elif fill_qty > 0:
+                order.status = OrderStatus.PARTIALLY_FILLED
+            else:
+                order.status = OrderStatus.ROUTED
+
+            order.updated_at = now_local_iso()
             self.orders[order.order_id] = order
             return order
 
-        order.route = self.route_order(order)
-        order.status = OrderStatus.ROUTED
-
-        fill_qty = order.quantity if available_liquidity is None else min(order.quantity, max(0, available_liquidity))
-        order.filled_quantity = fill_qty
-        if fill_qty == order.quantity:
-            order.status = OrderStatus.FILLED
-        elif fill_qty > 0:
-            order.status = OrderStatus.PARTIALLY_FILLED
-        else:
-            order.status = OrderStatus.ROUTED
-
-        order.updated_at = datetime.utcnow().isoformat()
-        self.orders[order.order_id] = order
-        return order
-
     def handle_partial_fill(self, order_id: str, additional_fill: int) -> Order:
-        order = self.orders[order_id]
-        if order.status not in {OrderStatus.ROUTED, OrderStatus.PARTIALLY_FILLED}:
+        with self._lock:
+            order = self.orders[order_id]
+            if order.status not in {OrderStatus.ROUTED, OrderStatus.PARTIALLY_FILLED}:
+                return order
+            order.filled_quantity = min(order.quantity, order.filled_quantity + max(0, additional_fill))
+            if order.filled_quantity == order.quantity:
+                order.status = OrderStatus.FILLED
+            elif order.filled_quantity > 0:
+                order.status = OrderStatus.PARTIALLY_FILLED
+            order.updated_at = now_local_iso()
             return order
-        order.filled_quantity = min(order.quantity, order.filled_quantity + max(0, additional_fill))
-        if order.filled_quantity == order.quantity:
-            order.status = OrderStatus.FILLED
-        elif order.filled_quantity > 0:
-            order.status = OrderStatus.PARTIALLY_FILLED
-        order.updated_at = datetime.utcnow().isoformat()
-        return order
 
     def cancel_order(self, order_id: str) -> Order:
-        order = self.orders[order_id]
-        if order.status not in {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED}:
-            order.status = OrderStatus.CANCELLED
-            order.updated_at = datetime.utcnow().isoformat()
-        return order
+        with self._lock:
+            order = self.orders[order_id]
+            if order.status not in {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED}:
+                order.status = OrderStatus.CANCELLED
+                order.updated_at = now_local_iso()
+            return order

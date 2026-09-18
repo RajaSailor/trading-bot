@@ -78,25 +78,30 @@ python main.py
 
 #### **REQUIRED - Telegram Configuration**
 ```
-TELEGRAM_BOT_TOKEN = your_telegram_bot_token
-TELEGRAM_CHAT_ID = your_telegram_chat_id
-TELEGRAM_WEBHOOK_SECRET = your_webhook_secret
+TELEGRAM_BOT_TOKEN = your_default_telegram_bot_token
+TELEGRAM_CHAT_ID = your_default_telegram_chat_id
+CHANNEL_TRADE_CONTROL_ID = your_trade_control_channel_id
+CHANNEL_SERVICE_ALERTS_ID = your_service_alerts_channel_id
 ```
 
 #### **REQUIRED - DhanHQ Configuration**
 ```
-DHAN_API_KEY = your_dhan_api_key
+ACCESS_TOKEN = your_dhanhq_jwt_token
+ACCESS_TOKEN_EXPIRES_AT = 2026-09-19T08:00:00+05:30
+API_KEY = your_dhan_api_key
 DHAN_CLIENT_ID = your_dhan_client_id
-DHAN_REDIRECT_URI = https://trading-bot-XXXX.onrender.com/oauth/callback
+WEBHOOK_SECRET = your_random_webhook_secret
 ```
 
 #### **OPTIONAL - Operating Mode**
 ```
-PRACTICE_MODE = false
-AUTO_TRADING_ENABLED = true
+PRACTICE_MODE = true
+AUTO_TRADING_ENABLED = false
+ENABLE_MARKET_SCANNER = false
+ENABLE_DHAN_TOKEN_RENEWAL = true
 LOG_LEVEL = INFO
-ENVIRONMENT = production
 TIMEZONE = Asia/Kolkata
+TRADING_DB_PATH = /var/data/trading.db
 ```
 
 #### **OPTIONAL - Risk Management**

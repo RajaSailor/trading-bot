@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
 from copy import deepcopy
+
+from timezone_utils import now_local_iso
 
 
 class StateManager:
@@ -13,12 +16,13 @@ class StateManager:
 
     def __init__(self, state_file: str = "bot_state.json") -> None:
         self.state_file = state_file
+        self._lock = threading.RLock()
         self.state: Dict[str, Any] = {
             "bot_status": "stopped",
             "configuration": {},
             "session": {"session_id": None, "started_at": None},
             "error_state": {"active": False, "message": None, "updated_at": None},
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": now_local_iso(),
         }
         self._load()
 
@@ -26,8 +30,9 @@ class StateManager:
         if not os.path.exists(self.state_file):
             return
         try:
-            with open(self.state_file, "r", encoding="utf-8") as handle:
-                loaded = json.load(handle)
+            with self._lock:
+                with open(self.state_file, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
         except (json.JSONDecodeError, OSError):
             return
         if isinstance(loaded, dict):
@@ -38,12 +43,13 @@ class StateManager:
                     self.state[key] = value
 
     def save(self) -> None:
-        self.state["updated_at"] = datetime.utcnow().isoformat()
-        state_dir = os.path.dirname(self.state_file) or "."
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=state_dir, delete=False) as handle:
-            json.dump(self.state, handle, indent=2)
-            temp_path = handle.name
-        os.replace(temp_path, self.state_file)
+        with self._lock:
+            self.state["updated_at"] = now_local_iso()
+            state_dir = os.path.dirname(self.state_file) or "."
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=state_dir, delete=False) as handle:
+                json.dump(self.state, handle, indent=2)
+                temp_path = handle.name
+            os.replace(temp_path, self.state_file)
 
     def set_bot_status(self, status: str) -> None:
         self.state["bot_status"] = status
@@ -57,7 +63,7 @@ class StateManager:
         return self.state.get("configuration", {}).get(key, default)
 
     def start_session(self, session_id: str) -> None:
-        self.state["session"] = {"session_id": session_id, "started_at": datetime.utcnow().isoformat()}
+        self.state["session"] = {"session_id": session_id, "started_at": now_local_iso()}
         self.save()
 
     def end_session(self) -> None:
@@ -68,12 +74,12 @@ class StateManager:
         self.state["error_state"] = {
             "active": True,
             "message": message,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": now_local_iso(),
         }
         self.save()
 
     def clear_error(self) -> None:
-        self.state["error_state"] = {"active": False, "message": None, "updated_at": datetime.utcnow().isoformat()}
+        self.state["error_state"] = {"active": False, "message": None, "updated_at": now_local_iso()}
         self.save()
 
     def recover(self) -> Dict[str, Any]:

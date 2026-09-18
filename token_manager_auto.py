@@ -4,102 +4,154 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
+from typing import Callable, Optional
 
 import requests
 
+from timezone_utils import ensure_timezone, get_timezone, now_local_iso
+
 
 logger = logging.getLogger(__name__)
-IST = ZoneInfo("Asia/Kolkata")
 
 
 class TokenManagerAuto:
-    """Auto-refresh Dhan token daily at 08:00 IST and push to Render env."""
+    """Refreshes Dhan access tokens in runtime memory using documented Dhan endpoints."""
 
-    def __init__(self, token_generator=None, now_fn=None) -> None:
-        self.token_generator = token_generator or self._generate_token
-        self.now_fn = now_fn or (lambda: datetime.now(IST))
-        self.last_refresh_date: str | None = None
+    RENEW_ENDPOINT = "https://api.dhan.co/v2/RenewToken"
+
+    def __init__(
+        self,
+        session: Optional[requests.sessions.Session] = None,
+        now_fn: Optional[Callable[[], datetime]] = None,
+        on_token_update: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self.session = session or requests.Session()
+        self.now_fn = now_fn or (lambda: ensure_timezone())
+        self.on_token_update = on_token_update
+        self.last_refresh_at: str | None = None
+        self.last_error: str | None = None
+        self.last_attempt_at: str | None = None
+        self.last_expiry_at: str | None = None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lock = threading.RLock()
 
     def refresh_if_due(self, now: datetime | None = None) -> bool:
-        now = now or self.now_fn()
-        refresh_date = now.strftime("%Y-%m-%d")
-        if now.hour < 8 or self.last_refresh_date == refresh_date:
+        current_time = ensure_timezone(now or self.now_fn())
+        expiry_time = self._parse_expiry(os.getenv("ACCESS_TOKEN_EXPIRES_AT"))
+        if expiry_time is None:
+            if current_time.hour < 8:
+                return False
+            if self.last_refresh_at and self.last_refresh_at[:10] == current_time.date().isoformat():
+                return False
+        elif expiry_time - current_time > timedelta(minutes=15):
             return False
-
-        token = self._refresh_and_persist_token()
-        if not token:
-            return False
-
-        self.last_refresh_date = refresh_date
-        logger.info("✅ ACCESS_TOKEN refreshed for %s", refresh_date)
-        return True
+        return bool(self.refresh_now())
 
     def refresh_now(self) -> str:
-        return self._refresh_and_persist_token()
+        with self._lock:
+            self.last_attempt_at = now_local_iso()
+            token = os.getenv("ACCESS_TOKEN", "")
+            client_id = os.getenv("DHAN_CLIENT_ID", "")
+            if not token or not client_id:
+                self.last_error = "missing_credentials"
+                logger.info("Dhan token renewal skipped: missing ACCESS_TOKEN or DHAN_CLIENT_ID")
+                return ""
 
-    def _refresh_and_persist_token(self) -> str:
-        token = self.token_generator()
-        if not token:
+            response = self.session.get(
+                self.RENEW_ENDPOINT,
+                headers={
+                    "access-token": token,
+                    "dhanClientId": client_id,
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+
+            if response.status_code == 200:
+                payload = response.json()
+                refreshed_token = payload.get("accessToken", "")
+                if not refreshed_token:
+                    self.last_error = "missing_access_token"
+                    logger.warning("Dhan token renewal failed: response missing accessToken")
+                    return ""
+                self._store_runtime_token(refreshed_token, payload.get("expiryTime"))
+                self.last_refresh_at = now_local_iso()
+                self.last_error = None
+                logger.info("Dhan token renewed in runtime memory")
+                return refreshed_token
+
+            self.last_error = self._error_code_for_status(response.status_code)
+            logger.warning("Dhan token renewal failed: %s", self.last_error)
             return ""
 
-        os.environ["ACCESS_TOKEN"] = token
-        self._update_render_env("ACCESS_TOKEN", token)
-        if os.getenv("RENDER_TRIGGER_REDEPLOY", "false").lower() == "true":
-            self._trigger_render_redeploy()
-        return token
+    def status(self) -> dict:
+        return {
+            "enabled": bool(os.getenv("ACCESS_TOKEN") and os.getenv("DHAN_CLIENT_ID")),
+            "running": bool(self._thread and self._thread.is_alive()),
+            "storage": "runtime_only",
+            "last_attempt_at": self.last_attempt_at,
+            "last_refresh_at": self.last_refresh_at,
+            "last_expiry_at": self.last_expiry_at,
+            "last_error": self.last_error,
+        }
 
-    def run_forever(self, poll_seconds: int = 30) -> None:
+    def run_forever(self, poll_seconds: int = 60) -> None:
         while not self._stop_event.is_set():
             try:
                 self.refresh_if_due()
             except Exception as exc:
-                logger.error("Token refresh cycle failed: %s", exc, exc_info=True)
-            time.sleep(max(5, poll_seconds))
+                self.last_error = exc.__class__.__name__
+                logger.error("Token refresh cycle failed: %s", exc.__class__.__name__)
+            self._stop_event.wait(max(10, poll_seconds))
 
-    def start(self) -> None:
+    def start(self, poll_seconds: int = 60) -> bool:
         if self._thread and self._thread.is_alive():
-            return
+            return False
+        if not os.getenv("ACCESS_TOKEN") or not os.getenv("DHAN_CLIENT_ID"):
+            logger.info("Dhan token renewal disabled: ACCESS_TOKEN or DHAN_CLIENT_ID missing")
+            return False
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self.run_forever, daemon=True, name="token-refresh")
+        self._thread = threading.Thread(
+            target=self.run_forever,
+            kwargs={"poll_seconds": poll_seconds},
+            daemon=True,
+            name="dhan-token-renewal",
+        )
         self._thread.start()
+        return True
 
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=2)
 
+    def _store_runtime_token(self, token: str, expiry_time: str | None) -> None:
+        os.environ["ACCESS_TOKEN"] = token
+        if expiry_time:
+            os.environ["ACCESS_TOKEN_EXPIRES_AT"] = expiry_time
+            self.last_expiry_at = expiry_time
+        if self.on_token_update:
+            self.on_token_update(token)
+
     @staticmethod
-    def _generate_token() -> str:
-        # Production hook: replace with real Dhan auth flow using API_KEY/DHAN_PIN/DHAN_TOTP_SECRET.
-        return os.getenv("ACCESS_TOKEN", "")
+    def _parse_expiry(raw_value: str | None) -> datetime | None:
+        if not raw_value:
+            return None
+        for parser in (datetime.fromisoformat,):
+            try:
+                return ensure_timezone(parser(raw_value.replace("Z", "+00:00")))
+            except Exception:
+                continue
+        return None
 
-    def _update_render_env(self, key: str, value: str) -> None:
-        api_key = os.getenv("RENDER_API_KEY")
-        service_id = os.getenv("RENDER_SERVICE_ID")
-        if not api_key or not service_id:
-            logger.info("Render env update skipped (RENDER_API_KEY/RENDER_SERVICE_ID missing)")
-            return
-
-        url = f"https://api.render.com/v1/services/{service_id}/env-vars"
-        headers = {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}
-        payload = [{"key": key, "value": value}]
-        response = requests.put(url, headers=headers, json=payload, timeout=15)
-        if response.status_code not in {200, 201}:
-            logger.warning("Render env update failed: %s %s", response.status_code, response.text)
-
-    def _trigger_render_redeploy(self) -> None:
-        api_key = os.getenv("RENDER_API_KEY")
-        service_id = os.getenv("RENDER_SERVICE_ID")
-        if not api_key or not service_id:
-            logger.info("Render deploy hook skipped (RENDER_API_KEY/RENDER_SERVICE_ID missing)")
-            return
-
-        url = f"https://api.render.com/v1/services/{service_id}/deploys"
-        headers = {"Authorization": "Bearer " + api_key}
-        response = requests.post(url, headers=headers, timeout=15)
-        if response.status_code not in {200, 201}:
-            logger.warning("Render redeploy trigger failed: %s %s", response.status_code, response.text)
+    @staticmethod
+    def _error_code_for_status(status_code: int) -> str:
+        if status_code == 401:
+            return "expired_or_invalid_token"
+        if status_code == 429:
+            return "rate_limited"
+        if status_code >= 500:
+            return "upstream_error"
+        return f"http_{status_code}"

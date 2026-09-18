@@ -134,6 +134,7 @@ class PremiumScreenerTests(unittest.TestCase):
         telegram = _FakeTelegramHandler()
         screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
         screener.spot_engine = _FakeSpotEngine()
+        screener.live_signal_detector = SimpleNamespace(should_emit=lambda *_args, **_kwargs: True)
 
         alerts = screener._scan_spot_instruments(
             screener.stock_spot_instruments,

@@ -4,13 +4,15 @@ import math
 import statistics
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 try:
     from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 except Exception:  # pragma: no cover - optional at runtime
     CollectorRegistry = Counter = Gauge = Histogram = None
+
+from timezone_utils import ensure_timezone
 
 _PROM_REGISTRY = CollectorRegistry(auto_describe=True) if CollectorRegistry else None
 _PROM_METRICS_LOCK = threading.Lock()
@@ -23,7 +25,7 @@ class TradeMetric:
     duration_ms: float
     slippage: float
     strategy: str
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=ensure_timezone)
 
 
 class MetricsCollector:
@@ -105,7 +107,7 @@ class MetricsCollector:
                 }
 
             return {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": ensure_timezone().isoformat(),
                 "trade_performance": {
                     "total_trades": total_trades,
                     "winning_trades": winning,

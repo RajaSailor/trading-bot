@@ -4,12 +4,13 @@ import logging
 import smtplib
 import ssl
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from email.mime.text import MIMEText
 from enum import Enum
 from typing import Protocol
 
 import requests
+from timezone_utils import ensure_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class Alert:
     severity: AlertSeverity
     source: str
     metadata: dict[str, float | int | str] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=ensure_timezone)
 
 
 class AlertChannel(Protocol):
@@ -103,7 +104,7 @@ class AlertManager:
             try:
                 delivered = channel.send(alert) or delivered
             except Exception as exc:  # pragma: no cover - defensive branch
-                logger.error("Failed to deliver alert via %s: %s", channel.__class__.__name__, exc)
+                logger.error("Failed to deliver alert via %s: %s", channel.__class__.__name__, exc.__class__.__name__)
         return delivered
 
     def critical_error(self, source: str, message: str) -> bool:
@@ -160,6 +161,6 @@ def _format_alert(alert: Alert) -> str:
     return (
         f"[{alert.severity.value.upper()}] {alert.title}\n"
         f"Source: {alert.source}\n"
-        f"Time: {alert.timestamp.isoformat()}\n"
+        f"Time: {ensure_timezone(alert.timestamp).isoformat()}\n"
         f"{alert.message}"
     )

@@ -19,31 +19,37 @@ class TelegramHandler:
         "index_options": {
             "channel_id": -1003966854994,
             "channel_env": "CHANNEL_INDEX_ID",
+            "channel_aliases": ["CHANNEL_INDEX_OPTIONS_ID"],
             "token_env": "BOT_INDEX_TOKEN",
+            "token_aliases": ["BOT_INDEX_OPTIONS_TOKEN"],
             "description": "NIFTY/BANKNIFTY Options (9:15-15:40)",
         },
         "nifty50_stock_options": {
             "channel_id": -1003804613787,
             "channel_env": "CHANNEL_NIFTY50_OPTIONS_ID",
             "token_env": "BOT_NIFTY50_OPTIONS_TOKEN",
+            "token_aliases": ["BOT_NIFTY_STOCKS_TOKEN"],
             "description": "NIFTY50 Stock Options",
         },
         "commodity_options": {
             "channel_id": -1004403277287,
             "channel_env": "CHANNEL_COMMODITY_ID",
             "token_env": "BOT_COMMODITY_TOKEN",
+            "token_aliases": ["BOT_COMMODITY_OPTIONS_TOKEN"],
             "description": "GOLD/CRUDE/SILVER/NATURALGAS (MCX)",
         },
         "nifty50_intraday_5x": {
             "channel_id": -1004466883026,
             "channel_env": "CHANNEL_NIFTY50_5X_ID",
             "token_env": "BOT_NIFTY50_5X_TOKEN",
+            "token_aliases": ["BOT_5X_LEVERAGE_TOKEN"],
             "description": "NIFTY50 Intraday 5X Leverage",
         },
         "nifty50_pay_later": {
             "channel_id": -1003814243881,
             "channel_env": "CHANNEL_NIFTY50_PAY_LATER_ID",
             "token_env": "BOT_NIFTY50_PAY_LATER_TOKEN",
+            "token_aliases": ["BOT_PAY_LATER_TOKEN"],
             "description": "NIFTY50 Pay Later/Margin",
         },
         "crypto": {
@@ -66,11 +72,20 @@ class TelegramHandler:
         },
     }
     CHANNELS = {category: config["channel_id"] for category, config in BOT_CONFIG.items()}
+    CHANNEL_ALIASES = {
+        "index": "index_options",
+        "commodity": "commodity_options",
+        "nifty50_options": "nifty50_stock_options",
+        "nifty50_5x": "nifty50_intraday_5x",
+        "nifty50_paylater": "nifty50_pay_later",
+        "trade": "trade_control",
+        "service": "service_alerts",
+    }
 
     def __init__(self, token: Optional[str] = None) -> None:
-        self.default_token = token or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN", "")
+        self.default_token = token or self._env_first("TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN")
         self.token = self.default_token
-        self.default_chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID", "")
+        self.default_chat_id = self._env_first("TELEGRAM_CHAT_ID", "CHAT_ID", "ALERT_CHAT_ID")
         self._bot_instances: Dict[str, object] = {}
 
         if not self.default_token:
@@ -82,8 +97,8 @@ class TelegramHandler:
         logger.info("📱 TELEGRAM BOT CONFIGURATION")
         logger.info("=" * 80)
         for category, config in self.BOT_CONFIG.items():
-            category_token = os.getenv(config["token_env"]) or self.default_token
-            configured_channel = os.getenv(config["channel_env"])
+            category_token = self._env_first(config["token_env"], *config.get("token_aliases", [])) or self.default_token
+            configured_channel = self._env_first(config["channel_env"], *config.get("channel_aliases", []))
             channel_id = int(configured_channel or config["channel_id"])
             status = "✅" if category_token else "⚠️ (missing token)"
             logger.info(
@@ -98,18 +113,40 @@ class TelegramHandler:
         self._alert_history: List[dict] = []
         self._alert_keys: set[str] = set()
 
+    @staticmethod
+    def _env_first(*names: str) -> str:
+        for name in names:
+            value = os.getenv(name, "")
+            if value:
+                return value
+        return ""
+
     def _get_bot_for_category(self, category: str) -> tuple[str, int]:
-        if category not in self.BOT_CONFIG:
+        normalized_category = self.CHANNEL_ALIASES.get(category, category)
+        if normalized_category not in self.BOT_CONFIG:
             logger.warning("⚠️ Unknown Telegram category '%s', using default channel", category)
-            fallback_chat = int(self.default_chat_id or os.getenv("CHAT_ID", "-1004321977761"))
+            fallback_chat = int(self.default_chat_id or "-1004321977761")
             return self.default_token, fallback_chat
 
-        config = self.BOT_CONFIG[category]
-        category_token = os.getenv(config["token_env"]) or self.default_token
-        configured_channel = os.getenv(config["channel_env"])
+        config = self.BOT_CONFIG[normalized_category]
+        category_token = self._env_first(config["token_env"], *config.get("token_aliases", [])) or self.default_token
+        configured_channel = self._env_first(config["channel_env"], *config.get("channel_aliases", []))
         channel_id = int(configured_channel or config["channel_id"])
-        logger.debug("🔍 [%s] Routed to channel %s", category.upper(), channel_id)
+        logger.debug("🔍 [%s] Routed to channel %s", normalized_category.upper(), channel_id)
         return category_token, channel_id
+
+    def is_channel_ready(self, channel_type: str) -> bool:
+        normalized_channel = self.CHANNEL_ALIASES.get(channel_type, channel_type)
+        if normalized_channel not in self.BOT_CONFIG:
+            return False
+        token, chat_id = self._get_bot_for_category(normalized_channel)
+        return bool(token and chat_id)
+
+    def configured_channels_summary(self) -> Dict[str, bool]:
+        return {
+            channel: self.is_channel_ready(channel)
+            for channel in self.BOT_CONFIG
+        }
 
     def send_signal_alert(self, category: str, signal_data: dict, option_data: dict) -> bool:
         try:
@@ -165,14 +202,7 @@ class TelegramHandler:
     def send_to_channel(self, channel_type: str, alert_msg: str) -> bool:
         """Send raw alert to a configured Telegram channel."""
         try:
-            channel_aliases = {
-                "nifty50_options": "nifty50_stock_options",
-                "nifty50_5x": "nifty50_intraday_5x",
-                "nifty50_paylater": "nifty50_pay_later",
-                "trade": "trade_control",
-                "service": "service_alerts",
-            }
-            normalized_channel = channel_aliases.get(channel_type, channel_type)
+            normalized_channel = self.CHANNEL_ALIASES.get(channel_type, channel_type)
             if normalized_channel not in self.BOT_CONFIG:
                 logger.warning("❌ Unknown channel type: %s", channel_type)
                 return False
@@ -189,10 +219,10 @@ class TelegramHandler:
                 logger.info("✅ Alert sent to %s", channel_type)
                 return True
 
-            logger.error("❌ Failed to send to %s: %s", channel_type, response.status_code)
+            logger.error("❌ Failed to send to %s: HTTP %s", channel_type, response.status_code)
             return False
         except Exception as e:
-            logger.error("Error sending to channel: %s", e, exc_info=True)
+            logger.error("Error sending to channel %s: %s", channel_type, e.__class__.__name__)
             return False
 
     def send_confirmation_request(self, user_chat_id: int, signal_details: dict) -> bool:
@@ -386,7 +416,7 @@ class TelegramHandler:
             results[category] = {
                 "category": category,
                 "channel_id": channel_id,
-                "token": f"{token[:15]}..." if token else "NONE",
+                "token_configured": bool(token),
                 "sent": sent,
                 "status": status,
             }
