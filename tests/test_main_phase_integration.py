@@ -100,14 +100,24 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                 403,
                                 client.post("/telegram/test", json={"channel": "service_alerts"}).status_code,
                             )
-                            self.assertEqual(
-                                200,
-                                client.post(
-                                    "/telegram/test",
-                                    headers={"X-Webhook-Secret": "admin-secret"},
-                                    json={"channel": "service_alerts", "message": "probe"},
-                                ).status_code,
-                            )
+                            with patch.object(main_module.signal_notifier, "_send", return_value=True):
+                                self.assertEqual(
+                                    200,
+                                    client.post(
+                                        "/telegram/test",
+                                        headers={"X-Webhook-Secret": "admin-secret"},
+                                        json={"channel": "service_alerts", "message": "probe"},
+                                    ).status_code,
+                                )
+                            with patch.object(main_module.signal_notifier, "_send", return_value=False):
+                                self.assertEqual(
+                                    502,
+                                    client.post(
+                                        "/telegram/test",
+                                        headers={"X-Webhook-Secret": "admin-secret"},
+                                        json={"channel": "service_alerts", "message": "probe"},
+                                    ).status_code,
+                                )
 
                             before_signals = len(main_module.trading_db.fetch_all("signals"))
                             with patch.object(main_module.signal_queue_processor, "enqueue_signal", return_value=False):

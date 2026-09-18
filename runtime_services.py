@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from time import monotonic
+import time
 from typing import Callable, Optional
 
 from data_manager import DataManager
@@ -113,14 +114,15 @@ class SignalNotifier:
             return "crypto"
         return "nifty50_options"
 
-    def _send(self, channel: str, message: str) -> None:
+    def _send(self, channel: str, message: str) -> bool:
         self.delivery_attempts += 1
         if self.telegram_handler.send_to_channel(channel, message):
-            return
+            return True
         self.delivery_failures += 1
         if self.metrics_collector is not None:
             self.metrics_collector.record_error("telegram", "delivery_failed")
         logger.warning("Telegram delivery failed for channel %s", channel)
+        return False
 
 
 class QueueConsumerWorker:
@@ -195,19 +197,23 @@ class QueueConsumerWorker:
                 self.metrics_collector.record_order_execution((monotonic() - start) * 1000.0)
             return True
         except Exception as exc:
-            self.queue_processor.requeue_signal(signal)
+            retries = int(signal.get("retry_count", 0)) + 1
+            signal["retry_count"] = retries
+            if retries <= 3:
+                signal["retry_after_epoch"] = time.time() + min(30, 2 ** retries)
+                order_id = f"sig-{signal.get('signal_id', 'unknown')}"
+                if self.trading_db is not None:
+                    self.trading_db.delete_order(order_id)
+                self.queue_processor.requeue_signal(signal)
             if self.metrics_collector is not None:
                 self.metrics_collector.record_error("queue_consumer", "execution_failed")
-            self.notifier.notify_service_alert("Queue consumer error", exc.__class__.__name__)
+            message = exc.__class__.__name__ if retries <= 3 else f"{exc.__class__.__name__} (retries exhausted)"
+            self.notifier.notify_service_alert("Queue consumer error", message)
             logger.error("Queue consumer failed for %s: %s", signal.get("signal_id"), exc.__class__.__name__)
             return True
 
     def _execute_signal(self, signal: dict) -> None:
         order_id = f"sig-{signal.get('signal_id', 'unknown')}"
-        if self.trading_db is not None and self.trading_db.order_exists(order_id):
-            logger.info("Skipping duplicate execution for signal %s", signal.get("signal_id"))
-            return
-
         practice_mode = bool(self.runtime_config.get("practice_mode", True))
         live_allowed = (not practice_mode) and bool(self.runtime_config.get("auto_trading_enabled", False))
         quantity = int(signal.get("quantity") or 1)
@@ -215,6 +221,22 @@ class QueueConsumerWorker:
         side = signal["action"]
         if side == "EXIT":
             quantity = 0
+
+        if self.trading_db is not None:
+            claimed = self.trading_db.claim_order(
+                {
+                    "order_id": order_id,
+                    "symbol": signal["symbol"],
+                    "side": "SELL" if side == "EXIT" else side,
+                    "quantity": max(1, quantity),
+                    "price": max(price, 0.01),
+                    "status": "PROCESSING",
+                    "created_at": now_local_iso(),
+                }
+            )
+            if not claimed:
+                logger.info("Skipping duplicate execution for signal %s", signal.get("signal_id"))
+                return
 
         if live_allowed and self.dhan_integration is not None and side in {"BUY", "SELL"}:
             success, message, live_order_id = self.dhan_integration.place_trade(

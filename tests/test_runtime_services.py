@@ -166,6 +166,32 @@ class QueueConsumerWorkerTests(unittest.TestCase):
             self.assertTrue(worker.process_one())
             self.assertEqual([("telegram", "delivery_failed"), ("telegram", "delivery_failed")], metrics.errors)
 
+    def test_failures_are_requeued_with_retry_metadata(self):
+        queue = SignalQueueProcessor()
+        signal = queue.parse_webhook_signal(
+            {"symbol": "NIFTY", "action": "BUY", "price": 100, "stop_loss": 95, "target_price": 110}
+        )
+        self.assertTrue(queue.enqueue_signal(signal))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = TradingDatabase(f"{tmpdir}/trading.db")
+            notifier = SignalNotifier(_FakeTelegramHandler(), _FakeMetrics())
+            worker = QueueConsumerWorker(
+                queue_processor=queue,
+                order_executor=OrderExecutor(),
+                trading_db=db,
+                runtime_config={"practice_mode": True, "auto_trading_enabled": False},
+                notifier=notifier,
+                metrics_collector=notifier.metrics_collector,
+                dhan_integration=_FakeDhanIntegration(),
+            )
+            worker._execute_signal = lambda _signal: (_ for _ in ()).throw(RuntimeError("boom"))
+
+            self.assertTrue(worker.process_one())
+            retried = queue._queue[0]
+            self.assertEqual(1, retried["retry_count"])
+            self.assertIn("retry_after_epoch", retried)
+
 
 class MarketScannerWorkerTests(unittest.TestCase):
     def test_scanner_worker_runs_once_and_uses_shared_acceptor(self):

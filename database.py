@@ -180,5 +180,30 @@ class TradingDatabase:
                 )
                 return cursor.fetchone() is not None
 
+    def claim_order(self, order: Dict[str, Any]) -> bool:
+        with self._lock:
+            with self._connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO orders (order_id, symbol, side, quantity, price, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        order["order_id"],
+                        order["symbol"],
+                        order["side"],
+                        order["quantity"],
+                        order["price"],
+                        order.get("status", "PROCESSING"),
+                        order.get("created_at", now_local_iso()),
+                    ),
+                )
+                return cursor.rowcount == 1
+
+    def delete_order(self, order_id: str) -> None:
+        with self._lock:
+            with self._connection() as conn:
+                conn.execute("DELETE FROM orders WHERE order_id = ?", (order_id,))
+
     def close(self) -> None:
         self.conn.close()

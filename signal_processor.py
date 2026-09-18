@@ -313,14 +313,21 @@ class SignalQueueProcessor:
 
     def process_next_signal(self) -> Optional[Dict]:
         with self._lock:
-            if not self._queue:
-                return None
-            signal = dict(self._queue.popleft())
-            signal_id = signal.get("signal_id")
-            if signal_id:
-                self._inflight_ids.add(signal_id)
-            signal["processed_at"] = now_local_iso()
-            return signal
+            queue_length = len(self._queue)
+            for _ in range(queue_length):
+                if not self._queue:
+                    return None
+                signal = dict(self._queue.popleft())
+                retry_after = float(signal.get("retry_after_epoch", 0) or 0)
+                if retry_after and retry_after > time.time():
+                    self._queue.append(signal)
+                    continue
+                signal_id = signal.get("signal_id")
+                if signal_id:
+                    self._inflight_ids.add(signal_id)
+                signal["processed_at"] = now_local_iso()
+                return signal
+            return None
 
     def process_queue(self, limit: Optional[int] = None) -> List[Dict]:
         processed = []
