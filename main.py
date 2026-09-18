@@ -829,6 +829,10 @@ def metrics_status():
 def telegram_test():
     if runtime_config.get("practice_mode") is not True:
         return jsonify({"status": "forbidden", "message": "Telegram test is practice-only"}), 403
+    configured_secret = os.getenv("WEBHOOK_SECRET", "")
+    provided_secret = request.headers.get("X-Webhook-Secret", "")
+    if configured_secret and provided_secret != configured_secret:
+        return jsonify({"status": "forbidden", "message": "Invalid test secret"}), 403
     if signal_notifier is None:
         return jsonify({"status": "unavailable", "message": "Telegram routing not initialized"}), 503
     payload = request.get_json(silent=True) or {}

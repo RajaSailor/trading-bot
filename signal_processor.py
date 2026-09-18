@@ -318,7 +318,6 @@ class SignalQueueProcessor:
             signal_id = signal.get("signal_id")
             if signal_id:
                 self._queued_ids.discard(signal_id)
-                self._processed_ids.add(signal_id)
             signal["processed_at"] = now_local_iso()
             return signal
 
@@ -333,3 +332,22 @@ class SignalQueueProcessor:
     def queue_size(self) -> int:
         with self._lock:
             return len(self._queue)
+
+    def mark_processed(self, signal_id: str | None) -> None:
+        if not signal_id:
+            return
+        with self._lock:
+            self._processed_ids.add(signal_id)
+
+    def requeue_signal(self, signal: Dict) -> bool:
+        if not self.validate_signal(signal):
+            return False
+        signal_id = signal.get("signal_id")
+        with self._lock:
+            cloned_signal = deepcopy(signal)
+            cloned_signal.pop("processed_at", None)
+            self._queue.appendleft(cloned_signal)
+            if signal_id:
+                self._processed_ids.discard(signal_id)
+                self._queued_ids.add(signal_id)
+            return True

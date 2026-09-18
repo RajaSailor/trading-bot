@@ -52,3 +52,14 @@ class TokenManagerAutoTests(unittest.TestCase):
         ):
             manager = TokenManagerAuto(session=session, now_fn=lambda: __import__("datetime").datetime.fromisoformat("2026-09-18T08:00:00+05:30"))
             self.assertTrue(manager.refresh_if_due())
+
+    def test_refresh_now_handles_request_exception(self):
+        session = Mock()
+        session.get.side_effect = __import__("requests").RequestException("boom")
+
+        with patch.dict(os.environ, {"ACCESS_TOKEN": "old-token", "DHAN_CLIENT_ID": "client-1"}, clear=False):
+            manager = TokenManagerAuto(session=session)
+            token = manager.refresh_now()
+
+        self.assertEqual("", token)
+        self.assertEqual("request_exception", manager.status()["last_error"])

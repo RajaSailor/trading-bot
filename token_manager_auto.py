@@ -59,15 +59,20 @@ class TokenManagerAuto:
                 logger.info("Dhan token renewal skipped: missing ACCESS_TOKEN or DHAN_CLIENT_ID")
                 return ""
 
-            response = self.session.get(
-                self.RENEW_ENDPOINT,
-                headers={
-                    "access-token": token,
-                    "dhanClientId": client_id,
-                    "Accept": "application/json",
-                },
-                timeout=10,
-            )
+            try:
+                response = self.session.get(
+                    self.RENEW_ENDPOINT,
+                    headers={
+                        "access-token": token,
+                        "dhanClientId": client_id,
+                        "Accept": "application/json",
+                    },
+                    timeout=10,
+                )
+            except requests.RequestException:
+                self.last_error = "request_exception"
+                logger.warning("Dhan token renewal failed: request_exception")
+                return ""
 
             if response.status_code == 200:
                 payload = response.json()

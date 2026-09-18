@@ -187,6 +187,7 @@ class QueueConsumerWorker:
         start = monotonic()
         try:
             self._execute_signal(signal)
+            self.queue_processor.mark_processed(signal.get("signal_id"))
             self._processed += 1
             self._last_signal_id = signal.get("signal_id")
             self._last_processed_at = now_local_iso()
@@ -194,6 +195,7 @@ class QueueConsumerWorker:
                 self.metrics_collector.record_order_execution((monotonic() - start) * 1000.0)
             return True
         except Exception as exc:
+            self.queue_processor.requeue_signal(signal)
             if self.metrics_collector is not None:
                 self.metrics_collector.record_error("queue_consumer", "execution_failed")
             self.notifier.notify_service_alert("Queue consumer error", exc.__class__.__name__)

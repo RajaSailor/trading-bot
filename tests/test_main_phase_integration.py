@@ -55,6 +55,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
                 "MAX_POSITION_SIZE": "2",
+                "WEBHOOK_SECRET": "secret-1",
             }
             with patch.dict(os.environ, env, clear=False):
                 os.environ.pop("PRACTICE_MODE", None)
@@ -94,6 +95,18 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             self.assertIn("+05:30", orders_payload["orders"][0]["created_at"])
                             self.assertTrue(client.get("/health").get_json()["workers"]["queue_consumer"]["running"])
                             self.assertIn("telegram_routing", client.get("/api/status").get_json()["bot"])
+                            self.assertEqual(
+                                403,
+                                client.post("/telegram/test", json={"channel": "service_alerts"}).status_code,
+                            )
+                            self.assertEqual(
+                                200,
+                                client.post(
+                                    "/telegram/test",
+                                    headers={"X-Webhook-Secret": "secret-1"},
+                                    json={"channel": "service_alerts", "message": "probe"},
+                                ).status_code,
+                            )
 
                             before_signals = len(main_module.trading_db.fetch_all("signals"))
                             with patch.object(main_module.signal_queue_processor, "enqueue_signal", return_value=False):
