@@ -213,8 +213,8 @@ def _apply_refreshed_token(token: str) -> None:
     if isinstance(headers, dict):
         if "access-token" in headers:
             headers["access-token"] = token
-        if "Authorization" in headers and headers["Authorization"] == "******":
-            headers["Authorization"] = f"******"
+        if "Authorization" in headers:
+            headers["Authorization"] = "Bearer " + token
 
 
 def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
@@ -746,7 +746,7 @@ def process_signal_webhook():
         response, error = _queue_signal_from_payload(payload, notify_acceptance=True)
         if error:
             message, status = error
-            payload = {"status": "rejected" if status == 400 else "error", "message": message}
+            payload = {"status": "rejected" if status in {400, 409} else "error", "message": message}
             return jsonify(payload), status
         return jsonify(response), 202
     except Exception as e:
