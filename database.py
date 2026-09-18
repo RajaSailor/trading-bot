@@ -15,11 +15,14 @@ class TradingDatabase:
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self._lock = threading.RLock()
+        self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []
         self._uri = db_path == ":memory:"
         self.db_path = db_path if not self._uri else f"file:trading-db-{id(self)}?mode=memory&cache=shared"
         if not self._uri and self.db_path not in {"", ":memory:"}:
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self.conn = self._connect()
+        self._connections.append(self.conn)
         self._initialize_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -29,13 +32,17 @@ class TradingDatabase:
 
     @contextmanager
     def _connection(self):
-        conn = self.conn if self._uri else self._connect()
+        conn = self.conn if self._uri else getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._connect()
+            if not self._uri:
+                self._local.conn = conn
+            self._connections.append(conn)
         try:
             yield conn
             conn.commit()
         finally:
-            if conn is not self.conn:
-                conn.close()
+            pass
 
     def _initialize_schema(self) -> None:
         migration_path = os.path.join(os.path.dirname(__file__), "migrations", "001_init.sql")
@@ -206,4 +213,9 @@ class TradingDatabase:
                 conn.execute("DELETE FROM orders WHERE order_id = ?", (order_id,))
 
     def close(self) -> None:
-        self.conn.close()
+        closed = set()
+        for conn in self._connections:
+            if id(conn) in closed:
+                continue
+            conn.close()
+            closed.add(id(conn))

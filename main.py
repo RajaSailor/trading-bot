@@ -532,18 +532,18 @@ def initialize_app():
             phase_components["market_scanner"] = False
             logger.warning("   ⚠️ Market scanner unavailable")
 
-        if TokenManagerAuto is not None:
+        if runtime_config["token_renewal_enabled"] and TokenManagerAuto is not None:
             token_manager = TokenManagerAuto(on_token_update=_apply_refreshed_token)
-            renewal_started = runtime_config["token_renewal_enabled"] and token_manager.start()
-            phase_components["token_renewal"] = runtime_config["token_renewal_enabled"]
+            renewal_started = token_manager.start()
+            phase_components["token_renewal"] = True
             logger.info(
-                "   %s Token renewal %s",
-                "✅" if runtime_config["token_renewal_enabled"] else "⚠️",
+                "   ✅ Token renewal %s",
                 "started" if renewal_started else "idle",
             )
         else:
+            token_manager = None
             phase_components["token_renewal"] = False
-            logger.warning("   ⚠️ Token renewal unavailable")
+            logger.warning("   ⚠️ Token renewal disabled")
         
         logger.info("=" * 70)
         logger.info("✅ All components initialized successfully!")

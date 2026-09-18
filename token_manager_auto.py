@@ -75,7 +75,12 @@ class TokenManagerAuto:
                 return ""
 
             if response.status_code == 200:
-                payload = response.json()
+                try:
+                    payload = response.json()
+                except ValueError:
+                    self.last_error = "invalid_response"
+                    logger.warning("Dhan token renewal failed: invalid_response")
+                    return ""
                 refreshed_token = payload.get("accessToken", "")
                 if not refreshed_token:
                     self.last_error = "missing_access_token"
@@ -137,6 +142,9 @@ class TokenManagerAuto:
         if expiry_time:
             os.environ["ACCESS_TOKEN_EXPIRES_AT"] = expiry_time
             self.last_expiry_at = expiry_time
+        else:
+            os.environ.pop("ACCESS_TOKEN_EXPIRES_AT", None)
+            self.last_expiry_at = None
         if self.on_token_update:
             self.on_token_update(token)
 

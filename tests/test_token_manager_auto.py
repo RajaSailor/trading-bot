@@ -63,3 +63,16 @@ class TokenManagerAutoTests(unittest.TestCase):
 
         self.assertEqual("", token)
         self.assertEqual("request_exception", manager.status()["last_error"])
+
+    def test_refresh_now_handles_invalid_json_success_response(self):
+        response = Mock(status_code=200)
+        response.json.side_effect = ValueError("bad json")
+        session = Mock()
+        session.get.return_value = response
+
+        with patch.dict(os.environ, {"ACCESS_TOKEN": "old-token", "DHAN_CLIENT_ID": "client-1"}, clear=False):
+            manager = TokenManagerAuto(session=session)
+            token = manager.refresh_now()
+
+        self.assertEqual("", token)
+        self.assertEqual("invalid_response", manager.status()["last_error"])
