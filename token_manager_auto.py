@@ -144,12 +144,10 @@ class TokenManagerAuto:
     def _parse_expiry(raw_value: str | None) -> datetime | None:
         if not raw_value:
             return None
-        for parser in (datetime.fromisoformat,):
-            try:
-                return ensure_timezone(parser(raw_value.replace("Z", "+00:00")))
-            except Exception:
-                continue
-        return None
+        try:
+            return ensure_timezone(datetime.fromisoformat(raw_value.replace("Z", "+00:00")))
+        except Exception:
+            return None
 
     @staticmethod
     def _error_code_for_status(status_code: int) -> str:

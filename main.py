@@ -840,7 +840,7 @@ def telegram_test():
     payload = request.get_json(silent=True) or {}
     channel = payload.get("channel", "service_alerts")
     message = payload.get("message", "Practice-safe Telegram routing test")
-    sent = signal_notifier._send(channel, f"🧪 {message}\nTime: {now_local_iso()}")
+    sent = signal_notifier.send_test_message(channel, message)
     if not sent:
         return jsonify({"status": "error", "message": "Telegram delivery failed", "channel": channel}), 502
     return jsonify({"status": "sent", "channel": channel, "timestamp": now_local_iso()}), 200

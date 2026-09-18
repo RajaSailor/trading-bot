@@ -100,7 +100,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                 403,
                                 client.post("/telegram/test", json={"channel": "service_alerts"}).status_code,
                             )
-                            with patch.object(main_module.signal_notifier, "_send", return_value=True):
+                            with patch.object(main_module.signal_notifier, "send_test_message", return_value=True):
                                 self.assertEqual(
                                     200,
                                     client.post(
@@ -109,7 +109,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                         json={"channel": "service_alerts", "message": "probe"},
                                     ).status_code,
                                 )
-                            with patch.object(main_module.signal_notifier, "_send", return_value=False):
+                            with patch.object(main_module.signal_notifier, "send_test_message", return_value=False):
                                 self.assertEqual(
                                     502,
                                     client.post(

@@ -84,6 +84,9 @@ class SignalNotifier:
     def notify_service_alert(self, title: str, message: str) -> None:
         self._send("service_alerts", f"⚠️ {title}\n{message}\nTime: {now_local_iso()}")
 
+    def send_test_message(self, channel: str, message: str) -> bool:
+        return self._send(channel, f"🧪 {message}\nTime: {now_local_iso()}")
+
     def channels_for_signal(self, signal: dict) -> list[str]:
         category = (
             signal.get("category")
