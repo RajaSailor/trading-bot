@@ -30,14 +30,12 @@ TRADE_CONTROL_CHANNEL = "trade_control"
 # carries the combined options screener alerts.
 SCREENER_ALERTS_CHANNEL = "service_alerts"
 
-# Only these three screener segments are supported (aliases included).
+# Only the three screener segments are supported. Derived from the handler aliases
+# (including legacy spellings) so adding or removing a segment is a single edit.
 SUPPORTED_STRATEGY_CATEGORIES = {
-    "index_options",
-    "index",
-    "commodity_options",
-    "commodity",
-    "nifty50_stock_options",
-    "nifty50_options",
+    category
+    for category, target in TelegramHandler.CHANNEL_ALIASES.items()
+    if target == SCREENER_ALERTS_CHANNEL and category != "service"
 }
 
 # Retired segments: never generated and never routed. Shared with the Telegram

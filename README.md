@@ -308,7 +308,8 @@ longer generated or routed, so no bots/channels are needed for them.
 
 Both routes can be verified with `POST /telegram/test`
 (`{"channel": "trade_control"}` or `{"channel": "service_alerts"}`); any other
-channel is rejected.
+channel is rejected with HTTP 400. If `channel` is omitted, the probe defaults to
+`trade_control`.
 
 ### **Commands**
 
