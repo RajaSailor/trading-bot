@@ -228,6 +228,9 @@ class TelegramHandler:
         return self._send_message(user_chat_id, message, self.default_token)
 
     def send_sl_miss_alert(self, category: str, position: dict, current_price: float) -> bool:
+        if self.is_disabled_category(category):
+            logger.warning("⚠️ [%s] Category is disabled, SL miss alert not sent", category.upper())
+            return False
         message = (
             "🚨 SL MISS ALERT\n\n"
             f"Symbol: {position['symbol']}\n"
@@ -236,9 +239,6 @@ class TelegramHandler:
             f"Current Price: {current_price}\n"
             f"Position: {position['position_id']}"
         )
-        if self.is_disabled_category(category):
-            logger.warning("⚠️ [%s] Category is disabled, SL miss alert not sent", category.upper())
-            return False
         bot_token, chat_id = self._get_bot_for_category(category)
         return self._send_message(chat_id, message, bot_token)
 

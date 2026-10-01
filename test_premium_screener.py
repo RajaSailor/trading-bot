@@ -151,6 +151,37 @@ class PremiumScreenerTests(unittest.TestCase):
 
         self.assertEqual([], telegram.sent)
 
+    def test_run_once_throttles_fifteen_minute_scans(self):
+        screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
+        calls = []
+        screener._scan_instruments = lambda instruments, interval: calls.append(("options", interval, len(instruments))) or 0
+        screener._scan_spot_instruments = lambda instruments, interval, strategy_group, primary_category: calls.append(primary_category) or 0
+        screener.last_run["nifty50_15min"] = 1000
+        screener.last_run["stock_spot_15min"] = 1000
+
+        with patch("screener_premium.time.time", return_value=1100):
+            screener.run_once(now=datetime(2026, 9, 9, 10, 0, 0))
+
+        self.assertEqual([("options", "10min", 1), ("options", "10min", 0)], calls)
+
+    def test_scan_instruments_skips_duplicate_premium_signals(self):
+        telegram = _FakeTelegramHandler()
+        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
+        screener.fetcher = _FakeFetcher()
+
+        first = screener._scan_instruments(screener.commodity_instruments, "10min")
+        second = screener._scan_instruments(screener.commodity_instruments, "10min")
+
+        self.assertEqual(2, first)
+        self.assertEqual(0, second)
+        self.assertEqual(
+            [
+                ("commodity_options", "CALL", "GOLD-24OCT-127-CE"),
+                ("commodity_options", "PUT", "GOLD-24OCT-127-PE"),
+            ],
+            telegram.sent,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

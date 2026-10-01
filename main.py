@@ -822,8 +822,13 @@ def metrics_status():
     return jsonify(metrics_collector.snapshot()), 200
 
 
-# Only the two active Telegram routes can be probed.
-TELEGRAM_TEST_CHANNELS = {"trade_control", "service_alerts"}
+# Only the two active Telegram routes can be probed; derived from the handler so
+# the allowlist cannot drift from the configured bots.
+TELEGRAM_TEST_CHANNELS = (
+    set(TelegramHandler.BOT_CONFIG)
+    if TelegramHandler is not None
+    else {"trade_control", "service_alerts"}
+)
 
 
 @app.route('/telegram/test', methods=['POST'])
