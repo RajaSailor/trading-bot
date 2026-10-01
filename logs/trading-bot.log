@@ -1,0 +1,90 @@
+2026-10-01 14:20:48 | INFO | root | ======================================================================
+2026-10-01 14:20:48 | INFO | root | 🚀 DhanHQ Trading Bot - Initializing...
+2026-10-01 14:20:48 | INFO | root | ======================================================================
+2026-10-01 14:20:48 | INFO | root | 1️⃣ Initializing DhanHQ Integration...
+2026-10-01 14:20:48 | INFO | root |    ✅ DhanHQ Integration initialized
+2026-10-01 14:20:48 | INFO | root | 2️⃣ Initializing Telegram Bridge...
+2026-10-01 14:20:48 | INFO | root |    ✅ Telegram Bridge initialized
+2026-10-01 14:20:48 | INFO | root | 3️⃣ Initializing Postback Handler...
+2026-10-01 14:20:48 | INFO | root |    ✅ Postback Handler initialized
+2026-10-01 14:20:48 | INFO | root | 4️⃣ Initializing Strategy Manager...
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Strategy Manager module unavailable
+2026-10-01 14:20:48 | INFO | root | 5️⃣ Initializing Risk Manager...
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Risk Manager module unavailable
+2026-10-01 14:20:48 | INFO | root | 6️⃣ Initializing Order Executor...
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Order Executor module unavailable
+2026-10-01 14:20:48 | INFO | root | 7️⃣ Initializing Signal Queue Processor...
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Signal queue module unavailable
+2026-10-01 14:20:48 | INFO | root | 8️⃣ Initializing Trading Database...
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Trading database module unavailable
+2026-10-01 14:20:48 | INFO | root | 9️⃣ Initializing State Manager...
+2026-10-01 14:20:48 | INFO | root |    ✅ State Manager initialized
+2026-10-01 14:20:48 | INFO | root | 🔟 Initializing Monitoring + Alerts...
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Metrics collector module unavailable
+2026-10-01 14:20:48 | ERROR | telegram_handler | ❌ No default Telegram token found in environment
+2026-10-01 14:20:48 | INFO | telegram_handler | ================================================================================
+2026-10-01 14:20:48 | INFO | telegram_handler | 📱 TELEGRAM BOT CONFIGURATION
+2026-10-01 14:20:48 | INFO | telegram_handler | ================================================================================
+2026-10-01 14:20:48 | INFO | telegram_handler | ⚠️ (missing token) [TRADE_CONTROL] Channel: -1001234567894 | Trade approvals, execution updates + service alerts
+2026-10-01 14:20:48 | INFO | telegram_handler | ⚠️ (missing token) [SERVICE_ALERTS] Channel: -1001234567895 | Combined options screener alerts (stock/index/commodity)
+2026-10-01 14:20:48 | INFO | telegram_handler | ================================================================================
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Alert manager module unavailable
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Queue consumer unavailable
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Market scanner unavailable
+2026-10-01 14:20:48 | INFO | token_manager_auto | Dhan token renewal disabled: ACCESS_TOKEN or DHAN_CLIENT_ID missing
+2026-10-01 14:20:48 | INFO | root |    ✅ Token renewal idle
+2026-10-01 14:20:48 | INFO | root | ======================================================================
+2026-10-01 14:20:48 | INFO | root | ✅ All components initialized successfully!
+2026-10-01 14:20:48 | INFO | root | 🧪 Practice Mode: True
+2026-10-01 14:20:48 | INFO | root | 🤖 Auto trading enabled: False
+2026-10-01 14:20:48 | INFO | root | 📣 Channel keys configured: []
+2026-10-01 14:20:48 | INFO | root | 🗄️ Trading DB path: /tmp/tmp93wr02bd/trading.db
+2026-10-01 14:20:48 | INFO | root | ======================================================================
+2026-10-01 14:20:48 | INFO | root | ======================================================================
+2026-10-01 14:20:48 | INFO | root | 🚀 DhanHQ Trading Bot - Initializing...
+2026-10-01 14:20:48 | INFO | root | ======================================================================
+2026-10-01 14:20:48 | INFO | root | 1️⃣ Initializing DhanHQ Integration...
+2026-10-01 14:20:48 | INFO | root |    ✅ DhanHQ Integration initialized
+2026-10-01 14:20:48 | INFO | root | 2️⃣ Initializing Telegram Bridge...
+2026-10-01 14:20:48 | INFO | root |    ✅ Telegram Bridge initialized
+2026-10-01 14:20:48 | INFO | root | 3️⃣ Initializing Postback Handler...
+2026-10-01 14:20:48 | INFO | root |    ✅ Postback Handler initialized
+2026-10-01 14:20:48 | INFO | root | 4️⃣ Initializing Strategy Manager...
+2026-10-01 14:20:48 | INFO | root |    ✅ Strategy Manager initialized
+2026-10-01 14:20:48 | INFO | root | 5️⃣ Initializing Risk Manager...
+2026-10-01 14:20:48 | INFO | root |    ✅ Risk Manager initialized
+2026-10-01 14:20:48 | INFO | root | 6️⃣ Initializing Order Executor...
+2026-10-01 14:20:48 | INFO | root |    ✅ Order Executor initialized
+2026-10-01 14:20:48 | INFO | root | 7️⃣ Initializing Signal Queue Processor...
+2026-10-01 14:20:48 | INFO | root |    ✅ Signal Queue Processor initialized
+2026-10-01 14:20:48 | INFO | root | 8️⃣ Initializing Trading Database...
+2026-10-01 14:20:48 | INFO | root |    ✅ Trading Database initialized
+2026-10-01 14:20:48 | INFO | root | 9️⃣ Initializing State Manager...
+2026-10-01 14:20:48 | INFO | root |    ✅ State Manager initialized
+2026-10-01 14:20:48 | INFO | root | 🔟 Initializing Monitoring + Alerts...
+2026-10-01 14:20:48 | INFO | root |    ✅ Metrics Collector initialized
+2026-10-01 14:20:48 | ERROR | telegram_handler | ❌ No default Telegram token found in environment
+2026-10-01 14:20:48 | INFO | telegram_handler | ================================================================================
+2026-10-01 14:20:48 | INFO | telegram_handler | 📱 TELEGRAM BOT CONFIGURATION
+2026-10-01 14:20:48 | INFO | telegram_handler | ================================================================================
+2026-10-01 14:20:48 | INFO | telegram_handler | ⚠️ (missing token) [TRADE_CONTROL] Channel: -1001234567894 | Trade approvals, execution updates + service alerts
+2026-10-01 14:20:48 | INFO | telegram_handler | ⚠️ (missing token) [SERVICE_ALERTS] Channel: -1001234567895 | Combined options screener alerts (stock/index/commodity)
+2026-10-01 14:20:48 | INFO | telegram_handler | ================================================================================
+2026-10-01 14:20:48 | WARNING | root |    ⚠️ Alert Manager initialized without delivery channels
+2026-10-01 14:20:48 | INFO | root |    ✅ Queue consumer started
+2026-10-01 14:20:48 | INFO | root |    ⚠️ Market scanner disabled
+2026-10-01 14:20:48 | INFO | token_manager_auto | Dhan token renewal disabled: ACCESS_TOKEN or DHAN_CLIENT_ID missing
+2026-10-01 14:20:48 | INFO | root |    ✅ Token renewal idle
+2026-10-01 14:20:48 | INFO | root | ======================================================================
+2026-10-01 14:20:48 | INFO | root | ✅ All components initialized successfully!
+2026-10-01 14:20:48 | INFO | root | 🧪 Practice Mode: True
+2026-10-01 14:20:48 | INFO | root | 🤖 Auto trading enabled: False
+2026-10-01 14:20:48 | INFO | root | 📣 Channel keys configured: []
+2026-10-01 14:20:48 | INFO | root | 🗄️ Trading DB path: /tmp/tmp0vc9ss82/trading.db
+2026-10-01 14:20:48 | INFO | root | ======================================================================
+2026-10-01 14:20:48 | WARNING | telegram_handler | ❌ Channel config missing for trade_control
+2026-10-01 14:20:48 | WARNING | runtime_services | Telegram delivery failed for channel trade_control
+2026-10-01 14:20:49 | WARNING | telegram_handler | ❌ Channel config missing for trade_control
+2026-10-01 14:20:49 | WARNING | runtime_services | Telegram delivery failed for channel trade_control
+2026-10-01 14:20:49 | WARNING | telegram_handler | ❌ Channel config missing for trade_control
+2026-10-01 14:20:49 | WARNING | runtime_services | Telegram delivery failed for channel trade_control
