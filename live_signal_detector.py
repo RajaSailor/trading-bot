@@ -61,11 +61,15 @@ class LiveSignalDetector:
         try:
             # DhanHQ / TradingView candles carry epoch-second timestamps.
             epoch = float(timestamp)
+        except (TypeError, ValueError):
+            epoch = None
+        if epoch is not None and epoch > 1e9:
             if epoch > 1e11:
                 epoch /= 1000.0
-            return abs(reference_now - datetime.fromtimestamp(epoch, UTC)) <= self.freshness
-        except (TypeError, ValueError, OverflowError, OSError):
-            pass
+            try:
+                return abs(reference_now - datetime.fromtimestamp(epoch, UTC)) <= self.freshness
+            except (OverflowError, OSError, ValueError):
+                return False
 
         for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%H:%M", "%H:%M:%S"):
             try:

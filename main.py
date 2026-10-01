@@ -531,7 +531,7 @@ def initialize_app():
                 logger.info(
                     "   %s Market scanner %s",
                     "✅" if market_scanner_worker.enabled else "⚠️",
-                    "started" if scanner_started else "disabled",
+                    "started" if scanner_running else "disabled",
                 )
         else:
             phase_components["market_scanner"] = False
