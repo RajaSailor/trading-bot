@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "SENSEX"}
 COMMODITY_SYMBOLS = {"GOLD", "SILVER", "CRUDE", "CRUDEOIL", "NATURALGAS", "MCXGOLD", "MCXSILVER", "MCXCRUDE", "MCXNATURALGAS"}
+# Retained only to classify crypto symbols into the disabled "crypto" category
+# so their signals are dropped instead of being treated as option alerts.
 CRYPTO_SYMBOLS = {"BTC", "ETH", "BTCUSD", "ETHUSD"}
 
 # Final two-bot operating model:
@@ -118,6 +120,7 @@ class SignalNotifier:
             return []
         if category in SUPPORTED_STRATEGY_CATEGORIES:
             return [SCREENER_ALERTS_CHANNEL]
+        # Anything else (manual/unknown categories) stays on the control channel.
         return [TRADE_CONTROL_CHANNEL]
 
     def _category_from_symbol(self, symbol: str) -> str:

@@ -822,15 +822,6 @@ def metrics_status():
     return jsonify(metrics_collector.snapshot()), 200
 
 
-# Only the two active Telegram routes can be probed; derived from the handler so
-# the allowlist cannot drift from the configured bots.
-TELEGRAM_TEST_CHANNELS = (
-    set(TelegramHandler.BOT_CONFIG)
-    if TelegramHandler is not None
-    else {"trade_control", "service_alerts"}
-)
-
-
 @app.route('/telegram/test', methods=['POST'])
 def telegram_test():
     if runtime_config.get("practice_mode") is not True:
@@ -841,17 +832,20 @@ def telegram_test():
     provided_secret = request.headers.get("X-Webhook-Secret", "")
     if provided_secret != configured_secret:
         return jsonify({"status": "forbidden", "message": "Invalid test secret"}), 403
-    if signal_notifier is None:
+    if signal_notifier is None or TelegramHandler is None:
         return jsonify({"status": "unavailable", "message": "Telegram routing not initialized"}), 503
+    # Only the two active Telegram routes can be probed; the allowlist is derived
+    # from the handler so it cannot drift from the configured bots.
+    supported_channels = set(TelegramHandler.BOT_CONFIG)
     payload = request.get_json(silent=True) or {}
     # Default to the control channel so a bare probe never posts to the screener channel.
     channel = payload.get("channel", "trade_control")
-    if channel not in TELEGRAM_TEST_CHANNELS:
+    if channel not in supported_channels:
         return jsonify({
             "status": "error",
             "message": "Unsupported channel",
             "channel": channel,
-            "supported_channels": sorted(TELEGRAM_TEST_CHANNELS),
+            "supported_channels": sorted(supported_channels),
         }), 400
     message = payload.get("message", "Practice-safe Telegram routing test")
     sent = signal_notifier.send_test_message(channel, message)
