@@ -1,0 +1,144 @@
+2026-10-01 13:18:06 | INFO | root | ======================================================================
+2026-10-01 13:18:06 | INFO | root | 🚀 DhanHQ Trading Bot - Initializing...
+2026-10-01 13:18:06 | INFO | root | ======================================================================
+2026-10-01 13:18:06 | INFO | root | 1️⃣ Initializing DhanHQ Integration...
+2026-10-01 13:18:06 | INFO | root |    ✅ DhanHQ Integration initialized
+2026-10-01 13:18:06 | INFO | root | 2️⃣ Initializing Telegram Bridge...
+2026-10-01 13:18:06 | INFO | root |    ✅ Telegram Bridge initialized
+2026-10-01 13:18:06 | INFO | root | 3️⃣ Initializing Postback Handler...
+2026-10-01 13:18:06 | INFO | root |    ✅ Postback Handler initialized
+2026-10-01 13:18:06 | INFO | root | 4️⃣ Initializing Strategy Manager...
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Strategy Manager module unavailable
+2026-10-01 13:18:06 | INFO | root | 5️⃣ Initializing Risk Manager...
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Risk Manager module unavailable
+2026-10-01 13:18:06 | INFO | root | 6️⃣ Initializing Order Executor...
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Order Executor module unavailable
+2026-10-01 13:18:06 | INFO | root | 7️⃣ Initializing Signal Queue Processor...
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Signal queue module unavailable
+2026-10-01 13:18:06 | INFO | root | 8️⃣ Initializing Trading Database...
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Trading database module unavailable
+2026-10-01 13:18:06 | INFO | root | 9️⃣ Initializing State Manager...
+2026-10-01 13:18:06 | INFO | root |    ✅ State Manager initialized
+2026-10-01 13:18:06 | INFO | root | 🔟 Initializing Monitoring + Alerts...
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Metrics collector module unavailable
+2026-10-01 13:18:06 | ERROR | telegram_handler | ❌ No default Telegram token found in environment
+2026-10-01 13:18:06 | INFO | telegram_handler | ================================================================================
+2026-10-01 13:18:06 | INFO | telegram_handler | 📱 TELEGRAM BOT CONFIGURATION
+2026-10-01 13:18:06 | INFO | telegram_handler | ================================================================================
+2026-10-01 13:18:06 | INFO | telegram_handler | ⚠️ (missing token) [INDEX_OPTIONS] Channel: -1003966854994 | NIFTY/BANKNIFTY Options (9:15-15:40)
+2026-10-01 13:18:06 | INFO | telegram_handler | ⚠️ (missing token) [NIFTY50_STOCK_OPTIONS] Channel: -1003804613787 | NIFTY50 Stock Options
+2026-10-01 13:18:06 | INFO | telegram_handler | ⚠️ (missing token) [COMMODITY_OPTIONS] Channel: -1004403277287 | GOLD/CRUDE/SILVER/NATURALGAS (MCX)
+2026-10-01 13:18:06 | INFO | telegram_handler | ⚠️ (missing token) [NIFTY50_INTRADAY_5X] Channel: -1004466883026 | NIFTY50 Intraday 5X Leverage
+2026-10-01 13:18:06 | INFO | telegram_handler | ⚠️ (missing token) [NIFTY50_PAY_LATER] Channel: -1003814243881 | NIFTY50 Pay Later/Margin
+2026-10-01 13:18:06 | INFO | telegram_handler | ⚠️ (missing token) [CRYPTO] Channel: -1004482078964 | BTCUSD/ETHUSD Crypto (24/7)
+2026-10-01 13:18:06 | INFO | telegram_handler | ⚠️ (missing token) [TRADE_CONTROL] Channel: -1001234567894 | Semi-auto trade approvals + execution updates
+2026-10-01 13:18:06 | INFO | telegram_handler | ⚠️ (missing token) [SERVICE_ALERTS] Channel: -1001234567895 | Service health, errors, and status alerts
+2026-10-01 13:18:06 | INFO | telegram_handler | ================================================================================
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Alert manager module unavailable
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Queue consumer unavailable
+2026-10-01 13:18:06 | WARNING | root |    ⚠️ Market scanner unavailable
+2026-10-01 13:18:06 | INFO | token_manager_auto | Dhan token renewal disabled: ACCESS_TOKEN or DHAN_CLIENT_ID missing
+2026-10-01 13:18:06 | INFO | root |    ✅ Token renewal idle
+2026-10-01 13:18:06 | INFO | root | ======================================================================
+2026-10-01 13:18:06 | INFO | root | ✅ All components initialized successfully!
+2026-10-01 13:18:06 | INFO | root | 🧪 Practice Mode: True
+2026-10-01 13:18:06 | INFO | root | 🤖 Auto trading enabled: False
+2026-10-01 13:18:06 | INFO | root | 📣 Channel keys configured: []
+2026-10-01 13:18:06 | INFO | root | 🗄️ Trading DB path: /tmp/tmphvukze24/trading.db
+2026-10-01 13:18:06 | INFO | root | ======================================================================
+2026-10-01 13:18:07 | INFO | root | ======================================================================
+2026-10-01 13:18:07 | INFO | root | 🚀 DhanHQ Trading Bot - Initializing...
+2026-10-01 13:18:07 | INFO | root | ======================================================================
+2026-10-01 13:18:07 | INFO | root | 1️⃣ Initializing DhanHQ Integration...
+2026-10-01 13:18:07 | INFO | root |    ✅ DhanHQ Integration initialized
+2026-10-01 13:18:07 | INFO | root | 2️⃣ Initializing Telegram Bridge...
+2026-10-01 13:18:07 | INFO | root |    ✅ Telegram Bridge initialized
+2026-10-01 13:18:07 | INFO | root | 3️⃣ Initializing Postback Handler...
+2026-10-01 13:18:07 | INFO | root |    ✅ Postback Handler initialized
+2026-10-01 13:18:07 | INFO | root | 4️⃣ Initializing Strategy Manager...
+2026-10-01 13:18:07 | INFO | root |    ✅ Strategy Manager initialized
+2026-10-01 13:18:07 | INFO | root | 5️⃣ Initializing Risk Manager...
+2026-10-01 13:18:07 | INFO | root |    ✅ Risk Manager initialized
+2026-10-01 13:18:07 | INFO | root | 6️⃣ Initializing Order Executor...
+2026-10-01 13:18:07 | INFO | root |    ✅ Order Executor initialized
+2026-10-01 13:18:07 | INFO | root | 7️⃣ Initializing Signal Queue Processor...
+2026-10-01 13:18:07 | INFO | root |    ✅ Signal Queue Processor initialized
+2026-10-01 13:18:07 | INFO | root | 8️⃣ Initializing Trading Database...
+2026-10-01 13:18:07 | INFO | root |    ✅ Trading Database initialized
+2026-10-01 13:18:07 | INFO | root | 9️⃣ Initializing State Manager...
+2026-10-01 13:18:07 | INFO | root |    ✅ State Manager initialized
+2026-10-01 13:18:07 | INFO | root | 🔟 Initializing Monitoring + Alerts...
+2026-10-01 13:18:07 | INFO | root |    ✅ Metrics Collector initialized
+2026-10-01 13:18:07 | ERROR | telegram_handler | ❌ No default Telegram token found in environment
+2026-10-01 13:18:07 | INFO | telegram_handler | ================================================================================
+2026-10-01 13:18:07 | INFO | telegram_handler | 📱 TELEGRAM BOT CONFIGURATION
+2026-10-01 13:18:07 | INFO | telegram_handler | ================================================================================
+2026-10-01 13:18:07 | INFO | telegram_handler | ⚠️ (missing token) [INDEX_OPTIONS] Channel: -1003966854994 | NIFTY/BANKNIFTY Options (9:15-15:40)
+2026-10-01 13:18:07 | INFO | telegram_handler | ⚠️ (missing token) [NIFTY50_STOCK_OPTIONS] Channel: -1003804613787 | NIFTY50 Stock Options
+2026-10-01 13:18:07 | INFO | telegram_handler | ⚠️ (missing token) [COMMODITY_OPTIONS] Channel: -1004403277287 | GOLD/CRUDE/SILVER/NATURALGAS (MCX)
+2026-10-01 13:18:07 | INFO | telegram_handler | ⚠️ (missing token) [NIFTY50_INTRADAY_5X] Channel: -1004466883026 | NIFTY50 Intraday 5X Leverage
+2026-10-01 13:18:07 | INFO | telegram_handler | ⚠️ (missing token) [NIFTY50_PAY_LATER] Channel: -1003814243881 | NIFTY50 Pay Later/Margin
+2026-10-01 13:18:07 | INFO | telegram_handler | ⚠️ (missing token) [CRYPTO] Channel: -1004482078964 | BTCUSD/ETHUSD Crypto (24/7)
+2026-10-01 13:18:07 | INFO | telegram_handler | ⚠️ (missing token) [TRADE_CONTROL] Channel: -1001234567894 | Semi-auto trade approvals + execution updates
+2026-10-01 13:18:07 | INFO | telegram_handler | ⚠️ (missing token) [SERVICE_ALERTS] Channel: -1001234567895 | Service health, errors, and status alerts
+2026-10-01 13:18:07 | INFO | telegram_handler | ================================================================================
+2026-10-01 13:18:07 | WARNING | root |    ⚠️ Alert Manager initialized without delivery channels
+2026-10-01 13:18:07 | INFO | root |    ✅ Queue consumer started
+2026-10-01 13:18:07 | INFO | root |    ⚠️ Market scanner disabled
+2026-10-01 13:18:07 | INFO | token_manager_auto | Dhan token renewal disabled: ACCESS_TOKEN or DHAN_CLIENT_ID missing
+2026-10-01 13:18:07 | INFO | root |    ✅ Token renewal idle
+2026-10-01 13:18:07 | INFO | root | ======================================================================
+2026-10-01 13:18:07 | INFO | root | ✅ All components initialized successfully!
+2026-10-01 13:18:07 | INFO | root | 🧪 Practice Mode: True
+2026-10-01 13:18:07 | INFO | root | 🤖 Auto trading enabled: False
+2026-10-01 13:18:07 | INFO | root | 📣 Channel keys configured: []
+2026-10-01 13:18:07 | INFO | root | 🗄️ Trading DB path: /tmp/tmp2at9obqz/trading.db
+2026-10-01 13:18:07 | INFO | root | ======================================================================
+2026-10-01 13:18:07 | WARNING | telegram_handler | ❌ Channel config missing for trade_control
+2026-10-01 13:18:07 | WARNING | runtime_services | Telegram delivery failed for channel trade_control
+2026-10-01 13:18:08 | WARNING | telegram_handler | ❌ Channel config missing for index
+2026-10-01 13:18:08 | WARNING | runtime_services | Telegram delivery failed for channel index
+2026-10-01 13:18:08 | WARNING | telegram_handler | ❌ Channel config missing for index
+2026-10-01 13:18:08 | WARNING | runtime_services | Telegram delivery failed for channel index
+2026-10-01 13:18:08 | WARNING | telegram_handler | ❌ Channel config missing for trade_control
+2026-10-01 13:18:08 | WARNING | runtime_services | Telegram delivery failed for channel trade_control
+2026-10-01 13:18:08 | ERROR | runtime_services | Queue consumer failed for 6a20e390f2e5409fa10dad64: RuntimeError
+2026-10-01 13:18:08 | WARNING | runtime_services | Telegram delivery failed for channel commodity
+2026-10-01 13:18:08 | WARNING | runtime_services | Telegram delivery failed for channel commodity
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ Parsed signal: BUY NIFTY50
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | ERROR | dhan_telegram_bridge | ❌ Signal parse error: invalid literal for int() with base 10: 'X'
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ Parsed signal: BUY NIFTY50
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ Parsed signal: SELL BANKNIFTY
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ Parsed signal: BUY NIFTY50
+2026-10-01 13:18:08 | ERROR | dhan_telegram_bridge | ❌ Signal handler error: order api down
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ Target hit alert sent for NIFTY50
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge | ✅ DhanHQ Telegram Bridge initialized
+2026-10-01 13:18:08 | INFO | dhan_telegram_bridge |    Alert Chat ID: 12345
+2026-10-01 13:18:08 | WARNING | dhan_telegram_bridge | Alert send failed (attempt 1/3): telegram down
+2026-10-01 13:18:09 | WARNING | dhan_telegram_bridge | Alert send failed (attempt 2/3): telegram down
+2026-10-01 13:18:10 | WARNING | dhan_telegram_bridge | Alert send failed (attempt 3/3): telegram down
+2026-10-01 13:18:10 | INFO | token_manager_auto | Dhan token renewed in runtime memory
+2026-10-01 13:18:10 | WARNING | token_manager_auto | Dhan token renewal failed: invalid_response
+2026-10-01 13:18:10 | WARNING | token_manager_auto | Dhan token renewal failed: expired_or_invalid_token
+2026-10-01 13:18:10 | WARNING | token_manager_auto | Dhan token renewal failed: request_exception
+2026-10-01 13:18:10 | INFO | token_manager_auto | Dhan token renewed in runtime memory
