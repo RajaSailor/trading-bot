@@ -134,7 +134,7 @@ class WebhookHandler:
         if symbol_upper in {"NIFTY50", "NIFTY", "BANKNIFTY", "SENSEX"}:
             return "index_options"
         if symbol_upper in NIFTY50_STOCK_SYMBOLS:
-            return "nifty50_options"
+            return "nifty50_stock_options"
         return None
 
     @staticmethod

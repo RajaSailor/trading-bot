@@ -844,7 +844,8 @@ def telegram_test():
     if signal_notifier is None:
         return jsonify({"status": "unavailable", "message": "Telegram routing not initialized"}), 503
     payload = request.get_json(silent=True) or {}
-    channel = payload.get("channel", "service_alerts")
+    # Default to the control channel so a bare probe never posts to the screener channel.
+    channel = payload.get("channel", "trade_control")
     if channel not in TELEGRAM_TEST_CHANNELS:
         return jsonify({
             "status": "error",

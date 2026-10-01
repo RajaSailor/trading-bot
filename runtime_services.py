@@ -38,14 +38,9 @@ SUPPORTED_STRATEGY_CATEGORIES = {
     "nifty50_options",
 }
 
-# Retired segments: never generated and never routed.
-DISABLED_STRATEGY_CATEGORIES = {
-    "crypto",
-    "nifty50_intraday_5x",
-    "nifty50_5x",
-    "nifty50_pay_later",
-    "nifty50_paylater",
-}
+# Retired segments: never generated and never routed. Shared with the Telegram
+# handler so the two surfaces cannot drift apart.
+DISABLED_STRATEGY_CATEGORIES = TelegramHandler.DISABLED_CATEGORIES
 
 
 class SignalNotifier:
