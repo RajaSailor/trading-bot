@@ -39,7 +39,8 @@ python main.py
 ## 🎯 Features Overview
 
 ### **Telegram Integration**
-- ✅ Trade signal reception via Telegram (TRADE_CONTROL channel)
+- ✅ Trade signal reception via Telegram (trade_control channel)
+- ✅ Combined options screener alerts via the service_alerts channel
 - ✅ Real-time position monitoring
 - ✅ P&L tracking & alerts
 - ✅ SL/Target hit notifications
@@ -92,9 +93,9 @@ python main.py
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    TELEGRAM CHANNELS                         │
-│  ├─ TRADE_CONTROL (Primary - Trade signals & control)      │
-│  ├─ COMMODITY, INDEX, OPTIONS (Alert channels)             │
-│  └─ SERVICE_ALERTS (System notifications)                  │
+│  ├─ TRADE_CONTROL (Trades, orders, positions, system alerts)│
+│  └─ SERVICE_ALERTS (Combined options screener alerts:       │
+│      stock options, index options, commodity options)       │
 └─────────────────┬───────────────────────────────────────────┘
                   │
         ┌─────────▼──────────────────┐
@@ -198,30 +199,28 @@ DHAN_TOTP_SECRET=your_totp_secret
 DHAN_WEBHOOK_SECRET=your_random_webhook_secret
 
 # ============================================================================
-# TELEGRAM - TRADE CONTROL CHANNEL (PRIMARY - For trading)
+# TELEGRAM - EXACTLY TWO BOTS / CHANNELS
 # ============================================================================
-# Use ONE bot for all trading + alerts (see "Do I need separate bot?" FAQ)
+# 1) trade_control  - automated/paper trade approvals, order and position
+#    updates, and every system/service/risk/token-renewal failure alert.
+# 2) service_alerts - combined strategy screener channel for the only three
+#    supported segments: NIFTY50 stock options, index options
+#    (NIFTY/BANKNIFTY/SENSEX) and commodity options (GOLD/SILVER/CRUDE/
+#    NATURALGAS/MCX).
+#
+# The "service_alerts" key and its env names are intentionally retained for
+# deployment compatibility even though that channel now carries screener alerts.
+# Crypto, NIFTY50 intraday 5X and NIFTY50 pay-later alerts are retired: do not
+# configure bots or channels for them.
 TELEGRAM_BOT_TOKEN=your_default_telegram_bot_token
 TELEGRAM_CHAT_ID=your_default_telegram_chat_id
+
+BOT_TRADE_CONTROL_TOKEN=your_trade_control_bot_token
 CHANNEL_TRADE_CONTROL_ID=your_trade_control_channel_id
 
-# ============================================================================
-# TELEGRAM - ALERT CHANNELS (Optional - Secondary notification channels)
-# ============================================================================
-CHANNEL_COMMODITY_ID=your_commodity_channel_id
-CHANNEL_CRYPTO_ID=your_crypto_channel_id
-CHANNEL_INDEX_ID=your_index_channel_id
-CHANNEL_NIFTY50_5X_ID=your_nifty50_5x_channel_id
-CHANNEL_NIFTY50_OPTIONS_ID=your_nifty50_options_channel_id
-CHANNEL_NIFTY50_PAY_LATER_ID=your_nifty50_pay_later_channel_id
-CHANNEL_SERVICE_ALERTS_ID=your_service_alerts_channel_id
-BOT_COMMODITY_TOKEN=your_commodity_bot_token
-BOT_INDEX_TOKEN=your_index_bot_token
-BOT_NIFTY50_OPTIONS_TOKEN=your_nifty50_options_bot_token
-BOT_NIFTY50_5X_TOKEN=your_nifty50_5x_bot_token
-BOT_NIFTY50_PAY_LATER_TOKEN=your_nifty50_pay_later_bot_token
-BOT_CRYPTO_TOKEN=your_crypto_bot_token
-BOT_SERVICE_ALERTS_TOKEN=your_service_alerts_bot_token
+BOT_SERVICE_ALERTS_TOKEN=your_options_screener_bot_token
+CHANNEL_SERVICE_ALERTS_ID=your_options_screener_channel_id
+
 TELEGRAM_TEST_SECRET=your_private_telegram_test_secret
 
 # ============================================================================
@@ -292,17 +291,25 @@ asyncio.run(test())
 
 ## 📱 Telegram Trading Guide
 
-### **Single Bot for All Trading & Alerts**
+### **Two Bots: Trade Control + Options Screener**
 
-✅ **Use ONE Telegram Bot for:**
-- Trade signal reception
-- Trade confirmations
-- Position status updates
-- SL/Target hit alerts
-- P&L notifications
-- System health checks
+✅ **`trade_control` bot (`BOT_TRADE_CONTROL_TOKEN` / `CHANNEL_TRADE_CONTROL_ID`):**
+- Trade signal reception and confirmations
+- Order and position lifecycle updates
+- SL/Target hit alerts and P&L notifications
+- System, service, risk and token-renewal failure alerts
 
-**NO need for separate bot!** All alerts go through your TRADE_CONTROL_CHANNEL.
+✅ **`service_alerts` bot (`BOT_SERVICE_ALERTS_TOKEN` / `CHANNEL_SERVICE_ALERTS_ID`):**
+- Combined strategy screener alerts for exactly three segments:
+  NIFTY50 stock options, index options and commodity options
+
+❌ **Retired:** crypto, NIFTY50 intraday 5X and NIFTY50 pay-later alerts are no
+longer generated or routed, so no bots/channels are needed for them.
+
+Both routes can be verified with `POST /telegram/test`
+(`{"channel": "trade_control"}` or `{"channel": "service_alerts"}`); any other
+channel is rejected with HTTP 400. If `channel` is omitted, the probe defaults to
+`trade_control`.
 
 ### **Commands**
 
@@ -854,7 +861,7 @@ sudo supervisorctl restart dhan-bot:*
 ## ❓ FAQ
 
 ### **Q: Do I need a separate Telegram bot for DhanHQ trading?**
-**A:** ✅ **NO!** Use your existing **TRADE_CONTROL_CHANNEL** bot. All trading signals, alerts, and status updates go through this single bot. No need for separate bots!
+**A:** ✅ **NO!** All trading signals, execution updates and system alerts go through the **trade_control** bot. The only other bot is **service_alerts**, which carries the combined options screener alerts (stock, index and commodity options).
 
 ### **Q: Is my data safe on Render?**
 **A:** ✅ Yes. Render uses encrypted storage. Keep your .env file secure and never share tokens.

@@ -60,5 +60,5 @@ Notes:
 - **400 Invalid webhook secret**: make sure the JSON body or `X-Webhook-Secret` header matches `WEBHOOK_SECRET`.
 - **400 Missing required webhook fields**: confirm the TradingView alert includes every required JSON key from the template.
 - **Rate limit exceeded**: the receiver allows up to 100 alerts per minute.
-- **No Telegram alert**: verify the category matches one of `INDEX_OPTIONS`, `NIFTY50_STOCK_OPTIONS`, `COMMODITY_OPTIONS`, `INTRADAY_5X`, `PAY_LATER`, or `CRYPTO`.
+- **No Telegram alert**: verify the category matches one of `INDEX_OPTIONS`, `NIFTY50_STOCK_OPTIONS`, or `COMMODITY_OPTIONS`. Crypto, intraday 5X and pay-later categories are retired and rejected.
 - **DhanHQ outage fallback**: recent webhook signals are cached and used as a lightweight fallback candle source when DhanHQ data fetches fail.

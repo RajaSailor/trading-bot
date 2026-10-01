@@ -186,15 +186,12 @@ def _load_runtime_config() -> dict:
         "scanner_poll_seconds": max(1, _env_int("SCANNER_POLL_SECONDS", 5)),
         "queue_poll_seconds": max(1, _env_int("QUEUE_POLL_SECONDS", 1)),
         "token_renewal_enabled": _env_bool("ENABLE_DHAN_TOKEN_RENEWAL", True),
+        # Exactly two active Telegram routes. The "service_alerts" key and its
+        # CHANNEL_SERVICE_ALERTS_ID env name are retained for compatibility even
+        # though the channel now carries the combined options screener alerts.
         "channels": {
             "trade_control": os.getenv("CHANNEL_TRADE_CONTROL_ID"),
             "service_alerts": os.getenv("CHANNEL_SERVICE_ALERTS_ID"),
-            "commodity": os.getenv("CHANNEL_COMMODITY_ID"),
-            "index": os.getenv("CHANNEL_INDEX_ID"),
-            "nifty50_options": os.getenv("CHANNEL_NIFTY50_OPTIONS_ID"),
-            "nifty50_5x": os.getenv("CHANNEL_NIFTY50_5X_ID"),
-            "nifty50_pay_later": os.getenv("CHANNEL_NIFTY50_PAY_LATER_ID"),
-            "crypto": os.getenv("CHANNEL_CRYPTO_ID"),
         },
     }
 
@@ -835,10 +832,21 @@ def telegram_test():
     provided_secret = request.headers.get("X-Webhook-Secret", "")
     if provided_secret != configured_secret:
         return jsonify({"status": "forbidden", "message": "Invalid test secret"}), 403
-    if signal_notifier is None:
+    if signal_notifier is None or TelegramHandler is None:
         return jsonify({"status": "unavailable", "message": "Telegram routing not initialized"}), 503
+    # Only the two active Telegram routes can be probed; the allowlist is derived
+    # from the handler so it cannot drift from the configured bots.
+    supported_channels = set(TelegramHandler.BOT_CONFIG)
     payload = request.get_json(silent=True) or {}
-    channel = payload.get("channel", "service_alerts")
+    # Default to the control channel so a bare probe never posts to the screener channel.
+    channel = payload.get("channel", "trade_control")
+    if channel not in supported_channels:
+        return jsonify({
+            "status": "error",
+            "message": "Unsupported channel",
+            "channel": channel,
+            "supported_channels": sorted(supported_channels),
+        }), 400
     message = payload.get("message", "Practice-safe Telegram routing test")
     sent = signal_notifier.send_test_message(channel, message)
     if not sent:

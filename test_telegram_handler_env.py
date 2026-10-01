@@ -43,15 +43,15 @@ class TelegramHandlerEnvTests(unittest.TestCase):
             {
                 "TELEGRAM_BOT_TOKEN": "default-token",
                 "TELEGRAM_CHAT_ID": "-9001",
-                "BOT_COMMODITY_TOKEN": "commodity-token",
-                "CHANNEL_COMMODITY_ID": "-4400",
+                "BOT_SERVICE_ALERTS_TOKEN": "screener-token",
+                "CHANNEL_SERVICE_ALERTS_ID": "-4400",
             },
             clear=False,
         ):
             handler = TelegramHandler()
             token, channel_id = handler._get_bot_for_category("commodity_options")
 
-        self.assertEqual("commodity-token", token)
+        self.assertEqual("screener-token", token)
         self.assertEqual(-4400, channel_id)
 
     def test_get_bot_for_category_falls_back_to_default_token(self):
@@ -60,8 +60,8 @@ class TelegramHandlerEnvTests(unittest.TestCase):
             {
                 "TELEGRAM_BOT_TOKEN": "default-token",
                 "TELEGRAM_CHAT_ID": "-9001",
-                "BOT_COMMODITY_TOKEN": "",
-                "CHANNEL_COMMODITY_ID": "-4400",
+                "BOT_SERVICE_ALERTS_TOKEN": "",
+                "CHANNEL_SERVICE_ALERTS_ID": "-4400",
             },
             clear=False,
         ):
@@ -97,8 +97,8 @@ class TelegramHandlerEnvTests(unittest.TestCase):
             {
                 "TELEGRAM_BOT_TOKEN": "default-token",
                 "TELEGRAM_CHAT_ID": "-9001",
-                "BOT_COMMODITY_TOKEN": "commodity-token",
-                "CHANNEL_COMMODITY_ID": "-4400",
+                "BOT_SERVICE_ALERTS_TOKEN": "screener-token",
+                "CHANNEL_SERVICE_ALERTS_ID": "-4400",
             },
             clear=False,
         ):
@@ -109,7 +109,7 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         self.assertTrue(sent)
         mocked_send.assert_called_once()
         self.assertEqual(-4400, mocked_send.call_args.args[0])
-        self.assertEqual("commodity-token", mocked_send.call_args.args[2])
+        self.assertEqual("screener-token", mocked_send.call_args.args[2])
 
     def test_format_signal_message_uses_premium_breakout_layout(self):
         handler = TelegramHandler(token="default-token")
@@ -198,8 +198,8 @@ class TelegramHandlerEnvTests(unittest.TestCase):
             "os.environ",
             {
                 "TELEGRAM_BOT_TOKEN": "default-token",
-                "BOT_NIFTY50_OPTIONS_TOKEN": "nifty50-token",
-                "CHANNEL_NIFTY50_OPTIONS_ID": "-3800",
+                "BOT_SERVICE_ALERTS_TOKEN": "screener-token",
+                "CHANNEL_SERVICE_ALERTS_ID": "-3800",
             },
             clear=False,
         ):
@@ -211,6 +211,33 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         self.assertTrue(sent)
         mocked_post.assert_called_once()
         self.assertEqual(-3800, mocked_post.call_args.kwargs["json"]["chat_id"])
+
+    def test_send_signal_alert_rejects_disabled_categories(self):
+        handler = TelegramHandler(token="default-token")
+        for category in ("crypto", "nifty50_intraday_5x", "nifty50_pay_later"):
+            with self.subTest(category=category):
+                with patch.object(handler, "_send_message", return_value=True) as mocked_send:
+                    sent = handler.send_signal_alert(category, {"symbol": "BTC"}, {})
+                self.assertFalse(sent)
+                mocked_send.assert_not_called()
+
+    def test_send_to_channel_rejects_disabled_channels(self):
+        handler = TelegramHandler(token="default-token")
+        for channel in ("crypto", "nifty50_5x", "nifty50_pay_later"):
+            with self.subTest(channel=channel):
+                with patch("telegram_handler.requests.post") as mocked_post:
+                    sent = handler.send_to_channel(channel, "test alert")
+                self.assertFalse(sent)
+                mocked_post.assert_not_called()
+
+    def test_only_two_channels_are_configured(self):
+        handler = TelegramHandler(token="default-token")
+
+        self.assertEqual({"trade_control", "service_alerts"}, set(TelegramHandler.BOT_CONFIG))
+        self.assertEqual(
+            {"trade_control", "service_alerts"},
+            set(handler.configured_channels_summary()),
+        )
 
     def test_send_to_channel_rejects_unknown_channel(self):
         handler = TelegramHandler(token="default-token")

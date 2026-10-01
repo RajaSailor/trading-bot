@@ -1,11 +1,14 @@
+import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from database import TradingDatabase
 from order_executor import OrderExecutor
 from runtime_services import MarketScannerWorker, QueueConsumerWorker, SignalNotifier
 from signal_processor import SignalQueueProcessor
+from telegram_handler import TelegramHandler
 
 
 class _FakeTelegramHandler:
@@ -17,13 +20,13 @@ class _FakeTelegramHandler:
         return True
 
     def configured_channels_summary(self):
-        return {"commodity_options": True, "trade_control": True, "service_alerts": True}
+        return {"trade_control": True, "service_alerts": True}
 
 
 class _RejectingTelegramHandler(_FakeTelegramHandler):
     def send_to_channel(self, channel, message):
         super().send_to_channel(channel, message)
-        return channel != "commodity"
+        return channel != "trade_control"
 
 
 class _FakeMetrics:
@@ -101,8 +104,10 @@ class QueueConsumerWorkerTests(unittest.TestCase):
             self.assertEqual(1, len(db.fetch_all("orders")))
             self.assertEqual(1, len(db.fetch_latest_positions()))
             self.assertEqual(0, len(worker.dhan_integration.calls))
-            self.assertIn("commodity", [channel for channel, _ in notifier.telegram_handler.calls])
-            self.assertIn("trade_control", [channel for channel, _ in notifier.telegram_handler.calls])
+            self.assertEqual(
+                {"trade_control"},
+                {channel for channel, _ in notifier.telegram_handler.calls},
+            )
 
     def test_live_order_api_requires_both_safety_gates(self):
         queue = SignalQueueProcessor()
@@ -191,6 +196,112 @@ class QueueConsumerWorkerTests(unittest.TestCase):
             retried = queue._queue[0]
             self.assertEqual(1, retried["retry_count"])
             self.assertIn("retry_after_epoch", retried)
+
+
+class SignalNotifierRoutingTests(unittest.TestCase):
+    def _signal(self, **overrides):
+        signal = {"symbol": "NIFTY", "action": "BUY", "metadata": {"source": "scanner"}}
+        signal.update(overrides)
+        return signal
+
+    def test_service_alerts_route_only_to_trade_control(self):
+        handler = _FakeTelegramHandler()
+        SignalNotifier(handler).notify_service_alert("Queue consumer error", "boom")
+
+        self.assertEqual(["trade_control"], [channel for channel, _ in handler.calls])
+
+    def test_order_and_position_updates_route_only_to_trade_control(self):
+        handler = _FakeTelegramHandler()
+        notifier = SignalNotifier(handler)
+        order = SimpleNamespace(
+            status=SimpleNamespace(value="FILLED"),
+            symbol="GOLD",
+            side="BUY",
+            quantity=1,
+            order_id="PRACTICE-1",
+            updated_at="2026-10-01T10:00:00+05:30",
+        )
+
+        notifier.notify_order(self._signal(category="commodity_options"), order, True)
+        notifier.notify_position_update(self._signal(category="commodity_options"), 1, 100.0)
+
+        self.assertEqual(["trade_control", "trade_control"], [channel for channel, _ in handler.calls])
+
+    def test_option_strategy_signals_route_only_to_service_alerts(self):
+        categories = [
+            "index_options",
+            "index",
+            "commodity_options",
+            "commodity",
+            "nifty50_stock_options",
+            "nifty50_options",
+        ]
+        for category in categories:
+            with self.subTest(category=category):
+                handler = _FakeTelegramHandler()
+                SignalNotifier(handler).notify_strategy_signal(self._signal(category=category))
+                self.assertEqual(["service_alerts"], [channel for channel, _ in handler.calls])
+
+    def test_option_strategy_signals_route_by_metadata_or_symbol(self):
+        signals = [
+            self._signal(metadata={"source": "scanner", "route_category": "commodity_options"}),
+            self._signal(symbol="BANKNIFTY"),
+            self._signal(symbol="MCXGOLD"),
+            self._signal(symbol="RELIANCE"),
+        ]
+        for signal in signals:
+            with self.subTest(signal=signal):
+                handler = _FakeTelegramHandler()
+                SignalNotifier(handler).notify_strategy_signal(signal)
+                self.assertEqual(["service_alerts"], [channel for channel, _ in handler.calls])
+
+    def test_disabled_strategy_categories_are_not_sent(self):
+        categories = [
+            "crypto",
+            "nifty50_intraday_5x",
+            "nifty50_5x",
+            "nifty50_pay_later",
+            "nifty50_paylater",
+        ]
+        for category in categories:
+            with self.subTest(category=category):
+                handler = _FakeTelegramHandler()
+                notifier = SignalNotifier(handler)
+                notifier.notify_strategy_signal(self._signal(category=category))
+                self.assertEqual([], handler.calls)
+                self.assertEqual(0, notifier.delivery_attempts)
+
+    def test_crypto_symbols_are_not_routed_as_option_alerts(self):
+        handler = _FakeTelegramHandler()
+        SignalNotifier(handler).notify_strategy_signal(self._signal(symbol="BTCUSD"))
+
+        self.assertEqual([], handler.calls)
+
+    def test_test_messages_use_configured_two_bot_channels(self):
+        env = {
+            "BOT_TRADE_CONTROL_TOKEN": "trade-token",
+            "CHANNEL_TRADE_CONTROL_ID": "-1001",
+            "BOT_SERVICE_ALERTS_TOKEN": "alerts-token",
+            "CHANNEL_SERVICE_ALERTS_ID": "-1002",
+        }
+        with patch.dict(os.environ, env), patch("telegram_handler.requests.post") as post:
+            post.return_value = SimpleNamespace(status_code=200)
+            notifier = SignalNotifier(TelegramHandler())
+            self.assertTrue(notifier.send_test_message("trade_control", "probe"))
+            self.assertTrue(notifier.send_test_message("service_alerts", "probe"))
+            self.assertFalse(notifier.send_test_message("crypto", "probe"))
+
+        sent = [(call.args[0], call.kwargs["json"]["chat_id"]) for call in post.call_args_list]
+        self.assertEqual(
+            [
+                ("https://api.telegram.org/bottrade-token/sendMessage", -1001),
+                ("https://api.telegram.org/botalerts-token/sendMessage", -1002),
+            ],
+            sent,
+        )
+
+    def test_only_two_channels_are_active(self):
+        self.assertEqual({"trade_control", "service_alerts"}, set(TelegramHandler.BOT_CONFIG))
 
 
 class MarketScannerWorkerTests(unittest.TestCase):

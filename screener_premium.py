@@ -9,10 +9,15 @@ from atm_options_fetcher import ATMOptionsFetcher
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import PremiumStrategyEngine
 from strategy_engine import StrategyEngine
+from telegram_handler import SCREENER_CATEGORIES
 
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
+
+# Only these three segments are screened and alerted; crypto, NIFTY50 intraday 5X
+# and NIFTY50 pay-later segments are retired.
+SUPPORTED_SCREENER_CATEGORIES = SCREENER_CATEGORIES
 
 
 class PremiumScreener:
@@ -47,13 +52,11 @@ class PremiumScreener:
         self.commodity_instruments = universe.get("commodity_options", [])
         self.stock_instruments = universe.get("nifty50_stock_options", [])
         self.stock_spot_instruments = universe.get("nifty50_stock_spot", [])
-        self.crypto_instruments = universe.get("crypto", [])
         self.last_run = {
             "commodity_10min": 0.0,
             "index_10min": 0.0,
             "nifty50_15min": 0.0,
             "stock_spot_15min": 0.0,
-            "crypto_15min": 0.0,
         }
 
     def run_once(self, now: datetime | None = None) -> int:
@@ -82,16 +85,6 @@ class PremiumScreener:
                     primary_category="nifty50_stock_options",
                 )
                 self.last_run["stock_spot_15min"] = time.time()
-
-        if self._in_window(now.time(), dt_time(0, 0), dt_time(23, 59, 59)):
-            if time.time() - self.last_run["crypto_15min"] >= self.spot_scan_interval_seconds:
-                alerts += self._scan_spot_instruments(
-                    self.crypto_instruments,
-                    "15min",
-                    StrategyEngine.GROUP_2,
-                    primary_category="crypto",
-                )
-                self.last_run["crypto_15min"] = time.time()
 
         return alerts
 
@@ -307,17 +300,13 @@ class PremiumScreener:
         return f"{interval.replace('min', '')}-MINUTE BREAKOUT"
 
     def _dispatch_option_alert(self, category: str, signal: dict, telegram_payload: dict) -> bool:
-        send_results = [self.telegram_handler.send_signal_alert(category, signal, telegram_payload)]
+        if category not in SUPPORTED_SCREENER_CATEGORIES:
+            logger.warning("⚠️ Unsupported screener category '%s', alert skipped", category)
+            return False
 
-        if category == "nifty50_stock_options":
-            send_results.append(
-                self.telegram_handler.send_signal_alert("nifty50_intraday_5x", signal, telegram_payload)
-            )
-            send_results.append(
-                self.telegram_handler.send_signal_alert("nifty50_pay_later", signal, telegram_payload)
-            )
-
-        return all(send_results)
+        # Single combined options screener channel: no fan-out to retired
+        # NIFTY50 5X / pay-later routes.
+        return self.telegram_handler.send_signal_alert(category, signal, telegram_payload)
 
     def _fresh_spot_engine(self):
         engine_class = self.spot_engine.__class__

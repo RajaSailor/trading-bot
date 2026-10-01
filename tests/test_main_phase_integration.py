@@ -109,6 +109,27 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                         json={"channel": "service_alerts", "message": "probe"},
                                     ).status_code,
                                 )
+                            with patch.object(
+                                main_module.signal_notifier, "send_test_message", return_value=True
+                            ) as send_test_message:
+                                trade_control_response = client.post(
+                                    "/telegram/test",
+                                    headers={"X-Webhook-Secret": "admin-secret"},
+                                    json={"channel": "trade_control", "message": "probe"},
+                                )
+                                self.assertEqual(200, trade_control_response.status_code)
+                                self.assertEqual("trade_control", trade_control_response.get_json()["channel"])
+                                send_test_message.assert_called_once_with("trade_control", "probe")
+                            with patch.object(
+                                main_module.signal_notifier, "send_test_message", return_value=True
+                            ) as unsupported_send:
+                                unsupported_response = client.post(
+                                    "/telegram/test",
+                                    headers={"X-Webhook-Secret": "admin-secret"},
+                                    json={"channel": "crypto", "message": "probe"},
+                                )
+                                self.assertEqual(400, unsupported_response.status_code)
+                                unsupported_send.assert_not_called()
                             with patch.object(main_module.signal_notifier, "send_test_message", return_value=False):
                                 self.assertEqual(
                                     502,

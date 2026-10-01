@@ -13,74 +13,50 @@ import requests
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
+# Canonical screener segments carried by the combined screener channel.
+SCREENER_CATEGORIES = frozenset({"index_options", "commodity_options", "nifty50_stock_options"})
+# Legacy spellings of the same three segments.
+SCREENER_CATEGORY_ALIASES = frozenset({"index", "commodity", "nifty50_options"})
+# Retired segments: alerts for these categories are rejected, never delivered.
+DISABLED_CATEGORIES = frozenset(
+    {"crypto", "nifty50_intraday_5x", "nifty50_5x", "nifty50_pay_later", "nifty50_paylater"}
+)
+
 
 class TelegramHandler:
+    """Telegram delivery for the final two-bot routing model.
+
+    Exactly two bots/channels are active:
+      * ``trade_control``  - automated/paper trade lifecycle + system/service alerts
+      * ``service_alerts`` - combined options screener alerts (stock, index, commodity)
+
+    The ``service_alerts`` key and its ``BOT_SERVICE_ALERTS_TOKEN`` /
+    ``CHANNEL_SERVICE_ALERTS_ID`` env names are intentionally kept for deployment
+    compatibility even though the channel now carries screener alerts.
+    """
+
     BOT_CONFIG = {
-        "index_options": {
-            "channel_id": -1003966854994,
-            "channel_env": "CHANNEL_INDEX_ID",
-            "channel_aliases": ["CHANNEL_INDEX_OPTIONS_ID"],
-            "token_env": "BOT_INDEX_TOKEN",
-            "token_aliases": ["BOT_INDEX_OPTIONS_TOKEN"],
-            "description": "NIFTY/BANKNIFTY Options (9:15-15:40)",
-        },
-        "nifty50_stock_options": {
-            "channel_id": -1003804613787,
-            "channel_env": "CHANNEL_NIFTY50_OPTIONS_ID",
-            "token_env": "BOT_NIFTY50_OPTIONS_TOKEN",
-            "token_aliases": ["BOT_NIFTY_STOCKS_TOKEN"],
-            "description": "NIFTY50 Stock Options",
-        },
-        "commodity_options": {
-            "channel_id": -1004403277287,
-            "channel_env": "CHANNEL_COMMODITY_ID",
-            "token_env": "BOT_COMMODITY_TOKEN",
-            "token_aliases": ["BOT_COMMODITY_OPTIONS_TOKEN"],
-            "description": "GOLD/CRUDE/SILVER/NATURALGAS (MCX)",
-        },
-        "nifty50_intraday_5x": {
-            "channel_id": -1004466883026,
-            "channel_env": "CHANNEL_NIFTY50_5X_ID",
-            "token_env": "BOT_NIFTY50_5X_TOKEN",
-            "token_aliases": ["BOT_5X_LEVERAGE_TOKEN"],
-            "description": "NIFTY50 Intraday 5X Leverage",
-        },
-        "nifty50_pay_later": {
-            "channel_id": -1003814243881,
-            "channel_env": "CHANNEL_NIFTY50_PAY_LATER_ID",
-            "token_env": "BOT_NIFTY50_PAY_LATER_TOKEN",
-            "token_aliases": ["BOT_PAY_LATER_TOKEN"],
-            "description": "NIFTY50 Pay Later/Margin",
-        },
-        "crypto": {
-            "channel_id": -1004482078964,
-            "channel_env": "CHANNEL_CRYPTO_ID",
-            "token_env": "BOT_CRYPTO_TOKEN",
-            "description": "BTCUSD/ETHUSD Crypto (24/7)",
-        },
         "trade_control": {
             "channel_id": -1001234567894,
             "channel_env": "CHANNEL_TRADE_CONTROL_ID",
             "token_env": "BOT_TRADE_CONTROL_TOKEN",
-            "description": "Semi-auto trade approvals + execution updates",
+            "description": "Trade approvals, execution updates + service alerts",
         },
         "service_alerts": {
             "channel_id": -1001234567895,
             "channel_env": "CHANNEL_SERVICE_ALERTS_ID",
             "token_env": "BOT_SERVICE_ALERTS_TOKEN",
-            "description": "Service health, errors, and status alerts",
+            "description": "Combined options screener alerts (stock/index/commodity)",
         },
     }
     CHANNELS = {category: config["channel_id"] for category, config in BOT_CONFIG.items()}
+    # The three supported screener segments all deliver to the single screener bot.
     CHANNEL_ALIASES = {
-        "index": "index_options",
-        "commodity": "commodity_options",
-        "nifty50_options": "nifty50_stock_options",
-        "nifty50_5x": "nifty50_intraday_5x",
-        "nifty50_paylater": "nifty50_pay_later",
+        **{category: "service_alerts" for category in SCREENER_CATEGORIES | SCREENER_CATEGORY_ALIASES},
         "trade": "trade_control",
         "service": "service_alerts",
     }
+    DISABLED_CATEGORIES = DISABLED_CATEGORIES
 
     def __init__(self, token: Optional[str] = None) -> None:
         self.default_token = token or self._env_first("TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN")
@@ -121,6 +97,13 @@ class TelegramHandler:
                 return value
         return ""
 
+    @classmethod
+    def is_disabled_category(cls, category: str) -> bool:
+        """Retired categories (crypto, NIFTY50 5X, NIFTY50 pay-later) are never routed."""
+        if not isinstance(category, str):
+            return False
+        return category.lower() in cls.DISABLED_CATEGORIES
+
     def _get_bot_for_category(self, category: str) -> tuple[str, int]:
         normalized_category = self.CHANNEL_ALIASES.get(category, category)
         if normalized_category not in self.BOT_CONFIG:
@@ -136,6 +119,8 @@ class TelegramHandler:
         return category_token, channel_id
 
     def is_channel_ready(self, channel_type: str) -> bool:
+        if self.is_disabled_category(channel_type):
+            return False
         normalized_channel = self.CHANNEL_ALIASES.get(channel_type, channel_type)
         if normalized_channel not in self.BOT_CONFIG:
             return False
@@ -149,6 +134,9 @@ class TelegramHandler:
         }
 
     def send_signal_alert(self, category: str, signal_data: dict, option_data: dict) -> bool:
+        if self.is_disabled_category(category):
+            logger.warning("⚠️ [%s] Category is disabled, alert not sent", category.upper())
+            return False
         try:
             logger.debug(
                 "📤 [%s] Attempting to send alert for %s",
@@ -202,6 +190,9 @@ class TelegramHandler:
     def send_to_channel(self, channel_type: str, alert_msg: str) -> bool:
         """Send raw alert to a configured Telegram channel."""
         try:
+            if self.is_disabled_category(channel_type):
+                logger.warning("❌ Disabled channel type: %s", channel_type)
+                return False
             normalized_channel = self.CHANNEL_ALIASES.get(channel_type, channel_type)
             if normalized_channel not in self.BOT_CONFIG:
                 logger.warning("❌ Unknown channel type: %s", channel_type)
@@ -236,6 +227,9 @@ class TelegramHandler:
         return self._send_message(user_chat_id, message, self.default_token)
 
     def send_sl_miss_alert(self, category: str, position: dict, current_price: float) -> bool:
+        if self.is_disabled_category(category):
+            logger.warning("⚠️ [%s] Category is disabled, SL miss alert not sent", category.upper())
+            return False
         message = (
             "🚨 SL MISS ALERT\n\n"
             f"Symbol: {position['symbol']}\n"
