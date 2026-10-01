@@ -19,31 +19,24 @@ from webhook_store import webhook_store
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
+# Only the three supported option segments are accepted; crypto, NIFTY50
+# intraday 5X and NIFTY50 pay-later categories are retired and now rejected.
 CATEGORY_MAP = {
     "INDEX_OPTIONS": "index_options",
     "NIFTY50_STOCK_OPTIONS": "nifty50_stock_options",
     "COMMODITY_OPTIONS": "commodity_options",
-    "INTRADAY_5X": "nifty50_intraday_5x",
-    "PAY_LATER": "nifty50_pay_later",
-    "CRYPTO": "crypto",
 }
 
 GROUP_BY_CATEGORY = {
     "index_options": "GROUP 1",
     "nifty50_stock_options": "GROUP 1",
     "commodity_options": "GROUP 1",
-    "nifty50_intraday_5x": "GROUP 2",
-    "nifty50_pay_later": "GROUP 2",
-    "crypto": "GROUP 2",
 }
 
 INSTRUMENT_TYPE_BY_CATEGORY = {
     "index_options": "INDEX",
     "nifty50_stock_options": "STOCK",
     "commodity_options": "INDEX",
-    "nifty50_intraday_5x": "STOCK",
-    "nifty50_pay_later": "STOCK",
-    "crypto": "CRYPTO",
 }
 
 NIFTY50_STOCK_SYMBOLS = {
@@ -140,8 +133,6 @@ class WebhookHandler:
             return "commodity_options"
         if symbol_upper in {"NIFTY50", "NIFTY", "BANKNIFTY", "SENSEX"}:
             return "index_options"
-        if symbol_upper in {"BTCUSDT", "ETHUSDT", "BTC/USD", "ETH/USD", "BTC", "ETH"}:
-            return "crypto"
         if symbol_upper in NIFTY50_STOCK_SYMBOLS:
             return "nifty50_options"
         return None
