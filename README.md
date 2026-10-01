@@ -302,6 +302,7 @@ asyncio.run(test())
 ✅ **`service_alerts` bot (`BOT_SERVICE_ALERTS_TOKEN` / `CHANNEL_SERVICE_ALERTS_ID`):**
 - Combined strategy screener alerts for exactly three segments:
   NIFTY50 stock options, index options and commodity options
+  All three use a 10-minute breakout; NIFTY50 stock spot scans feeding stock-option alerts use 10-minute candles too.
 
 ❌ **Retired:** crypto, NIFTY50 intraday 5X and NIFTY50 pay-later alerts are no
 longer generated or routed, so no bots/channels are needed for them.

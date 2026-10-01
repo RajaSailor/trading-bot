@@ -43,8 +43,8 @@ class PremiumScreener:
         self.spot_engine = StrategyEngine(lookback=7)
         self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.signal_callback = signal_callback
-        self.stock_option_scan_interval_seconds = 15 * 60
-        self.spot_scan_interval_seconds = 15 * 60
+        self.stock_option_scan_interval_seconds = 10 * 60
+        self.spot_scan_interval_seconds = 10 * 60
         self._processed_signal_keys: set[str] = set()
         self._processed_signal_order: list[str] = []
         universe = self.data_manager.get_instruments()
@@ -55,8 +55,8 @@ class PremiumScreener:
         self.last_run = {
             "commodity_10min": 0.0,
             "index_10min": 0.0,
-            "nifty50_15min": 0.0,
-            "stock_spot_15min": 0.0,
+            "nifty50_10min": 0.0,
+            "stock_spot_10min": 0.0,
         }
 
     def run_once(self, now: datetime | None = None) -> int:
@@ -73,18 +73,18 @@ class PremiumScreener:
                 alerts += self._scan_instruments(self.index_instruments, "10min")
                 self.last_run["index_10min"] = time.time()
 
-            if time.time() - self.last_run["nifty50_15min"] >= self.stock_option_scan_interval_seconds:
-                alerts += self._scan_instruments(self.stock_instruments, "15min")
-                self.last_run["nifty50_15min"] = time.time()
+            if time.time() - self.last_run["nifty50_10min"] >= self.stock_option_scan_interval_seconds:
+                alerts += self._scan_instruments(self.stock_instruments, "10min")
+                self.last_run["nifty50_10min"] = time.time()
 
-            if time.time() - self.last_run["stock_spot_15min"] >= self.spot_scan_interval_seconds:
+            if time.time() - self.last_run["stock_spot_10min"] >= self.spot_scan_interval_seconds:
                 alerts += self._scan_spot_instruments(
                     self.stock_spot_instruments,
-                    "15min",
+                    "10min",
                     StrategyEngine.GROUP_2,
                     primary_category="nifty50_stock_options",
                 )
-                self.last_run["stock_spot_15min"] = time.time()
+                self.last_run["stock_spot_10min"] = time.time()
 
         return alerts
 
