@@ -23,6 +23,8 @@ CRYPTO_SYMBOLS = {"BTC", "ETH", "BTCUSD", "ETHUSD"}
 # - trade_control: trade/order lifecycle updates and system/service alerts
 # - service_alerts: combined options market screener (strategy) alerts
 TRADE_CONTROL_CHANNEL = "trade_control"
+# Key name kept as "service_alerts" for env/config and /telegram/test compatibility
+# (BOT_SERVICE_ALERTS_TOKEN / CHANNEL_SERVICE_ALERTS_ID); it now carries screener alerts.
 SCREENER_ALERTS_CHANNEL = "service_alerts"
 OPTION_SCREENER_CATEGORIES = {
     "index_options",
