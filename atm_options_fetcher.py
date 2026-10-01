@@ -2,19 +2,28 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from collections import Counter
+from datetime import date, datetime
 from typing import Dict, List, Optional
 
-from atm_calculator import calculate_atm_strikes
 from data_manager import DataManager, Instrument, IST, _apply_rate_limit, _normalize_stock_symbol
 from nse_symbol_mapping import NSESymbolMapper
 
 
 logger = logging.getLogger(__name__)
 
+REASON_ATM = "ATM"
+REASON_EXPIRY_ITM_PLUS_1 = "EXPIRY_ITM_PLUS_1"
+
 
 class ATMOptionsFetcher:
-    """Fetch ATM option premium candles for the current underlying price."""
+    """Fetch option premium candles for a listed strike selected from the security master.
+
+    Strike selection is contract-driven: the nearest listed strike to the spot
+    price (ATM) of the nearest active expiry is used, except on that expiry's
+    day (IST) where the strike one listed step in-the-money (ITM+1) is used.
+    No premium-value thresholds are applied to the selection.
+    """
 
     def __init__(self, data_manager: Optional[DataManager] = None) -> None:
         self.data_manager = data_manager or DataManager()
@@ -30,14 +39,19 @@ class ATMOptionsFetcher:
             logger.debug("No underlying candles available for %s", instrument.symbol)
             return [], None
 
-        atm = calculate_atm_strikes(instrument.symbol, underlying_candles[-1]["close"])
-        if not atm:
-            logger.debug("Could not calculate ATM strike for %s", instrument.symbol)
+        spot_price = self._parse_float(underlying_candles[-1].get("close"))
+        if spot_price is None or spot_price <= 0:
+            logger.debug("Invalid underlying price for %s", instrument.symbol)
             return [], None
 
-        contract = self._resolve_option_contract(instrument, atm["atm_strike"], option_type)
+        contract = self._resolve_option_contract(instrument, spot_price, option_type)
         if contract is None:
-            logger.warning("Could not resolve %s ATM option for %s", option_type, instrument.symbol)
+            logger.warning(
+                "Could not resolve listed %s option contract for %s (spot=%.2f)",
+                option_type.upper(),
+                instrument.symbol,
+                spot_price,
+            )
             return [], None
 
         _apply_rate_limit()
@@ -61,66 +75,169 @@ class ATMOptionsFetcher:
     def _resolve_option_contract(
         self,
         instrument: Instrument,
-        atm_strike: int,
+        spot_price: float,
         option_type: str,
+        now: Optional[datetime] = None,
     ) -> Optional[dict]:
         securities = self.data_manager._fetch_security_master_with_cache()
         if not securities:
             return None
 
         option_side = option_type.upper()
+        today = self._ist_date(now)
+        candidates = self._collect_option_candidates(instrument, securities, option_side, today)
+        if not candidates:
+            return None
+
+        selected_expiry = min(candidates)
+        contracts_by_strike = candidates[selected_expiry]
+        strikes = sorted(contracts_by_strike)
+        atm_strike = self._nearest_listed_strike(strikes, spot_price)
+
+        selected_strike = atm_strike
+        reason = REASON_ATM
+        if selected_expiry == today:
+            itm_strike = self._itm_plus_one_strike(strikes, atm_strike, option_side)
+            if itm_strike is not None:
+                selected_strike = itm_strike
+                reason = REASON_EXPIRY_ITM_PLUS_1
+            else:
+                logger.info(
+                    "[%s] %s expiry day but no ITM strike listed beyond ATM %s; using ATM",
+                    instrument.symbol,
+                    option_side,
+                    self._display_strike(atm_strike),
+                )
+
+        security, instrument_type = contracts_by_strike[selected_strike]
+        strike_value = self._display_strike(selected_strike)
+        contract = {
+            "security_id": int(security["SEM_SMST_SECURITY_ID"]),
+            "option_symbol": str(
+                security.get("SEM_TRADING_SYMBOL")
+                or security.get("SEM_CUSTOM_SYMBOL")
+                or f"{instrument.symbol}-{strike_value}-{option_side}"
+            ),
+            "exchange_segment": self._option_exchange_segment(instrument),
+            "instrument_type": instrument_type,
+            "atm_strike": strike_value,
+            "selected_strike": strike_value,
+            "listed_atm_strike": self._display_strike(atm_strike),
+            "strike_reason": reason,
+            "spot_ltp": round(float(spot_price), 2),
+            "option_type": option_side,
+            "expiry": selected_expiry.strftime("%d%b%Y").upper(),
+        }
+        logger.info(
+            "🎯 [%s] %s contract selected | spot=%.2f | expiry=%s | strike=%s | reason=%s | symbol=%s",
+            instrument.symbol,
+            option_side,
+            float(spot_price),
+            contract["expiry"],
+            strike_value,
+            reason,
+            contract["option_symbol"],
+        )
+        return contract
+
+    def _collect_option_candidates(
+        self,
+        instrument: Instrument,
+        securities: List[dict],
+        option_side: str,
+        today: date,
+    ) -> Dict[date, Dict[float, tuple[dict, str]]]:
         candidate_symbols = {
             self._normalized_symbol(name)
             for name in NSESymbolMapper.get_possible_dhan_names(instrument.symbol)
         }
-        target_symbol = self._normalized_symbol(instrument.symbol)
-        candidate_symbols.add(target_symbol)
-        preferred_expiry = None
-        best_match = None
+        candidate_symbols.add(self._normalized_symbol(instrument.symbol))
+        candidates: Dict[date, Dict[float, tuple[dict, str]]] = {}
 
         for security in securities:
-            if not self._matches_option_symbol(instrument, security, candidate_symbols):
+            if str(security.get("SEM_OPTION_TYPE", "")).upper() != option_side:
                 continue
 
             exchange_id = str(security.get("SEM_EXM_EXCH_ID", "")).upper()
             if not self._matches_option_exchange(instrument, exchange_id):
                 continue
 
-            security_option_type = str(security.get("SEM_OPTION_TYPE", "")).upper()
-            if security_option_type != option_side:
-                continue
-
             instrument_type = self._option_instrument_type(security)
             if "OPT" not in instrument_type:
                 continue
 
+            if not self._matches_option_symbol(instrument, security, candidate_symbols):
+                continue
+
             strike = self._parse_float(security.get("SEM_STRIKE_PRICE"))
-            if strike is None or round(strike) != int(atm_strike):
+            if strike is None or strike <= 0:
                 continue
 
             expiry_date = self._parse_expiry(security.get("SEM_EXPIRY_DATE"))
-            if expiry_date is None:
+            if expiry_date is None or expiry_date.date() < today:
                 continue
 
-            candidate = {
-                "security_id": int(security["SEM_SMST_SECURITY_ID"]),
-                "option_symbol": str(
-                    security.get("SEM_TRADING_SYMBOL")
-                    or security.get("SEM_CUSTOM_SYMBOL")
-                    or f"{instrument.symbol}-{atm_strike}-{option_side}"
-                ),
-                "exchange_segment": self._option_exchange_segment(instrument),
-                "instrument_type": instrument_type,
-                "atm_strike": int(atm_strike),
-                "option_type": option_side,
-                "expiry": expiry_date.strftime("%d%b%Y").upper(),
-            }
+            try:
+                int(security["SEM_SMST_SECURITY_ID"])
+            except (KeyError, TypeError, ValueError):
+                continue
 
-            if preferred_expiry is None or expiry_date < preferred_expiry:
-                preferred_expiry = expiry_date
-                best_match = candidate
+            by_strike = candidates.setdefault(expiry_date.date(), {})
+            by_strike.setdefault(strike, (security, instrument_type))
 
-        return best_match
+        return candidates
+
+    @staticmethod
+    def _nearest_listed_strike(strikes: List[float], spot_price: float) -> float:
+        # Ties resolve to the higher strike (half-up), matching prior rounding behaviour.
+        return min(strikes, key=lambda strike: (abs(strike - spot_price), -strike))
+
+    @staticmethod
+    def _strike_step(strikes: List[float]) -> Optional[float]:
+        diffs = [round(b - a, 6) for a, b in zip(strikes, strikes[1:]) if b > a]
+        if not diffs:
+            return None
+        counts = Counter(diffs)
+        return min(counts, key=lambda diff: (-counts[diff], diff))
+
+    @classmethod
+    def _itm_plus_one_strike(
+        cls,
+        strikes: List[float],
+        atm_strike: float,
+        option_side: str,
+    ) -> Optional[float]:
+        step = cls._strike_step(strikes)
+        if step is None:
+            return None
+
+        # CE moves ITM to lower strikes; PE moves ITM to higher strikes.
+        direction = -1 if option_side == "CE" else 1
+        target = atm_strike + direction * step
+        tolerance = step * 1e-6
+        for strike in strikes:
+            if abs(strike - target) <= tolerance:
+                return strike
+
+        further_itm = [
+            strike for strike in strikes
+            if (strike - target) * direction > 0
+        ]
+        if not further_itm:
+            return None
+        return min(further_itm, key=lambda strike: abs(strike - target))
+
+    @staticmethod
+    def _display_strike(strike: float) -> float | int:
+        return int(strike) if float(strike).is_integer() else strike
+
+    @staticmethod
+    def _ist_date(now: Optional[datetime]) -> date:
+        if now is None:
+            return datetime.now(IST).date()
+        if now.tzinfo is None:
+            return now.date()
+        return now.astimezone(IST).date()
 
     @classmethod
     def _matches_option_symbol(

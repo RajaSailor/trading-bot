@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 
 from atm_options_fetcher import ATMOptionsFetcher
 from data_manager import DataManager, Instrument
@@ -41,7 +42,7 @@ class ATMOptionsFetcherTests(unittest.TestCase):
             data_source="dhan_primary",
         )
 
-        contract = fetcher._resolve_option_contract(instrument, 72000, "CE")
+        contract = fetcher._resolve_option_contract(instrument, 72000, "CE", now=datetime(2026, 9, 1, 10, 0))
 
         self.assertIsNotNone(contract)
         self.assertEqual(100, contract["security_id"])
@@ -84,7 +85,7 @@ class ATMOptionsFetcherTests(unittest.TestCase):
             data_source="dhan_primary",
         )
 
-        contract = fetcher._resolve_option_contract(instrument, 283000, "CE")
+        contract = fetcher._resolve_option_contract(instrument, 283000, "CE", now=datetime(2026, 9, 1, 10, 0))
 
         self.assertIsNotNone(contract)
         self.assertEqual(301, contract["security_id"])
@@ -115,7 +116,7 @@ class ATMOptionsFetcherTests(unittest.TestCase):
             data_source="dhan_primary",
         )
 
-        contract = fetcher._resolve_option_contract(instrument, 7200, "CE")
+        contract = fetcher._resolve_option_contract(instrument, 7200, "CE", now=datetime(2026, 9, 1, 10, 0))
 
         self.assertIsNotNone(contract)
         self.assertEqual(400, contract["security_id"])
@@ -146,7 +147,7 @@ class ATMOptionsFetcherTests(unittest.TestCase):
             data_source="dhan_primary",
         )
 
-        contract = fetcher._resolve_option_contract(instrument, 24500, "CE")
+        contract = fetcher._resolve_option_contract(instrument, 24500, "CE", now=datetime(2026, 9, 1, 10, 0))
 
         self.assertIsNotNone(contract)
         self.assertEqual(200, contract["security_id"])
