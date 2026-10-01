@@ -19,6 +19,24 @@ INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "SENSEX"}
 COMMODITY_SYMBOLS = {"GOLD", "SILVER", "CRUDE", "CRUDEOIL", "NATURALGAS", "MCXGOLD", "MCXSILVER", "MCXCRUDE", "MCXNATURALGAS"}
 CRYPTO_SYMBOLS = {"BTC", "ETH", "BTCUSD", "ETHUSD"}
 
+# Temporary two-bot operating model:
+# - trade_control: trade/order lifecycle updates and system/service alerts
+# - service_alerts: combined options market screener (strategy) alerts
+TRADE_CONTROL_CHANNEL = "trade_control"
+SCREENER_ALERTS_CHANNEL = "service_alerts"
+OPTION_SCREENER_CATEGORIES = {
+    "index_options",
+    "index",
+    "commodity_options",
+    "commodity",
+    "nifty50_stock_options",
+    "nifty50_options",
+    "nifty50_intraday_5x",
+    "nifty50_5x",
+    "nifty50_pay_later",
+    "nifty50_paylater",
+}
+
 
 class SignalNotifier:
     def __init__(self, telegram_handler: TelegramHandler, metrics_collector=None) -> None:
@@ -66,9 +84,7 @@ class SignalNotifier:
             f"Order ID: {order.order_id}\n"
             f"Time: {order.updated_at}"
         )
-        for channel in self.channels_for_signal(signal):
-            self._send(channel, message)
-        self._send("trade_control", message)
+        self._send(TRADE_CONTROL_CHANNEL, message)
 
     def notify_position_update(self, signal: dict, quantity: int, average_price: float) -> None:
         message = (
@@ -78,11 +94,10 @@ class SignalNotifier:
             f"Average Price: {average_price:.2f}\n"
             f"Time: {now_local_iso()}"
         )
-        for channel in self.channels_for_signal(signal):
-            self._send(channel, message)
+        self._send(TRADE_CONTROL_CHANNEL, message)
 
     def notify_service_alert(self, title: str, message: str) -> None:
-        self._send("service_alerts", f"⚠️ {title}\n{message}\nTime: {now_local_iso()}")
+        self._send(TRADE_CONTROL_CHANNEL, f"⚠️ {title}\n{message}\nTime: {now_local_iso()}")
 
     def send_test_message(self, channel: str, message: str) -> bool:
         return self._send(channel, f"🧪 {message}\nTime: {now_local_iso()}")
@@ -93,19 +108,11 @@ class SignalNotifier:
             or signal.get("metadata", {}).get("route_category")
             or self._category_from_symbol(signal.get("symbol", ""))
         )
-        if category in {"nifty50_stock_options", "nifty50_options"}:
-            return ["nifty50_options", "nifty50_5x", "nifty50_pay_later"]
-        if category in {"nifty50_intraday_5x", "nifty50_5x"}:
-            return ["nifty50_5x"]
-        if category in {"nifty50_pay_later", "nifty50_paylater"}:
-            return ["nifty50_pay_later"]
-        if category in {"index_options", "index"}:
-            return ["index"]
-        if category in {"commodity_options", "commodity"}:
-            return ["commodity"]
+        if category in OPTION_SCREENER_CATEGORIES:
+            return [SCREENER_ALERTS_CHANNEL]
         if category == "crypto":
             return ["crypto"]
-        return ["trade_control"]
+        return [TRADE_CONTROL_CHANNEL]
 
     def _category_from_symbol(self, symbol: str) -> str:
         normalized = "".join(ch for ch in symbol.upper() if ch.isalnum())

@@ -224,6 +224,15 @@ BOT_CRYPTO_TOKEN=your_crypto_bot_token
 BOT_SERVICE_ALERTS_TOKEN=your_service_alerts_bot_token
 TELEGRAM_TEST_SECRET=your_private_telegram_test_secret
 
+# Temporary two-bot mode (runtime notifier routing):
+# - trade_control  (BOT_TRADE_CONTROL_TOKEN / CHANNEL_TRADE_CONTROL_ID):
+#     trade/order/position lifecycle updates + all system/service alerts
+#     (queue errors, risk rejections, Dhan order rejections, etc.)
+# - service_alerts (BOT_SERVICE_ALERTS_TOKEN / CHANNEL_SERVICE_ALERTS_ID):
+#     combined options screener alerts (index, commodity, NIFTY50 stock options)
+# The legacy INDEX/COMMODITY/NIFTY50_* variables are still read but are not used
+# by the runtime notifier while this mode is active.
+
 # ============================================================================
 # TRADING PARAMETERS
 # ============================================================================

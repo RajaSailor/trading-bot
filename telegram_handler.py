@@ -62,13 +62,13 @@ class TelegramHandler:
             "channel_id": -1001234567894,
             "channel_env": "CHANNEL_TRADE_CONTROL_ID",
             "token_env": "BOT_TRADE_CONTROL_TOKEN",
-            "description": "Semi-auto trade approvals + execution updates",
+            "description": "Trade approvals, execution updates + service alerts",
         },
         "service_alerts": {
             "channel_id": -1001234567895,
             "channel_env": "CHANNEL_SERVICE_ALERTS_ID",
             "token_env": "BOT_SERVICE_ALERTS_TOKEN",
-            "description": "Service health, errors, and status alerts",
+            "description": "Combined options screener alerts (temporary two-bot mode)",
         },
     }
     CHANNELS = {category: config["channel_id"] for category, config in BOT_CONFIG.items()}
