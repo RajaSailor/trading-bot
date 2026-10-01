@@ -470,13 +470,13 @@ def initialize_app():
         if (
             AlertManager is not None
             and TelegramAlertChannel is not None
-            and os.getenv("BOT_SERVICE_ALERTS_TOKEN")
-            and runtime_config["channels"].get("service_alerts")
+            and os.getenv("BOT_TRADE_CONTROL_TOKEN")
+            and runtime_config["channels"].get("trade_control")
         ):
             channels.append(
                 TelegramAlertChannel(
-                    bot_token=os.getenv("BOT_SERVICE_ALERTS_TOKEN", ""),
-                    chat_id=runtime_config["channels"]["service_alerts"],
+                    bot_token=os.getenv("BOT_TRADE_CONTROL_TOKEN", ""),
+                    chat_id=runtime_config["channels"]["trade_control"],
                 )
             )
 
