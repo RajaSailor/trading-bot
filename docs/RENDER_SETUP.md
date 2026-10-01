@@ -241,6 +241,17 @@ X-Dhan-Signature: your_signature_here
 3. Check DhanHQ API is online
 4. Check practice mode is appropriate
 
+### Issue: "dhanhq SDK is unavailable" / "TradingView websocket dependency is unavailable"
+
+**Cause:** live scanner dependencies were not installed by the build.
+
+**Solution:**
+1. Confirm Build Command is `pip install -r requirements.txt` (it pins `dhanhq`, `pandas`, `websockets`)
+2. Redeploy with "Clear build cache & deploy"
+3. Check startup logs for `Market data dependency ... available` lines and `/health` → `market_scanner.dependencies`
+4. Without `dhanhq`/`pandas` the scanner stays stopped (API keeps serving); without `websockets` it continues on DhanHQ candles
+5. 10-minute breakouts use native TradingView 10-minute candles, or DhanHQ 5-minute candles aggregated into 10-minute candles (latest incomplete candle excluded)
+
 ### Issue: "No logs appearing"
 
 **Solution:**

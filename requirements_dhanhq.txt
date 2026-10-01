@@ -1,5 +1,2 @@
-dhanhq==2.2.0
-python-telegram-bot==20.0
-pandas==3.0.5
-requests==2.34.2
-python-dotenv==1.0.0
+# DhanHQ dependencies are pinned in requirements.txt (single source of truth).
+-r requirements.txt

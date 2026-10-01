@@ -25,6 +25,7 @@ class TradingViewFetcher:
         "30min": "30",
         "60min": "60",
     }
+    _missing_dependency_logged = False
 
     def __init__(self, cache_ttl_seconds: int = 8, timeout_seconds: int = 10) -> None:
         self.cache_ttl_seconds = cache_ttl_seconds
@@ -70,7 +71,14 @@ class TradingViewFetcher:
         try:
             import websockets
         except ImportError:
-            logger.warning("TradingView websocket dependency is unavailable")
+            if not TradingViewFetcher._missing_dependency_logged:
+                TradingViewFetcher._missing_dependency_logged = True
+                logger.warning(
+                    "TradingView websocket dependency is unavailable (install `websockets` via "
+                    "`pip install -r requirements.txt`); falling back to DhanHQ candles"
+                )
+            else:
+                logger.debug("TradingView websocket dependency is unavailable")
             return []
 
         tv_interval = self.INTERVAL_MAP.get(interval, interval.replace("min", ""))

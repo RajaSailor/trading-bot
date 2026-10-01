@@ -21,6 +21,194 @@ except ImportError:  # pragma: no cover - handled at runtime when SDK is unavail
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
+_IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60
+
+# DhanHQ /v2/charts/intraday only serves these minute intervals natively.
+# Any other interval (e.g. 10min) is built by aggregating a native base interval.
+DHAN_NATIVE_INTERVALS = (1, 5, 15, 25, 60)
+
+# Session start (IST minutes since midnight) used to anchor aggregated buckets so
+# 10-minute candles line up with exchange/TradingView bars (NSE/BSE 09:15, MCX 09:00).
+_SESSION_ANCHOR_MINUTES = {
+    "MCX_COMM": 9 * 60,
+    "MCX_OPT": 9 * 60,
+}
+_DEFAULT_SESSION_ANCHOR_MINUTES = 9 * 60 + 15
+
+# Optional runtime dependencies used by the live market scanner data sources.
+MARKET_DATA_DEPENDENCIES = {
+    "dhanhq": "DhanHQ security master + intraday candles (required for the scanner)",
+    "pandas": "DhanHQ security master DataFrame (required for the scanner)",
+    "websockets": "TradingView websocket candles (optional, falls back to DhanHQ)",
+}
+REQUIRED_SCANNER_DEPENDENCIES = ("dhanhq", "pandas")
+
+
+def market_data_dependency_status() -> Dict[str, bool]:
+    """Return which optional market-data packages are importable."""
+    import importlib.util
+
+    status: Dict[str, bool] = {}
+    for name in MARKET_DATA_DEPENDENCIES:
+        try:
+            status[name] = importlib.util.find_spec(name) is not None
+        except (ImportError, ValueError):
+            status[name] = False
+    if DhanContext is None or dhanhq is None:
+        status["dhanhq"] = False
+    return status
+
+
+def log_market_data_dependency_status(status: Optional[Dict[str, bool]] = None) -> Dict[str, bool]:
+    """Log actionable diagnostics for scanner data-source dependencies."""
+    status = status if status is not None else market_data_dependency_status()
+    for name, purpose in MARKET_DATA_DEPENDENCIES.items():
+        if status.get(name):
+            logger.info("✅ Market data dependency '%s' available: %s", name, purpose)
+        elif name in REQUIRED_SCANNER_DEPENDENCIES:
+            logger.error(
+                "❌ Market data dependency '%s' is missing: %s. "
+                "Install it with `pip install -r requirements.txt` (Render build command).",
+                name,
+                purpose,
+            )
+        else:
+            logger.warning(
+                "⚠️ Market data dependency '%s' is missing: %s. Continuing with DhanHQ candles.",
+                name,
+                purpose,
+            )
+    return status
+
+
+def _parse_interval_minutes(interval: Any) -> int:
+    return int(str(interval).replace("min", "").strip())
+
+
+def _dhan_base_interval(target_minutes: int) -> int:
+    """Largest native DhanHQ interval that evenly divides ``target_minutes``."""
+    for base in sorted(DHAN_NATIVE_INTERVALS, reverse=True):
+        if base < target_minutes and target_minutes % base == 0:
+            return base
+    return 1
+
+
+def _session_anchor_minutes(exchange_segment: str) -> int:
+    return _SESSION_ANCHOR_MINUTES.get(str(exchange_segment).upper(), _DEFAULT_SESSION_ANCHOR_MINUTES)
+
+
+def _timestamp_to_epoch(value: Any) -> Optional[float]:
+    """Convert epoch numbers / numeric strings / ISO strings to epoch seconds.
+
+    Naive ISO datetimes are interpreted as IST (exchange time).
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            epoch = float(value)
+            return epoch / 1000.0 if epoch > 1e11 else epoch
+        except (TypeError, ValueError):
+            pass
+        try:
+            parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=IST)
+    return parsed.timestamp()
+
+
+def _format_bucket_timestamp(bucket_epoch: int, template: Any) -> Any:
+    """Render a bucket timestamp in the same style as the source candles."""
+    if isinstance(template, (int, float)) or (
+        isinstance(template, str) and template.strip().lstrip("-").replace(".", "", 1).isdigit()
+    ):
+        return int(bucket_epoch)
+    bucket_dt = datetime.fromtimestamp(bucket_epoch, IST)
+    template_dt = template if isinstance(template, datetime) else None
+    if template_dt is None and isinstance(template, str):
+        try:
+            template_dt = datetime.fromisoformat(template.strip().replace("Z", "+00:00"))
+        except ValueError:
+            template_dt = None
+    if template_dt is not None and template_dt.tzinfo is None:
+        bucket_dt = bucket_dt.replace(tzinfo=None)
+    if isinstance(template, datetime):
+        return bucket_dt
+    return bucket_dt.isoformat()
+
+
+def aggregate_candles(
+    candles: List[dict],
+    target_minutes: int,
+    anchor_minutes: int = 0,
+    now: Optional[float] = None,
+    drop_incomplete: bool = True,
+) -> List[dict]:
+    """Aggregate smaller OHLCV candles (e.g. 5min) into ``target_minutes`` candles.
+
+    Buckets are aligned to ``target_minutes`` boundaries in IST, anchored at
+    ``anchor_minutes`` after IST midnight (session start). For each bucket:
+    open=first open, high=max high, low=min low, close=last close and
+    volume=sum of volumes (when present). When ``drop_incomplete`` is true, a
+    bucket whose end time is still in the future (relative to ``now``) is
+    excluded so a still-forming candle cannot produce a breakout signal.
+    """
+    if target_minutes <= 0:
+        raise ValueError("target_minutes must be positive")
+
+    bucket_seconds = target_minutes * 60
+    anchor_seconds = (anchor_minutes * 60) % bucket_seconds
+    now_epoch = time.time() if now is None else float(now)
+
+    parsed: List[Tuple[float, dict]] = []
+    for candle in candles or []:
+        epoch = _timestamp_to_epoch(candle.get("timestamp"))
+        if epoch is None:
+            logger.debug("Skipping candle without usable timestamp during aggregation: %s", candle)
+            continue
+        parsed.append((epoch, candle))
+    parsed.sort(key=lambda item: item[0])
+
+    buckets: Dict[int, dict] = {}
+    order: List[int] = []
+    for epoch, candle in parsed:
+        local_seconds = epoch + _IST_OFFSET_SECONDS - anchor_seconds
+        bucket_start = int(local_seconds // bucket_seconds * bucket_seconds + anchor_seconds - _IST_OFFSET_SECONDS)
+        open_, high, low, close = (
+            float(candle["open"]),
+            float(candle["high"]),
+            float(candle["low"]),
+            float(candle["close"]),
+        )
+        bucket = buckets.get(bucket_start)
+        if bucket is None:
+            bucket = {
+                "timestamp": _format_bucket_timestamp(bucket_start, candle.get("timestamp")),
+                "open": open_,
+                "high": high,
+                "low": low,
+                "close": close,
+            }
+            buckets[bucket_start] = bucket
+            order.append(bucket_start)
+        else:
+            bucket["high"] = max(bucket["high"], high)
+            bucket["low"] = min(bucket["low"], low)
+            bucket["close"] = close
+        if candle.get("volume") is not None:
+            bucket["volume"] = bucket.get("volume", 0.0) + float(candle["volume"])
+
+    aggregated: List[dict] = []
+    for bucket_start in order:
+        if drop_incomplete and bucket_start + bucket_seconds > now_epoch:
+            logger.debug("Dropping incomplete %smin bucket starting at %s", target_minutes, bucket_start)
+            continue
+        aggregated.append(buckets[bucket_start])
+    return aggregated
 
 # Global rate limiter to prevent DH-904 errors
 _api_rate_limiter = {
@@ -397,7 +585,61 @@ class DataManager:
         interval: int = 5,
         symbol: str = "UNKNOWN"
     ) -> List[dict]:
-        """Fetch intraday candles via DhanHQ intraday endpoint."""
+        """Fetch intraday candles via DhanHQ, aggregating non-native intervals.
+
+        DhanHQ only serves 1/5/15/25/60-minute candles. For other intervals
+        (e.g. the 10-minute breakout timeframe) a native base interval is fetched
+        and aggregated into session-aligned OHLCV buckets in IST; the still-forming
+        latest bucket is excluded.
+        """
+        interval_minutes = _parse_interval_minutes(interval)
+        if interval_minutes in DHAN_NATIVE_INTERVALS:
+            return self._request_dhan_intraday_data(
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                instrument_type=instrument_type,
+                from_date=from_date,
+                to_date=to_date,
+                interval=interval_minutes,
+                symbol=symbol,
+            )
+
+        base_interval = _dhan_base_interval(interval_minutes)
+        logger.debug(
+            f"[{symbol}] DhanHQ has no native {interval_minutes}min candles; "
+            f"aggregating {base_interval}min candles"
+        )
+        base_candles = self._request_dhan_intraday_data(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            instrument_type=instrument_type,
+            from_date=from_date,
+            to_date=to_date,
+            interval=base_interval,
+            symbol=symbol,
+        )
+        candles = aggregate_candles(
+            base_candles,
+            interval_minutes,
+            anchor_minutes=_session_anchor_minutes(exchange_segment),
+        )
+        logger.debug(
+            f"[{symbol}] Aggregated {len(base_candles)} x {base_interval}min candles "
+            f"into {len(candles)} x {interval_minutes}min candles"
+        )
+        return candles
+
+    def _request_dhan_intraday_data(
+        self,
+        security_id: int,
+        exchange_segment: str,
+        instrument_type: str,
+        from_date: str,
+        to_date: str,
+        interval: int = 5,
+        symbol: str = "UNKNOWN"
+    ) -> List[dict]:
+        """Fetch native-interval intraday candles via DhanHQ intraday endpoint."""
         try:
             access_token = os.getenv("ACCESS_TOKEN")
             if not access_token:
@@ -649,7 +891,10 @@ class DataManager:
                 return self._security_master_cache
 
             if DhanContext is None or dhanhq is None:
-                logger.error("dhanhq SDK is unavailable for security master fetch")
+                logger.error(
+                    "dhanhq SDK is unavailable for security master fetch; "
+                    "install it with `pip install -r requirements.txt` (dhanhq + pandas)"
+                )
                 return self._security_master_cache
 
             dhan_context = DhanContext(api_key, access_token)

@@ -519,12 +519,20 @@ def initialize_app():
                 runtime_config=runtime_config,
             )
             scanner_started = market_scanner_worker.start(runtime_config["scanner_poll_seconds"])
-            phase_components["market_scanner"] = market_scanner_worker.enabled
-            logger.info(
-                "   %s Market scanner %s",
-                "✅" if market_scanner_worker.enabled else "⚠️",
-                "started" if scanner_started else "disabled",
-            )
+            scanner_status = market_scanner_worker.status()
+            scanner_running = scanner_started or bool(scanner_status.get("running"))
+            phase_components["market_scanner"] = market_scanner_worker.enabled and scanner_running
+            if market_scanner_worker.enabled and not scanner_running:
+                logger.error(
+                    "   ❌ Market scanner enabled but not started: %s",
+                    scanner_status.get("last_error") or "unknown error",
+                )
+            else:
+                logger.info(
+                    "   %s Market scanner %s",
+                    "✅" if market_scanner_worker.enabled else "⚠️",
+                    "started" if scanner_running else "disabled",
+                )
         else:
             phase_components["market_scanner"] = False
             logger.warning("   ⚠️ Market scanner unavailable")

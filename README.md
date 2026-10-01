@@ -638,6 +638,39 @@ PRACTICE_MODE=true
 # ... (add all from .env)
 ```
 
+### **Live Market Scanner: Runtime Dependencies & 10-Minute Candles**
+
+The live screener (`ENABLE_MARKET_SCANNER=true`, requires `ACCESS_TOKEN` and `API_KEY`)
+needs these packages, all pinned in `requirements.txt` (Render installs only that file):
+
+| Package | Used for | If missing |
+|---|---|---|
+| `dhanhq` | Security master lookup (`DhanContext`, `fetch_security_list`) + DhanHQ candles | Scanner **does not start** (API keeps running); logs `Market scanner cannot start: missing dhanhq` |
+| `pandas` | Security master DataFrame returned by `dhanhq` | Scanner **does not start** |
+| `websockets` | TradingView websocket candles (primary source) | Warning logged once; scanner continues on DhanHQ candles |
+
+At startup the scanner logs one `Market data dependency ...` line per package, and
+`/health` → `market_scanner.dependencies` shows the detected status.
+
+All active categories (commodity options, index options, NIFTY50 stock options and
+stock spot) evaluate **10-minute breakouts**:
+
+- **TradingView** serves native 10-minute candles.
+- **DhanHQ** intraday only offers 1/5/15/25/60-minute candles, so the bot fetches
+  **5-minute candles and aggregates them into 10-minute OHLCV candles**
+  (open = first open, high = max high, low = min low, close = last close,
+  volume = sum). Buckets are aligned in IST to the session start (NSE/BSE 09:15,
+  MCX 09:00), and the still-forming latest bucket is excluded so partial candles
+  cannot trigger breakouts. This applies to ATM option premium candles and to
+  the DhanHQ fallback for underlying/spot candles.
+
+**Render operational notes:** after deploying, the logs should contain no
+`dhanhq SDK is unavailable` / `TradingView websocket dependency is unavailable`
+lines. If they appear, clear the build cache and redeploy (Manual Deploy →
+"Clear build cache & deploy"). With the scanner enabled during market hours,
+look for `✅ [GOLD] Got N CE candles`. Keep `PRACTICE_MODE=true` /
+`AUTO_TRADING_ENABLED=false` while verifying.
+
 ### **Step 4: Add Webhook to DhanHQ**
 
 In DhanHQ account settings:
