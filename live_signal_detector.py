@@ -58,6 +58,15 @@ class LiveSignalDetector:
             return False
 
         reference_now = now if now.tzinfo else now.replace(tzinfo=UTC)
+        try:
+            # DhanHQ / TradingView candles carry epoch-second timestamps.
+            epoch = float(timestamp)
+            if epoch > 1e11:
+                epoch /= 1000.0
+            return abs(reference_now - datetime.fromtimestamp(epoch, UTC)) <= self.freshness
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+
         for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%H:%M", "%H:%M:%S"):
             try:
                 parsed = datetime.strptime(timestamp, fmt)

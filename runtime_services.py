@@ -6,7 +6,12 @@ from time import monotonic
 import time
 from typing import Callable, Optional
 
-from data_manager import DataManager
+from data_manager import (
+    REQUIRED_SCANNER_DEPENDENCIES,
+    DataManager,
+    log_market_data_dependency_status,
+    market_data_dependency_status,
+)
 from order_executor import Order, OrderExecutor, OrderStatus
 from screener_premium import PremiumScreener
 from telegram_handler import (
@@ -347,11 +352,31 @@ class MarketScannerWorker:
         self._last_run_at: str | None = None
         self._last_error: str | None = None
         self._submitted_signals = 0
+        self._dependencies: dict[str, bool] = {}
+
+    def check_dependencies(self) -> bool:
+        """Log data-source dependency diagnostics; return False if the scanner cannot run."""
+        self._dependencies = log_market_data_dependency_status(market_data_dependency_status())
+        missing = [name for name in REQUIRED_SCANNER_DEPENDENCIES if not self._dependencies.get(name)]
+        if missing:
+            self._last_error = f"missing_dependencies: {', '.join(missing)}"
+            logger.error(
+                "❌ Market scanner cannot start: missing %s. Add them to the deployment "
+                "(Render build command `pip install -r requirements.txt`) and redeploy. "
+                "API service keeps running without the scanner.",
+                ", ".join(missing),
+            )
+            return False
+        if not self._dependencies.get("websockets"):
+            logger.warning("⚠️ TradingView source unavailable; market scanner will use DhanHQ candles only")
+        return True
 
     def start(self, poll_seconds: float = 5.0) -> bool:
         if not self.enabled:
             return False
         if self._thread and self._thread.is_alive():
+            return False
+        if not self.check_dependencies():
             return False
         self._stop_event.clear()
         self._scanner = self._scanner or self._build_scanner()
@@ -376,6 +401,7 @@ class MarketScannerWorker:
             "submitted_signals": self._submitted_signals,
             "last_run_at": self._last_run_at,
             "last_error": self._last_error,
+            "dependencies": dict(self._dependencies),
         }
 
     def run_forever(self, poll_seconds: float = 5.0) -> None:
