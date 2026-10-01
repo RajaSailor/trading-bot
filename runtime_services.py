@@ -9,7 +9,12 @@ from typing import Callable, Optional
 from data_manager import DataManager
 from order_executor import Order, OrderExecutor, OrderStatus
 from screener_premium import PremiumScreener
-from telegram_handler import TelegramHandler
+from telegram_handler import (
+    DISABLED_CATEGORIES,
+    SCREENER_CATEGORIES,
+    SCREENER_CATEGORY_ALIASES,
+    TelegramHandler,
+)
 from timezone_utils import ensure_timezone, now_local_iso
 
 
@@ -30,17 +35,11 @@ TRADE_CONTROL_CHANNEL = "trade_control"
 # carries the combined options screener alerts.
 SCREENER_ALERTS_CHANNEL = "service_alerts"
 
-# Only the three screener segments are supported. Derived from the handler aliases
-# (including legacy spellings) so adding or removing a segment is a single edit.
-SUPPORTED_STRATEGY_CATEGORIES = {
-    category
-    for category, target in TelegramHandler.CHANNEL_ALIASES.items()
-    if target == SCREENER_ALERTS_CHANNEL and category != "service"
-}
+# Only the three screener segments are supported (canonical names + legacy spellings).
+SUPPORTED_STRATEGY_CATEGORIES = SCREENER_CATEGORIES | SCREENER_CATEGORY_ALIASES
 
-# Retired segments: never generated and never routed. Shared with the Telegram
-# handler so the two surfaces cannot drift apart.
-DISABLED_STRATEGY_CATEGORIES = TelegramHandler.DISABLED_CATEGORIES
+# Retired segments: never generated and never routed.
+DISABLED_STRATEGY_CATEGORIES = DISABLED_CATEGORIES
 
 
 class SignalNotifier:

@@ -13,6 +13,15 @@ import requests
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
+# Canonical screener segments carried by the combined screener channel.
+SCREENER_CATEGORIES = frozenset({"index_options", "commodity_options", "nifty50_stock_options"})
+# Legacy spellings of the same three segments.
+SCREENER_CATEGORY_ALIASES = frozenset({"index", "commodity", "nifty50_options"})
+# Retired segments: alerts for these categories are rejected, never delivered.
+DISABLED_CATEGORIES = frozenset(
+    {"crypto", "nifty50_intraday_5x", "nifty50_5x", "nifty50_pay_later", "nifty50_paylater"}
+)
+
 
 class TelegramHandler:
     """Telegram delivery for the final two-bot routing model.
@@ -43,23 +52,11 @@ class TelegramHandler:
     CHANNELS = {category: config["channel_id"] for category, config in BOT_CONFIG.items()}
     # The three supported screener segments all deliver to the single screener bot.
     CHANNEL_ALIASES = {
-        "index_options": "service_alerts",
-        "index": "service_alerts",
-        "commodity_options": "service_alerts",
-        "commodity": "service_alerts",
-        "nifty50_stock_options": "service_alerts",
-        "nifty50_options": "service_alerts",
+        **{category: "service_alerts" for category in SCREENER_CATEGORIES | SCREENER_CATEGORY_ALIASES},
         "trade": "trade_control",
         "service": "service_alerts",
     }
-    # Retired segments: alerts for these categories are rejected, never delivered.
-    DISABLED_CATEGORIES = {
-        "crypto",
-        "nifty50_intraday_5x",
-        "nifty50_5x",
-        "nifty50_pay_later",
-        "nifty50_paylater",
-    }
+    DISABLED_CATEGORIES = DISABLED_CATEGORIES
 
     def __init__(self, token: Optional[str] = None) -> None:
         self.default_token = token or self._env_first("TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN")
@@ -103,7 +100,9 @@ class TelegramHandler:
     @classmethod
     def is_disabled_category(cls, category: str) -> bool:
         """Retired categories (crypto, NIFTY50 5X, NIFTY50 pay-later) are never routed."""
-        return category in cls.DISABLED_CATEGORIES
+        if not isinstance(category, str):
+            return False
+        return category.lower() in cls.DISABLED_CATEGORIES
 
     def _get_bot_for_category(self, category: str) -> tuple[str, int]:
         normalized_category = self.CHANNEL_ALIASES.get(category, category)

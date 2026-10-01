@@ -9,6 +9,7 @@ from atm_options_fetcher import ATMOptionsFetcher
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import PremiumStrategyEngine
 from strategy_engine import StrategyEngine
+from telegram_handler import SCREENER_CATEGORIES
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -16,11 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Only these three segments are screened and alerted; crypto, NIFTY50 intraday 5X
 # and NIFTY50 pay-later segments are retired.
-SUPPORTED_SCREENER_CATEGORIES = {
-    "index_options",
-    "commodity_options",
-    "nifty50_stock_options",
-}
+SUPPORTED_SCREENER_CATEGORIES = SCREENER_CATEGORIES
 
 
 class PremiumScreener:
