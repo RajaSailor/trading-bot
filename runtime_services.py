@@ -19,6 +19,34 @@ INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "SENSEX"}
 COMMODITY_SYMBOLS = {"GOLD", "SILVER", "CRUDE", "CRUDEOIL", "NATURALGAS", "MCXGOLD", "MCXSILVER", "MCXCRUDE", "MCXNATURALGAS"}
 CRYPTO_SYMBOLS = {"BTC", "ETH", "BTCUSD", "ETHUSD"}
 
+# Final two-bot operating model:
+# - trade_control: automated/paper trade lifecycle updates + all system/service alerts
+# - service_alerts: combined options market screener (strategy) alerts
+TRADE_CONTROL_CHANNEL = "trade_control"
+# The "service_alerts" key and its BOT_SERVICE_ALERTS_TOKEN / CHANNEL_SERVICE_ALERTS_ID
+# env names are intentionally retained for deployment compatibility; the route now
+# carries the combined options screener alerts.
+SCREENER_ALERTS_CHANNEL = "service_alerts"
+
+# Only these three screener segments are supported (aliases included).
+SUPPORTED_STRATEGY_CATEGORIES = {
+    "index_options",
+    "index",
+    "commodity_options",
+    "commodity",
+    "nifty50_stock_options",
+    "nifty50_options",
+}
+
+# Retired segments: never generated and never routed.
+DISABLED_STRATEGY_CATEGORIES = {
+    "crypto",
+    "nifty50_intraday_5x",
+    "nifty50_5x",
+    "nifty50_pay_later",
+    "nifty50_paylater",
+}
+
 
 class SignalNotifier:
     def __init__(self, telegram_handler: TelegramHandler, metrics_collector=None) -> None:
@@ -42,7 +70,7 @@ class SignalNotifier:
             f"Strategy: {signal.get('strategy', 'default')}\n"
             f"Time: {signal.get('timestamp', now_local_iso())}"
         )
-        self._send("trade_control", message)
+        self._send(TRADE_CONTROL_CHANNEL, message)
 
     def notify_strategy_signal(self, signal: dict) -> None:
         message = (
@@ -66,9 +94,7 @@ class SignalNotifier:
             f"Order ID: {order.order_id}\n"
             f"Time: {order.updated_at}"
         )
-        for channel in self.channels_for_signal(signal):
-            self._send(channel, message)
-        self._send("trade_control", message)
+        self._send(TRADE_CONTROL_CHANNEL, message)
 
     def notify_position_update(self, signal: dict, quantity: int, average_price: float) -> None:
         message = (
@@ -78,11 +104,10 @@ class SignalNotifier:
             f"Average Price: {average_price:.2f}\n"
             f"Time: {now_local_iso()}"
         )
-        for channel in self.channels_for_signal(signal):
-            self._send(channel, message)
+        self._send(TRADE_CONTROL_CHANNEL, message)
 
     def notify_service_alert(self, title: str, message: str) -> None:
-        self._send("service_alerts", f"⚠️ {title}\n{message}\nTime: {now_local_iso()}")
+        self._send(TRADE_CONTROL_CHANNEL, f"⚠️ {title}\n{message}\nTime: {now_local_iso()}")
 
     def send_test_message(self, channel: str, message: str) -> bool:
         return self._send(channel, f"🧪 {message}\nTime: {now_local_iso()}")
@@ -93,19 +118,12 @@ class SignalNotifier:
             or signal.get("metadata", {}).get("route_category")
             or self._category_from_symbol(signal.get("symbol", ""))
         )
-        if category in {"nifty50_stock_options", "nifty50_options"}:
-            return ["nifty50_options", "nifty50_5x", "nifty50_pay_later"]
-        if category in {"nifty50_intraday_5x", "nifty50_5x"}:
-            return ["nifty50_5x"]
-        if category in {"nifty50_pay_later", "nifty50_paylater"}:
-            return ["nifty50_pay_later"]
-        if category in {"index_options", "index"}:
-            return ["index"]
-        if category in {"commodity_options", "commodity"}:
-            return ["commodity"]
-        if category == "crypto":
-            return ["crypto"]
-        return ["trade_control"]
+        if category in DISABLED_STRATEGY_CATEGORIES:
+            logger.info("Strategy category '%s' is disabled; alert not routed", category)
+            return []
+        if category in SUPPORTED_STRATEGY_CATEGORIES:
+            return [SCREENER_ALERTS_CHANNEL]
+        return [TRADE_CONTROL_CHANNEL]
 
     def _category_from_symbol(self, symbol: str) -> str:
         normalized = "".join(ch for ch in symbol.upper() if ch.isalnum())
