@@ -48,7 +48,8 @@ class LiveSignalDetector:
 
     def forget(self, key: str) -> None:
         """Drop ``key`` so a signal whose delivery failed can be emitted again."""
-        self._signals.pop(key, None)
+        if self._signals.pop(key, None) is not None:
+            self._order = deque(entry for entry in self._order if entry[0] != key)
 
     def _evict_if_needed(self) -> None:
         while len(self._order) > self.cache_size:

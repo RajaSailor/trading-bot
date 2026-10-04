@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 from typing import Dict, FrozenSet, Iterable, Optional
 from zoneinfo import ZoneInfo
 
@@ -111,7 +112,11 @@ def _to_ist(now: Optional[datetime]) -> datetime:
 
 
 def _extra_holidays(exchange: str) -> FrozenSet[date]:
-    raw = os.getenv("EXCHANGE_EXTRA_HOLIDAYS", "")
+    return _parse_extra_holidays(os.getenv("EXCHANGE_EXTRA_HOLIDAYS", ""), exchange)
+
+
+@lru_cache(maxsize=32)
+def _parse_extra_holidays(raw: str, exchange: str) -> FrozenSet[date]:
     if not raw.strip():
         return frozenset()
     result = set()

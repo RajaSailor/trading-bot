@@ -384,7 +384,7 @@ def _env_seconds(name: str, default: float, minimum: float) -> float:
     try:
         return max(minimum, float(os.getenv(name, default)))
     except (TypeError, ValueError):
-        return default
+        return max(minimum, default)
 
 
 class MarketScannerWorker:

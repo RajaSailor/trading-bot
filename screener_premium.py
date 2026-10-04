@@ -246,8 +246,9 @@ class PremiumScreener:
                 if exchange_for_instrument(state["instrument"]) not in open_now
             ]:
                 self._monitored.pop(security_id, None)
+        by_symbol = {i.symbol: i for i in self.option_instruments()}
         for symbol in list(self._refresh_state):
-            instrument = next((i for i in self.option_instruments() if i.symbol == symbol), None)
+            instrument = by_symbol.get(symbol)
             if instrument is None or exchange_for_instrument(instrument) not in open_now:
                 self._refresh_state.pop(symbol, None)
 
@@ -294,17 +295,29 @@ class PremiumScreener:
             if signal is None:
                 continue
             contract["premium_ltp"] = round(float(price), 2)
-            alerts += self._emit(state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now)
+            alerts += self._emit(
+                state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now, require_armed=True
+            )
         return alerts
 
     # ================================================================ emit
-    def _emit(self, state: dict, signal: dict, latency_marks: dict, now: datetime | None = None) -> int:
+    def _emit(
+        self,
+        state: dict,
+        signal: dict,
+        latency_marks: dict,
+        now: datetime | None = None,
+        require_armed: bool = False,
+    ) -> int:
         instrument = state["instrument"]
         contract = state["contract"]
         signal_key = self._signal_key(instrument.category, {**signal, "option_symbol": contract["option_symbol"]})
         with self._lock:
             reference = state.get("reference")
             was_armed = bool(reference.get("armed")) if reference is not None else False
+            if require_armed and not was_armed:
+                # Another thread already consumed this reference.
+                return 0
             if reference is not None:
                 # Each RED reference fires at most once (live or candle).
                 reference["armed"] = False
