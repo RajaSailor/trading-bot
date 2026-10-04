@@ -46,6 +46,11 @@ class LiveSignalDetector:
         self._evict_if_needed()
         return True
 
+    def forget(self, key: str) -> None:
+        """Drop ``key`` so a signal whose delivery failed can be emitted again."""
+        if self._signals.pop(key, None) is not None:
+            self._order = deque(entry for entry in self._order if entry[0] != key)
+
     def _evict_if_needed(self) -> None:
         while len(self._order) > self.cache_size:
             expired_key, expired_breakout = self._order.popleft()
@@ -70,6 +75,14 @@ class LiveSignalDetector:
                 return abs(reference_now - datetime.fromtimestamp(epoch, UTC)) <= self.freshness
             except (OverflowError, OSError, ValueError):
                 return False
+
+        try:
+            aware = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            aware = None
+        if aware is not None and aware.tzinfo is not None:
+            # Offset-aware ISO timestamps (e.g. live LTP triggers in IST).
+            return abs(reference_now - aware) <= self.freshness
 
         for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%H:%M", "%H:%M:%S"):
             try:

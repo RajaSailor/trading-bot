@@ -4,6 +4,27 @@ from unittest.mock import Mock, patch
 
 import data_manager
 from data_manager import DataManager
+from security_master import SecurityMasterCache
+
+
+def _row(security_id, trading_symbol, instrument, exchange="NSE", expiry="", strike="0", side="XX", sm_symbol_name=""):
+    return {
+        "SEM_EXM_EXCH_ID": exchange,
+        "SEM_SEGMENT": "I" if instrument == "INDEX" else ("M" if exchange == "MCX" else "D"),
+        "SEM_SMST_SECURITY_ID": str(security_id),
+        "SEM_INSTRUMENT_NAME": instrument,
+        "SEM_TRADING_SYMBOL": trading_symbol,
+        "SEM_LOT_UNITS": "1",
+        "SEM_EXPIRY_DATE": expiry,
+        "SEM_STRIKE_PRICE": strike,
+        "SEM_OPTION_TYPE": side,
+        "SEM_SERIES": "",
+        "SM_SYMBOL_NAME": sm_symbol_name,
+    }
+
+
+def _manager(rows):
+    return DataManager(security_master=SecurityMasterCache(row_source=lambda: iter(rows)))
 
 
 class DataManagerISTTests(unittest.TestCase):
@@ -25,111 +46,54 @@ class DataManagerISTTests(unittest.TestCase):
         ):
             manager.fetch_dhanhq_candles("NIFTY", "5min")
 
-        self.assertEqual("2026-09-09", mocked_fetch.call_args.kwargs["from_date"])
+        # The previous trading session is included so the 20-candle lookback is
+        # available from the open.
+        self.assertEqual("2026-09-08", mocked_fetch.call_args.kwargs["from_date"])
         self.assertEqual("2026-09-09", mocked_fetch.call_args.kwargs["to_date"])
 
-    def test_fetch_security_master_uses_cached_response(self):
-        manager = DataManager()
+    def test_security_master_is_loaded_once_and_shared(self):
+        loads = []
 
-        class FakeDataFrame:
-            def __init__(self, records):
-                self._records = records
-                self.columns = Mock()
-                self.columns.tolist.return_value = list(records[0].keys())
+        def row_source():
+            loads.append(1)
+            return iter([_row(13, "NIFTY", "INDEX")])
 
-            @property
-            def empty(self):
-                return not self._records
+        cache = SecurityMasterCache(row_source=row_source)
+        first = DataManager(security_master=cache)
+        second = DataManager(security_master=cache)
 
-            def __len__(self):
-                return len(self._records)
+        self.assertIs(first.security_index(), second.security_index())
+        self.assertEqual(1, len(loads))
 
-            def to_dict(self, orient):
-                self.last_orient = orient
-                return list(self._records)
-
-        fake_client = Mock()
-        fake_client.fetch_security_list.return_value = FakeDataFrame(
+    def test_find_security_id_matches_exact_universe_roots(self):
+        manager = _manager(
             [
-                {
-                    "SM_SYMBOL_NAME": "NIFTY 50",
-                    "SEM_EXM_EXCH_ID": "NSE",
-                    "SEM_SMST_SECURITY_ID": "12345",
-                },
-                {
-                    "SM_SYMBOL_NAME": "GOLD",
-                    "SEM_EXM_EXCH_ID": "MCX",
-                    "SEM_SMST_SECURITY_ID": "67890",
-                },
+                _row(999, "BANKNIFTY", "INDEX"),
+                _row(111, "NIFTY", "INDEX"),
+                _row(888, "GOLDM-05Dec2099-FUT", "FUTCOM", "MCX", "2099-12-05 23:59:00", "-0.01", sm_symbol_name="GOLDM"),
+                _row(222, "GOLD-05Dec2099-FUT", "FUTCOM", "MCX", "2099-12-05 23:59:00", "-0.01", sm_symbol_name="GOLD"),
+                _row(333, "CRUDEOIL-18Dec2099-FUT", "FUTCOM", "MCX", "2099-12-18 23:59:00", "-0.01"),
             ]
         )
 
-        with (
-            patch.dict("os.environ", {"API_KEY": "api-key", "ACCESS_TOKEN": "token"}, clear=False),
-            patch("data_manager.DhanContext", return_value="context") as mocked_context,
-            patch("data_manager.dhanhq", return_value=fake_client) as mocked_dhanhq,
-        ):
-            first = manager._fetch_security_master_with_cache()
-            second = manager._fetch_security_master_with_cache()
+        self.assertEqual(111, manager._find_security_id("nifty", "IDX_I"))
+        self.assertEqual(999, manager._find_security_id("BANKNIFTY", "IDX_I"))
+        self.assertEqual(222, manager._find_security_id("gold", "MCX_COMM"))
+        self.assertEqual(333, manager._find_security_id("CRUDE OIL", "MCX_COMM"))
 
-        self.assertEqual(first, second)
-        mocked_context.assert_called_once_with("api-key", "token")
-        mocked_dhanhq.assert_called_once_with("context")
-        fake_client.fetch_security_list.assert_called_once_with("compact")
-        self.assertEqual(2, len(first))
+    def test_find_security_id_uses_index_segment_not_futures(self):
+        manager = _manager(
+            [
+                _row(1001, "NIFTY-Dec2099-FUT", "FUTIDX", expiry="2099-12-30 14:30:00", strike="-0.01"),
+                _row(13, "NIFTY", "INDEX"),
+                _row(25, "BANKNIFTY", "INDEX"),
+                _row(51, "SENSEX", "INDEX", exchange="BSE"),
+            ]
+        )
 
-    def test_find_security_id_matches_sdk_security_master_fields(self):
-        manager = DataManager()
-        manager._security_master_cache = [
-            {"SM_SYMBOL_NAME": "BANKNIFTY", "SEM_EXM_EXCH_ID": "NSE", "SEM_SMST_SECURITY_ID": "999"},
-            {"SM_SYMBOL_NAME": "NIFTY 50", "SEM_EXM_EXCH_ID": "NSE", "SEM_SMST_SECURITY_ID": "111"},
-            {"SM_SYMBOL_NAME": "GOLDM", "SEM_EXM_EXCH_ID": "MCX", "SEM_SMST_SECURITY_ID": "888"},
-            {"SM_SYMBOL_NAME": "GOLD", "SEM_EXM_EXCH_ID": "MCX", "SEM_SMST_SECURITY_ID": "222"},
-            {"SM_SYMBOL_NAME": "CRUDEOIL", "SEM_EXM_EXCH_ID": "MCX", "SEM_SMST_SECURITY_ID": "333"},
-        ]
-        manager._security_master_cache_ts = datetime.now().timestamp()
-
-        security_id = manager._find_security_id("nifty", "NSE_FNO")
-        commodity_security_id = manager._find_security_id("gold", "MCX_COMM")
-        crude_oil_security_id = manager._find_security_id("CRUDE OIL", "MCX_COMM")
-
-        self.assertEqual(111, security_id)
-        self.assertEqual(222, commodity_security_id)
-        self.assertEqual(333, crude_oil_security_id)
-
-    def test_find_security_id_uses_index_aliases(self):
-        manager = DataManager()
-        manager._security_master_cache = [
-            {
-                "SM_SYMBOL_NAME": "NIFTY 50",
-                "SEM_EXM_EXCH_ID": "NSE",
-                "SEM_SMST_SECURITY_ID": "1001",
-                "SEM_EXCH_INSTRUMENT_TYPE": "FUTIDX",
-            },
-            {
-                "SM_SYMBOL_NAME": "NIFTYBANK",
-                "SEM_EXM_EXCH_ID": "NSE",
-                "SEM_SMST_SECURITY_ID": "1999",
-                "SEM_EXCH_INSTRUMENT_TYPE": "OPTIDX",
-            },
-            {
-                "SM_SYMBOL_NAME": "NIFTYBANK",
-                "SEM_EXM_EXCH_ID": "NSE",
-                "SEM_SMST_SECURITY_ID": "1002",
-                "SEM_EXCH_INSTRUMENT_TYPE": "FUTIDX",
-            },
-            {
-                "SM_SYMBOL_NAME": "BSE SENSEX",
-                "SEM_EXM_EXCH_ID": "BSE",
-                "SEM_SMST_SECURITY_ID": "1003",
-                "SEM_EXCH_INSTRUMENT_TYPE": "FUTIDX",
-            },
-        ]
-        manager._security_master_cache_ts = datetime.now().timestamp()
-
-        self.assertEqual(1001, manager._find_security_id("NIFTY", "NSE_FNO", "FUTIDX"))
-        self.assertEqual(1002, manager._find_security_id("BANKNIFTY", "NSE_FNO", "FUTIDX"))
-        self.assertEqual(1003, manager._find_security_id("SENSEX", "BSE_FNO", "FUTIDX"))
+        self.assertEqual(13, manager._find_security_id("NIFTY", "IDX_I", "INDEX"))
+        self.assertEqual(25, manager._find_security_id("BANKNIFTY", "IDX_I", "INDEX"))
+        self.assertEqual(51, manager._find_security_id("SENSEX", "IDX_I", "INDEX"))
 
     def test_fetch_dhanhq_candles_resolves_dynamic_security_id(self):
         manager = DataManager()
@@ -150,7 +114,7 @@ class DataManagerISTTests(unittest.TestCase):
             candles = manager.fetch_dhanhq_candles("BANKNIFTY", "5min")
 
         self.assertEqual([{"close": 1.5}], candles)
-        mocked_find.assert_called_once_with("BANKNIFTY", "NSE_FNO", "FUTIDX")
+        mocked_find.assert_called_once_with("BANKNIFTY", "IDX_I", "INDEX")
         self.assertEqual(98765, mocked_fetch.call_args.kwargs["security_id"])
 
     def test_instrument_universe_covers_all_option_categories(self):
@@ -162,12 +126,13 @@ class DataManagerISTTests(unittest.TestCase):
         self.assertEqual(50, len(universe["nifty50_stock_options"]))
         self.assertEqual(50, len(universe["nifty50_stock_spot"]))
         self.assertEqual(2, len(universe["crypto"]))
-        self.assertEqual("tradingview_primary", universe["index_options"][0].data_source)
+        self.assertEqual("dhan_primary", universe["index_options"][0].data_source)
+        self.assertEqual("dhan_primary", universe["commodity_options"][0].data_source)
         self.assertTrue(universe["crypto"][0].tradingview_symbol.startswith("BINANCE:"))
 
     def test_fetch_candles_uses_tradingview_primary_before_dhanhq_fallback(self):
         manager = DataManager()
-        instrument = manager.get_instruments()["index_options"][0]
+        instrument = manager.get_instruments()["nifty50_stock_spot"][0]
         tradingview_fetcher = Mock()
         tradingview_fetcher.fetch_candles.side_effect = [[], [{"close": 101.0}]]
 

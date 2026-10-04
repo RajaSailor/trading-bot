@@ -64,6 +64,15 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                     with patch.object(main_module, "DhanTelegramBridge", _DummyBridge):
                         with patch.object(main_module, "DhanPostbackHandler", _DummyPostbackHandler):
                             self.assertTrue(main_module.initialize_app())
+                            queue_before = main_module.signal_queue_processor
+                            consumer_before = main_module.queue_consumer_worker
+                            scanner_before = main_module.market_scanner_worker
+                            # `python main.py` initializes at import and again in main():
+                            # the second call must not allocate duplicate components.
+                            self.assertTrue(main_module.initialize_app())
+                            self.assertIs(queue_before, main_module.signal_queue_processor)
+                            self.assertIs(consumer_before, main_module.queue_consumer_worker)
+                            self.assertIs(scanner_before, main_module.market_scanner_worker)
                             client = main_module.app.test_client()
 
                             self.assertEqual(client.get("/health").status_code, 200)

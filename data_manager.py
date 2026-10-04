@@ -12,6 +12,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 from nse_symbol_mapping import NSESymbolMapper
+from exchange_calendar import exchange_for_instrument, previous_trading_day
+from security_master import (
+    KIND_COMMODITY,
+    KIND_INDEX,
+    KIND_STOCK,
+    SecurityMasterCache,
+    SecurityMasterIndex,
+    UnderlyingRef,
+    UniverseEntry,
+    UniverseSpec,
+    get_shared_security_master,
+    normalize_root,
+)
 
 try:
     from dhanhq import DhanContext, dhanhq
@@ -217,19 +230,30 @@ _api_rate_limiter = {
     'lock': threading.Lock()
 }
 
+# Dhan Market Quote APIs (LTP) have their own 1 request/second budget.
+_quote_rate_limiter = {
+    'last_call': 0,
+    'min_interval': 1.0,
+    'lock': threading.Lock()
+}
 
-def _apply_rate_limit() -> None:
+DHAN_LTP_URL = "https://api.dhan.co/v2/marketfeed/ltp"
+DHAN_LTP_MAX_INSTRUMENTS = 1000
+
+
+def _apply_rate_limit(limiter: Optional[dict] = None) -> None:
     """Apply rate limiting between API calls to prevent DH-904 errors"""
-    with _api_rate_limiter['lock']:
+    limiter = limiter or _api_rate_limiter
+    with limiter['lock']:
         current_time = time.time()
-        time_since_last = current_time - _api_rate_limiter['last_call']
+        time_since_last = current_time - limiter['last_call']
         
-        if time_since_last < _api_rate_limiter['min_interval']:
-            sleep_time = _api_rate_limiter['min_interval'] - time_since_last
+        if time_since_last < limiter['min_interval']:
+            sleep_time = limiter['min_interval'] - time_since_last
             logger.debug(f"⏸️  Rate limiting: sleeping {sleep_time:.2f}s")
             time.sleep(sleep_time)
         
-        _api_rate_limiter['last_call'] = time.time()
+        limiter['last_call'] = time.time()
 
 
 @dataclass
@@ -451,8 +475,19 @@ class DhanAPIClient:
             return {}
 
 
+_OPTION_UNIVERSE_KINDS = {
+    "index_options": KIND_INDEX,
+    "commodity_options": KIND_COMMODITY,
+    "nifty50_stock_options": KIND_STOCK,
+}
+
+
 class DataManager:
-    def __init__(self, cache_ttl_seconds: int = 8) -> None:
+    def __init__(
+        self,
+        cache_ttl_seconds: int = 8,
+        security_master: Optional[SecurityMasterCache] = None,
+    ) -> None:
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cache: Dict[Tuple[str, str], dict] = {}
         self._webhook_cache: Dict[Tuple[str, str], dict] = {}
@@ -461,13 +496,115 @@ class DataManager:
         self._tv_fetcher = None
         self._tv_interval = None
         self._dhan_client = None
-        self._security_master_cache: List[Dict[str, Any]] = []
-        self._security_master_cache_ts: float = 0.0
-        self._security_master_cache_ttl_seconds: int = 3600
+        # Shared (process-wide) filtered security master; never a per-component copy.
+        self._security_master = security_master or get_shared_security_master()
         self._instrument_universe = self._build_instrument_universe()
+        self._universe_spec = self._build_universe_spec()
 
     def get_instruments(self) -> Dict[str, List[Instrument]]:
         return self._instrument_universe
+
+    @property
+    def universe_spec(self) -> UniverseSpec:
+        return self._universe_spec
+
+    def _build_universe_spec(self) -> UniverseSpec:
+        entries = []
+        for category, kind in _OPTION_UNIVERSE_KINDS.items():
+            for instrument in self._instrument_universe.get(category, []):
+                entries.append(
+                    UniverseEntry(
+                        symbol=instrument.symbol,
+                        root=normalize_root(instrument.symbol),
+                        exchange=exchange_for_instrument(instrument),
+                        kind=kind,
+                    )
+                )
+        aliases: Dict[str, str] = {alias: canonical for alias, canonical in _STOCK_ALIASES.items()}
+        for index_symbol in NSESymbolMapper.NSE_INDICES:
+            for alias in NSESymbolMapper.get_possible_dhan_names(index_symbol):
+                aliases[alias] = index_symbol
+        return UniverseSpec(entries, aliases)
+
+    def security_index(self, today=None) -> Optional[SecurityMasterIndex]:
+        """Filtered security master for ``today`` (IST); loaded once per day, shared."""
+        day = today or datetime.now(IST).date()
+        return self._security_master.get_index(self._universe_spec, day)
+
+    def release_security_master(self) -> bool:
+        """Free the filtered security master (e.g. while every exchange is closed)."""
+        return self._security_master.release()
+
+    def security_master_status(self) -> dict:
+        return self._security_master.status()
+
+    def resolve_underlying(self, symbol: str, today=None) -> Optional[UnderlyingRef]:
+        entry = self._universe_spec.resolve(symbol)
+        if entry is None:
+            return None
+        index = self.security_index(today)
+        if index is None:
+            return None
+        return index.underlying(entry.root)
+
+    def fetch_ltp(self, instruments: Dict[str, List[int]]) -> Dict[Tuple[str, int], float]:
+        """Batch last-traded prices via Dhan ``/v2/marketfeed/ltp``.
+
+        ``instruments`` maps exchange segment -> security ids. Returns
+        ``{(segment, security_id): last_price}``; empty on any failure so callers
+        can fall back to candle-based evaluation.
+        """
+        access_token = os.getenv("ACCESS_TOKEN")
+        client_id = os.getenv("DHAN_CLIENT_ID") or os.getenv("API_KEY")
+        requested = {segment: sorted({int(sid) for sid in ids}) for segment, ids in instruments.items() if ids}
+        if not requested or not access_token or not client_id:
+            return {}
+
+        prices: Dict[Tuple[str, int], float] = {}
+        batch: Dict[str, List[int]] = {}
+        batch_size = 0
+        batches: List[Dict[str, List[int]]] = []
+        for segment, ids in requested.items():
+            for sid in ids:
+                if batch_size >= DHAN_LTP_MAX_INSTRUMENTS:
+                    batches.append(batch)
+                    batch, batch_size = {}, 0
+                batch.setdefault(segment, []).append(sid)
+                batch_size += 1
+        if batch:
+            batches.append(batch)
+
+        headers = {
+            "access-token": access_token,
+            "client-id": str(client_id),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        for payload in batches:
+            _apply_rate_limit(_quote_rate_limiter)
+            try:
+                response = requests.post(DHAN_LTP_URL, json=payload, headers=headers, timeout=5)
+            except requests.RequestException as exc:
+                logger.warning("Dhan LTP request failed: %s", exc.__class__.__name__)
+                return prices
+            if response.status_code != 200:
+                logger.warning("Dhan LTP HTTP %s: %s", response.status_code, response.text[:200])
+                return prices
+            try:
+                data = response.json().get("data") or {}
+            except (ValueError, AttributeError):
+                logger.warning("Dhan LTP returned invalid JSON")
+                return prices
+            for segment, values in data.items():
+                if not isinstance(values, dict):
+                    continue
+                for sid, quote in values.items():
+                    try:
+                        price = float((quote or {}).get("last_price"))
+                        prices[(segment, int(sid))] = price
+                    except (TypeError, ValueError):
+                        continue
+        return prices
 
     def fetch_dhanhq_candles(self, symbol: str, interval: str) -> List[dict]:
         """Fetch intraday candles from DhanHQ"""
@@ -490,6 +627,8 @@ class DataManager:
         symbol = instrument.symbol
 
         security_id = instrument.security_id
+        exchange_segment = instrument.exchange_segment
+        instrument_type = instrument.instrument_type
         if security_id is None:
             security_id = self._find_security_id(symbol, instrument.exchange_segment, instrument.instrument_type)
             if security_id is None:
@@ -498,7 +637,11 @@ class DataManager:
 
         try:
             interval_value = int(interval.replace("min", ""))
-            today = datetime.now(IST).strftime("%Y-%m-%d")
+            today_ist = datetime.now(IST).date()
+            today = today_ist.strftime("%Y-%m-%d")
+            # Include the previous trading session so the 20-candle lookback is
+            # available right from the open.
+            from_date = previous_trading_day(exchange_for_instrument(instrument), today_ist).strftime("%Y-%m-%d")
             
             logger.debug(
                 f"Fetching DhanHQ candles: symbol={symbol}, "
@@ -510,9 +653,9 @@ class DataManager:
             
             candles = self._fetch_dhan_intraday_data(
                 security_id=security_id,
-                exchange_segment=instrument.exchange_segment,
-                instrument_type=instrument.instrument_type,
-                from_date=today,
+                exchange_segment=exchange_segment,
+                instrument_type=instrument_type,
+                from_date=from_date,
                 to_date=today,
                 interval=interval_value,
                 symbol=symbol  # Pass symbol for debug logging
@@ -754,7 +897,7 @@ class DataManager:
                 exchange_segment="NSE_EQ",
                 instrument_type="EQUITY",
                 category="nifty50_stock_options",
-                data_source="tradingview_primary",
+                data_source="dhan_primary",
                 tradingview_symbol=_tradingview_symbol_for(symbol),
             )
             for symbol in NIFTY_50_STOCKS
@@ -777,31 +920,31 @@ class DataManager:
                 Instrument(
                     symbol="NIFTY",
                     security_id=None,
-                    exchange="NSE_FNO",
-                    exchange_segment="NSE_FNO",
-                    instrument_type="FUTIDX",
+                    exchange="NSE",
+                    exchange_segment="IDX_I",
+                    instrument_type="INDEX",
                     category="index_options",
-                    data_source="tradingview_primary",
+                    data_source="dhan_primary",
                     tradingview_symbol=_tradingview_symbol_for("NIFTY"),
                 ),
                 Instrument(
                     symbol="BANKNIFTY",
                     security_id=None,
-                    exchange="NSE_FNO",
-                    exchange_segment="NSE_FNO",
-                    instrument_type="FUTIDX",
+                    exchange="NSE",
+                    exchange_segment="IDX_I",
+                    instrument_type="INDEX",
                     category="index_options",
-                    data_source="tradingview_primary",
+                    data_source="dhan_primary",
                     tradingview_symbol=_tradingview_symbol_for("BANKNIFTY"),
                 ),
                 Instrument(
                     symbol="SENSEX",
                     security_id=None,
                     exchange="BSE",
-                    exchange_segment="BSE_FNO",
-                    instrument_type="FUTIDX",
+                    exchange_segment="IDX_I",
+                    instrument_type="INDEX",
                     category="index_options",
-                    data_source="tradingview_primary",
+                    data_source="dhan_primary",
                     tradingview_symbol=_tradingview_symbol_for("SENSEX", "BSE"),
                 ),
             ],
@@ -813,7 +956,7 @@ class DataManager:
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
-                    data_source="tradingview_primary",
+                    data_source="dhan_primary",
                     tradingview_symbol=_tradingview_symbol_for("GOLD", "MCX"),
                 ),
                 Instrument(
@@ -823,7 +966,7 @@ class DataManager:
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
-                    data_source="tradingview_primary",
+                    data_source="dhan_primary",
                     tradingview_symbol=_tradingview_symbol_for("SILVER", "MCX"),
                 ),
                 Instrument(
@@ -833,7 +976,7 @@ class DataManager:
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
-                    data_source="tradingview_primary",
+                    data_source="dhan_primary",
                     tradingview_symbol=_tradingview_symbol_for("CRUDE OIL", "MCX"),
                 ),
                 Instrument(
@@ -843,7 +986,7 @@ class DataManager:
                     exchange_segment="MCX_COMM",
                     instrument_type="FUTCOM",
                     category="commodity_options",
-                    data_source="tradingview_primary",
+                    data_source="dhan_primary",
                     tradingview_symbol=_tradingview_symbol_for("NATURALGAS", "MCX"),
                 ),
             ],
@@ -873,168 +1016,33 @@ class DataManager:
             ],
         }
 
-    def _fetch_security_master_with_cache(self) -> List[Dict[str, Any]]:
-        """Fetch and cache Dhan security master for dynamic security ID lookup."""
-        now = time.time()
-        if (
-            self._security_master_cache
-            and now - self._security_master_cache_ts <= self._security_master_cache_ttl_seconds
-        ):
-            logger.debug(f"Using cached security master ({len(self._security_master_cache)} securities)")
-            return self._security_master_cache
-
-        try:
-            api_key = os.getenv("API_KEY")
-            access_token = os.getenv("ACCESS_TOKEN")
-            if not api_key or not access_token:
-                logger.error("API_KEY or ACCESS_TOKEN not found")
-                return self._security_master_cache
-
-            if DhanContext is None or dhanhq is None:
-                logger.error(
-                    "dhanhq SDK is unavailable for security master fetch; "
-                    "install it with `pip install -r requirements.txt` (dhanhq + pandas)"
-                )
-                return self._security_master_cache
-
-            dhan_context = DhanContext(api_key, access_token)
-            dhan = dhanhq(dhan_context)
-
-            logger.debug("Fetching security master from dhanhq SDK...")
-            fetch_security_list = getattr(dhan, "fetch_security_list", None)
-            if fetch_security_list is None and hasattr(dhan, "security"):
-                fetch_security_list = getattr(dhan.security, "fetch_security_list", None)
-            if fetch_security_list is None:
-                logger.error("dhanhq SDK client does not expose fetch_security_list")
-                return self._security_master_cache
-
-            security_frame = fetch_security_list("compact")
-            if security_frame is None or security_frame.empty:
-                logger.warning("Security list DataFrame is empty")
-                return self._security_master_cache
-
-            logger.debug(f"Security list fetched: {len(security_frame)} records")
-            logger.debug(f"DataFrame columns: {security_frame.columns.tolist()}")
-            securities = security_frame.to_dict("records")
-
-            if securities:
-                self._security_master_cache = securities
-                self._security_master_cache_ts = now
-                logger.info(f"✅ Loaded {len(securities)} total securities from dhanhq SDK")
-                return securities
-
-            logger.error("No securities converted from DataFrame")
-            return self._security_master_cache
-        except Exception as exc:
-            logger.error(f"Failed to fetch security master: {exc}", exc_info=True)
-
-        return self._security_master_cache
-
     def _find_security_id(
         self,
         symbol: str,
         exchange_segment: str,
         instrument_type: str | None = None,
     ) -> Optional[int]:
-        """Find current security ID for a symbol from security master."""
-        securities = self._fetch_security_master_with_cache()
-        if not securities:
-            logger.error("No securities in cache for lookup")
+        """Find the current security ID for a universe underlying.
+
+        Uses the shared, filtered security master (index -> IDX_I, NIFTY 50 stock
+        -> NSE_EQ, commodity -> MCX future backing the traded option expiry).
+        """
+        underlying = self.resolve_underlying(symbol)
+        if underlying is None:
+            logger.warning(f"Could not find security_id for {symbol} on {exchange_segment}")
             return None
-
-        symbol_upper = symbol.upper()
-        symbol_aliases = NSESymbolMapper.get_possible_dhan_names(symbol_upper)
-        normalized_symbols = {
-            "".join(ch for ch in _normalize_stock_symbol(alias.upper()) if ch.isalnum())
-            for alias in symbol_aliases
-        }
-        normalized_symbols.add("".join(ch for ch in symbol_upper if ch.isalnum()))
-        requested_instrument = (instrument_type or "").upper()
-
-        def matches_exchange(exchange_id: str) -> bool:
-            if exchange_segment in {"NSE_FNO", "NSE_EQ"}:
-                return "NSE" in exchange_id
-            if exchange_segment in {"BSE_FNO", "BSE_EQ"}:
-                return "BSE" in exchange_id
-            if exchange_segment in {"MCX_COMM", "MCX_OPT"}:
-                return "MCX" in exchange_id
-            return False
-
-        def instrument_match_score(security: Dict[str, Any]) -> int:
-            if not requested_instrument:
-                return 0
-
-            exchange_instrument = str(security.get("SEM_EXCH_INSTRUMENT_TYPE", "")).upper()
-            instrument_name = str(security.get("SEM_INSTRUMENT_NAME", "")).upper()
-            value = f"{exchange_instrument} {instrument_name}"
-
-            if requested_instrument == "EQUITY":
-                if not value.strip():
-                    return 0
-                if "OPT" in value or "FUT" in value:
-                    return -1
-                if any(token in value for token in ("EQUITY", "EQ", "INDEX")):
-                    return 3
-                return 1
-
-            if requested_instrument == "FUTIDX":
-                if not value.strip():
-                    return 0
-                if requested_instrument == exchange_instrument or requested_instrument == instrument_name:
-                    return 3
-                if "OPT" in value:
-                    return -1
-                if "FUTIDX" in value or "FUTURE INDEX" in value:
-                    return 3
-                if "FUT" in value and ("IDX" in value or "INDEX" in value):
-                    return 2
-                return 0
-
-            if not value.strip():
-                return 0
-            if requested_instrument == exchange_instrument or requested_instrument == instrument_name:
-                return 3
-            if requested_instrument in value:
-                return 2
-            return -1
-
-        def symbol_match_score(trading_symbol: str) -> int:
-            normalized_trading_symbol = "".join(ch for ch in trading_symbol if ch.isalnum())
-            if normalized_trading_symbol in normalized_symbols:
-                return 3
-            if any(
-                normalized_trading_symbol.startswith(candidate)
-                for candidate in normalized_symbols
-                if candidate
-            ):
-                return 2
-            if any(candidate and candidate in normalized_trading_symbol for candidate in normalized_symbols):
-                return 1
-            return 0
-
-        best_match: Optional[tuple[int, int, int]] = None
-
-        for security in securities:
-            trading_symbol = str(security.get("SM_SYMBOL_NAME", "")).upper()
-            exchange_id = str(security.get("SEM_EXM_EXCH_ID", "")).upper()
-            match_score = symbol_match_score(trading_symbol)
-            type_score = instrument_match_score(security)
-            if matches_exchange(exchange_id) and match_score and type_score >= 0:
-                try:
-                    security_id = security.get("SEM_SMST_SECURITY_ID")
-                    if security_id:
-                        candidate = (match_score, type_score, int(security_id))
-                        if best_match is None or candidate[:2] > best_match[:2]:
-                            best_match = candidate
-                except (ValueError, TypeError):
-                    pass
-
-        if best_match is not None:
-            logger.info(f"✅ Found security_id={best_match[2]} for {symbol} on {exchange_segment}")
-            return best_match[2]
-
-        logger.warning(f"Could not find security_id for {symbol} on {exchange_segment}")
-        return None
+        if (exchange_segment and exchange_segment != underlying.exchange_segment) or (
+            instrument_type and instrument_type != underlying.instrument_type
+        ):
+            logger.warning(
+                f"Security master underlying for {symbol} is {underlying.exchange_segment}/"
+                f"{underlying.instrument_type}, not the requested {exchange_segment}/{instrument_type}"
+            )
+            return None
+        logger.info(
+            f"✅ Found security_id={underlying.security_id} for {symbol} on {underlying.exchange_segment}"
+        )
+        return underlying.security_id
     
     def _lookup_instrument(self, symbol: str) -> Optional[Instrument]:
         for instruments in self._instrument_universe.values():
@@ -1060,3 +1068,16 @@ class DataManager:
     
     def _write_cache(self, key: Tuple[str, str], candles: List[dict]) -> None:
         self._cache[key] = {"ts": time.time(), "candles": candles}
+
+
+_shared_data_manager: Optional[DataManager] = None
+_shared_data_manager_lock = threading.Lock()
+
+
+def get_shared_data_manager() -> DataManager:
+    """Process-wide DataManager so scanner components never duplicate caches."""
+    global _shared_data_manager
+    with _shared_data_manager_lock:
+        if _shared_data_manager is None:
+            _shared_data_manager = DataManager()
+        return _shared_data_manager

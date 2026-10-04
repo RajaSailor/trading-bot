@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -21,6 +23,95 @@ SCREENER_CATEGORY_ALIASES = frozenset({"index", "commodity", "nifty50_options"})
 DISABLED_CATEGORIES = frozenset(
     {"crypto", "nifty50_intraday_5x", "nifty50_5x", "nifty50_pay_later", "nifty50_paylater"}
 )
+
+
+def format_ist_timestamp(value: object, with_seconds: bool = False) -> str:
+    """Render epoch seconds / ISO strings as ``DD-Mon-YYYY HH:MM IST``."""
+    if value is None or value == "":
+        return "N/A"
+    moment: Optional[datetime] = None
+    try:
+        if isinstance(value, datetime):
+            moment = value
+        elif isinstance(value, (int, float)) or str(value).replace(".", "", 1).isdigit():
+            moment = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        else:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return str(value)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=IST)
+    pattern = "%d-%b-%Y %H:%M:%S IST" if with_seconds else "%d-%b-%Y %H:%M IST"
+    return moment.astimezone(IST).strftime(pattern)
+
+
+def _fmt_price(value: object) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _fmt_strike(value: object) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return str(int(number)) if number.is_integer() else f"{number:.2f}"
+
+
+_CATEGORY_LABELS = {
+    "index_options": "INDEX OPTIONS",
+    "commodity_options": "COMMODITY OPTIONS",
+    "nifty50_stock_options": "STOCK OPTIONS",
+}
+
+_TRIGGER_LABELS = {"live_ltp": "live LTP crossed red high", "candle_high": "10-min candle high crossed red high"}
+
+
+def format_option_breakout_alert(alert: dict, practice_mode: Optional[bool] = None) -> str:
+    """Complete SERVICE_ALERTS message for an option premium breakout (HTML-safe).
+
+    Expected keys: underlying, category, option_symbol, strike, option_type,
+    action_text, expiry, strike_band, entry, stop_loss, risk_points, target,
+    reference_low/high, reference_timestamp, breakout_timestamp, timeframe.
+    """
+    esc = lambda value: html.escape(str(value if value not in (None, "") else "N/A"))  # noqa: E731
+    option_type = str(alert.get("option_type") or "").upper()
+    action = alert.get("action_text") or ("BUY CALL" if option_type == "CE" else "BUY PUT")
+    icon = "🚀" if option_type == "CE" else "📉"
+    category = str(alert.get("category") or alert.get("route_category") or "")
+    category_label = _CATEGORY_LABELS.get(category, category.replace("_", " ").upper() or "OPTIONS")
+    target = alert.get("target")
+    if target is None and alert.get("targets"):
+        target = alert["targets"][0]
+    reference_ist = alert.get("reference_time_ist") or format_ist_timestamp(alert.get("reference_timestamp"))
+    breakout_ist = alert.get("breakout_time_ist") or format_ist_timestamp(
+        alert.get("breakout_timestamp"), with_seconds=True
+    )
+    trigger = _TRIGGER_LABELS.get(str(alert.get("trigger") or ""), alert.get("trigger") or "breakout")
+    lines = [
+        f"{icon} <b>{esc(action)}</b> | <b>{esc(alert.get('underlying') or alert.get('symbol'))}</b> ({esc(category_label)})",
+        f"Option: <b>{esc(alert.get('option_symbol'))}</b>",
+        f"Strike: {esc(_fmt_strike(alert.get('strike')))} {esc(option_type)} | Band: {esc(alert.get('strike_band'))}",
+        f"Expiry: {esc(alert.get('expiry'))}",
+        "Timeframe: 10-min | Rule: most recent RED candle high breakout (last 20 candles)",
+        "",
+        "📊 <b>TRADE LEVELS</b>",
+        f"Entry: {esc(_fmt_price(alert.get('entry')))} (red candle high)",
+        f"Stop Loss: {esc(_fmt_price(alert.get('stop_loss')))} (red low {esc(_fmt_price(alert.get('reference_low')))} − 5%)",
+        f"Risk: {esc(_fmt_price(alert.get('risk_points')))} points",
+        f"Target (2R): {esc(_fmt_price(target))}",
+        "",
+        f"🔴 Reference RED candle: {esc(reference_ist)}",
+        f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(alert.get('premium_ltp') or alert.get('breakout_price')))} ({esc(trigger)})",
+    ]
+    if alert.get("spot_ltp") is not None:
+        lines.append(f"Underlying spot: {esc(_fmt_price(alert.get('spot_ltp')))}")
+    if practice_mode:
+        lines.append("🧪 PRACTICE MODE: alert only, no live order placed")
+    lines.extend(["", "📢 DISCLAIMER: Educational purposes only."])
+    return "\n".join(lines)
 
 
 class TelegramHandler:
@@ -205,7 +296,7 @@ class TelegramHandler:
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
             payload = {"chat_id": chat_id, "text": alert_msg, "parse_mode": "HTML"}
-            response = requests.post(url, json=payload, timeout=10)
+            response = self._http_session().post(url, json=payload, timeout=10)
             if response.status_code == 200:
                 logger.info("✅ Alert sent to %s", channel_type)
                 return True
@@ -215,6 +306,15 @@ class TelegramHandler:
         except Exception as e:
             logger.error("Error sending to channel %s: %s", channel_type, e.__class__.__name__)
             return False
+
+    def _http_session(self) -> requests.Session:
+        """Per-thread keep-alive session: avoids a TLS handshake per alert."""
+        local = self.__dict__.setdefault("_http_local", threading.local())
+        session = getattr(local, "session", None)
+        if session is None:
+            session = requests.Session()
+            local.session = session
+        return session
 
     def send_confirmation_request(self, user_chat_id: int, signal_details: dict) -> bool:
         message = (
@@ -311,27 +411,14 @@ class TelegramHandler:
         )
 
     def _format_premium_signal_message(self, category: str, signal_data: dict, option_data: dict) -> str:
-        icon = "🚀 CALL ENTRY" if signal_data["signal"] == "CALL" else "📉 PUT ENTRY"
-        option_type = option_data.get("option_type", signal_data.get("option_type", ""))
-        premium_ltp = round(float(option_data.get("premium_ltp", signal_data["entry"])), 2)
-        targets = signal_data["targets"]
-        signal_time = signal_data.get("signal_time_ist", datetime.now(IST).strftime("%H:%M:%S"))
-        signal_date = signal_data.get("signal_date_ist", datetime.now(IST).strftime("%d:%m:%Y"))
-        return (
-            f"{icon}\n"
-            f"{signal_data['symbol']} | {signal_data.get('timeframe', '').upper()} ({option_type} Premium)\n\n"
-            f"⏰ Signal Time: {signal_time} | {signal_date}\n\n"
-            "📊 POSITION DETAILS:\n"
-            f"Entry: {signal_data['entry']:.2f}\n"
-            f"Target 1: {targets[0]:.2f} (+10 points)\n"
-            f"Target 2: {targets[1]:.2f} (+20 points)\n"
-            f"Target 3: {targets[2]:.2f} (+30 points)\n"
-            f"Stop Loss: {signal_data['stop_loss']:.2f}\n\n"
-            f"Strike: {option_data.get('option_symbol', 'N/A')}\n"
-            f"Premium (LTP): ₹{premium_ltp:.2f}\n\n"
-            f"Channel: {category.replace('_', ' ').upper()}\n\n"
-            "📢 DISCLAIMER: Educational purposes only."
-        )
+        alert = {**signal_data, "category": signal_data.get("category") or category}
+        alert.setdefault("underlying", signal_data.get("symbol"))
+        for key in ("option_symbol", "option_type", "premium_ltp"):
+            if option_data.get(key) is not None:
+                alert[key] = option_data[key]
+        if alert.get("strike") is None:
+            alert["strike"] = option_data.get("strike_price", option_data.get("strike"))
+        return format_option_breakout_alert(alert)
 
     def _format_spot_signal_message(self, category: str, signal_data: dict, option_data: dict) -> str:
         is_long = signal_data["signal"] == "CALL"

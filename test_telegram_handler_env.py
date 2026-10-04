@@ -134,12 +134,13 @@ class TelegramHandlerEnvTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("🚀 CALL ENTRY", message)
-        self.assertIn("GOLD | 10-MINUTE BREAKOUT (CE Premium)", message)
-        self.assertIn("⏰ Signal Time: 15:30:00 | 09:09:2026", message)
-        self.assertIn("Strike: GOLD-24OCT-127-CE", message)
-        self.assertIn("Premium (LTP): ₹127.48", message)
-        self.assertIn("Channel: COMMODITY OPTIONS", message)
+        self.assertIn("<b>BUY CALL</b>", message)
+        self.assertIn("<b>GOLD</b> (COMMODITY OPTIONS)", message)
+        self.assertIn("Option: <b>GOLD-24OCT-127-CE</b>", message)
+        self.assertIn("Entry: 127.00", message)
+        self.assertIn("Stop Loss: 113.00", message)
+        self.assertIn("Target (2R): 137.00", message)
+        self.assertIn("Timeframe: 10-min", message)
 
     def test_format_signal_message_uses_spot_breakout_layout(self):
         handler = TelegramHandler(token="default-token")
@@ -204,7 +205,7 @@ class TelegramHandlerEnvTests(unittest.TestCase):
             clear=False,
         ):
             handler = TelegramHandler()
-            with patch("telegram_handler.requests.post") as mocked_post:
+            with patch("telegram_handler.requests.Session.post") as mocked_post:
                 mocked_post.return_value.status_code = 200
                 sent = handler.send_to_channel("nifty50_options", "test alert")
 
@@ -225,7 +226,7 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         handler = TelegramHandler(token="default-token")
         for channel in ("crypto", "nifty50_5x", "nifty50_pay_later"):
             with self.subTest(channel=channel):
-                with patch("telegram_handler.requests.post") as mocked_post:
+                with patch("telegram_handler.requests.Session.post") as mocked_post:
                     sent = handler.send_to_channel(channel, "test alert")
                 self.assertFalse(sent)
                 mocked_post.assert_not_called()
@@ -241,7 +242,7 @@ class TelegramHandlerEnvTests(unittest.TestCase):
 
     def test_send_to_channel_rejects_unknown_channel(self):
         handler = TelegramHandler(token="default-token")
-        with patch("telegram_handler.requests.post") as mocked_post:
+        with patch("telegram_handler.requests.Session.post") as mocked_post:
             sent = handler.send_to_channel("unknown_channel", "test alert")
 
         self.assertFalse(sent)
@@ -258,7 +259,7 @@ class TelegramHandlerEnvTests(unittest.TestCase):
             clear=False,
         ):
             handler = TelegramHandler()
-            with patch("telegram_handler.requests.post") as mocked_post:
+            with patch("telegram_handler.requests.Session.post") as mocked_post:
                 mocked_post.return_value.status_code = 200
                 sent = handler.send_to_channel("trade_control", "approval test")
 
@@ -276,7 +277,7 @@ class TelegramHandlerEnvTests(unittest.TestCase):
             clear=False,
         ):
             handler = TelegramHandler()
-            with patch("telegram_handler.requests.post") as mocked_post:
+            with patch("telegram_handler.requests.Session.post") as mocked_post:
                 mocked_post.return_value.status_code = 200
                 sent = handler.send_to_channel("service_alerts", "service test")
 

@@ -3,10 +3,18 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from screener_premium import PremiumScreener
+from screener_premium import IST, PremiumScreener
+
+NOW = datetime(2026, 10, 5, 15, 26, tzinfo=IST)
 
 
 class _FakeDataManager:
+    def resolve_underlying(self, symbol, today=None):
+        return None
+
+    def fetch_ltp(self, instruments):
+        return {}
+
     def get_instruments(self):
         return {
             "index_options": [],
@@ -24,29 +32,39 @@ class _FakeDataManager:
 
 
 class _FakeFetcher:
-    def fetch_atm_premium_candles(self, instrument, option_type, interval):
-        if option_type == "CE":
-            return [
-                {"open": 120, "high": 127, "low": 113, "close": 118, "timestamp": "15:15"},
-                {"open": 118, "high": 123, "low": 116, "close": 121, "timestamp": "15:20"},
-                {"open": 125, "high": 135, "low": 122, "close": 130, "timestamp": "15:25"},
-            ], {
-                "option_symbol": "GOLD-24OCT-127-CE",
-                "atm_strike": 127,
-                "premium_ltp": 127.48,
-                "option_type": "CE",
-            }
+    CANDLES = {
+        "CE": [
+            {"open": 120, "high": 127, "low": 113, "close": 118, "timestamp": "2026-10-05T15:05:00+05:30"},
+            {"open": 118, "high": 123, "low": 116, "close": 121, "timestamp": "2026-10-05T15:15:00+05:30"},
+            {"open": 125, "high": 135, "low": 122, "close": 130, "timestamp": "2026-10-05T15:25:00+05:30"},
+        ],
+        "PE": [
+            {"open": 130, "high": 137, "low": 123, "close": 128, "timestamp": "2026-10-05T15:05:00+05:30"},
+            {"open": 128, "high": 131, "low": 125, "close": 129, "timestamp": "2026-10-05T15:15:00+05:30"},
+            {"open": 128, "high": 142, "low": 120, "close": 135, "timestamp": "2026-10-05T15:25:00+05:30"},
+        ],
+    }
 
+    def get_spot_price(self, instrument, interval="10min"):
+        return 72000.0
+
+    def resolve_strike_band(self, instrument, spot, option_type, now=None):
         return [
-            {"open": 130, "high": 137, "low": 123, "close": 128, "timestamp": "15:15"},
-            {"open": 128, "high": 131, "low": 125, "close": 129, "timestamp": "15:20"},
-            {"open": 128, "high": 142, "low": 120, "close": 135, "timestamp": "15:25"},
-        ], {
-            "option_symbol": "GOLD-24OCT-127-PE",
-            "atm_strike": 127,
-            "premium_ltp": 135.0,
-            "option_type": "PE",
-        }
+            {
+                "security_id": 1 if option_type == "CE" else 2,
+                "option_symbol": f"GOLD-24OCT-127-{option_type}",
+                "exchange_segment": "MCX_COMM",
+                "instrument_type": "OPTFUT",
+                "strike": 127,
+                "atm_strike": 127,
+                "strike_band": "ATM",
+                "expiry": "24OCT2026",
+                "option_type": option_type,
+            }
+        ]
+
+    def fetch_option_candles(self, contract, interval="10min", now=None):
+        return list(self.CANDLES[contract["option_type"]])
 
 
 class _FakeTelegramHandler:
@@ -93,7 +111,7 @@ class PremiumScreenerTests(unittest.TestCase):
         screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
         screener.fetcher = _FakeFetcher()
 
-        alerts = screener._scan_instruments(screener.commodity_instruments, "10min")
+        alerts = screener._scan_instruments(screener.commodity_instruments, "10min", NOW)
 
         self.assertEqual(2, alerts)
         self.assertEqual(
@@ -151,26 +169,25 @@ class PremiumScreenerTests(unittest.TestCase):
 
         self.assertEqual([], telegram.sent)
 
-    def test_run_once_throttles_ten_minute_stock_scans(self):
+    def test_run_once_throttles_ten_minute_stock_spot_scans(self):
         screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
         calls = []
-        screener._scan_instruments = lambda instruments, interval: calls.append(("options", interval, len(instruments))) or 0
+        screener._scan_instruments = lambda instruments, interval, now=None: calls.append(("options", interval, len(instruments))) or 0
         screener._scan_spot_instruments = lambda instruments, interval, strategy_group, primary_category: calls.append(primary_category) or 0
-        screener.last_run["nifty50_10min"] = 1000
         screener.last_run["stock_spot_10min"] = 1000
 
         with patch("screener_premium.time.time", return_value=1100):
             screener.run_once(now=datetime(2026, 9, 9, 10, 0, 0))
 
-        self.assertEqual([("options", "10min", 1), ("options", "10min", 0)], calls)
+        self.assertEqual([("options", "10min", 2)], calls)
 
     def test_scan_instruments_skips_duplicate_premium_signals(self):
         telegram = _FakeTelegramHandler()
         screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
         screener.fetcher = _FakeFetcher()
 
-        first = screener._scan_instruments(screener.commodity_instruments, "10min")
-        second = screener._scan_instruments(screener.commodity_instruments, "10min")
+        first = screener._scan_instruments(screener.commodity_instruments, "10min", NOW)
+        second = screener._scan_instruments(screener.commodity_instruments, "10min", NOW)
 
         self.assertEqual(2, first)
         self.assertEqual(0, second)

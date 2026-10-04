@@ -1,201 +1,192 @@
 import logging
 import unittest
-from datetime import datetime, timezone
-from unittest.mock import patch
+from datetime import datetime
 
-from atm_options_fetcher import REASON_ATM, REASON_EXPIRY_ITM_PLUS_1, ATMOptionsFetcher
+from atm_options_fetcher import BAND_ATM, BAND_ITM_PLUS_1, BAND_OTM_PLUS_1, REASON_ATM, ATMOptionsFetcher
 from data_manager import IST, DataManager, Instrument
+from security_master import SecurityMasterCache
 
 
 NON_EXPIRY_DAY = datetime(2026, 10, 1, 11, 0, tzinfo=IST)
-EXPIRY = "2026-10-27 00:00:00"
-EXPIRY_DAY = datetime(2026, 10, 27, 11, 0, tzinfo=IST)
+EXPIRY = "2026-10-27 14:30:00"
+NEXT_EXPIRY = "2026-11-24 14:30:00"
+EXPIRY_DAY = datetime(2026, 10, 27, 9, 0, tzinfo=IST)
 
 
 def _instrument(symbol, category="commodity_options"):
     if category == "commodity_options":
         exchange, segment, inst_type = "MCX", "MCX_COMM", "FUTCOM"
     elif category == "index_options":
-        exchange, segment, inst_type = "NSE_FNO", "NSE_FNO", "FUTIDX"
+        exchange, segment, inst_type = ("BSE" if symbol == "SENSEX" else "NSE"), "IDX_I", "INDEX"
     else:
-        exchange, segment, inst_type = "NSE_FNO", "NSE_FNO", "FUTSTK"
+        exchange, segment, inst_type = "NSE", "NSE_EQ", "EQUITY"
     return Instrument(
         symbol=symbol, security_id=None, exchange=exchange, exchange_segment=segment,
         instrument_type=inst_type, category=category, data_source="dhan_primary",
     )
 
 
-def _option_rows(symbol, strikes, side, expiry=EXPIRY, exchange="MCX", inst_type="OPTFUT", start_id=1000):
+def _option_rows(root, strikes, side, expiry=EXPIRY, exchange="MCX", instrument="OPTFUT", start_id=1000,
+                 sm_symbol_name=""):
+    """Rows shaped like the real Dhan compact CSV (NSE F&O rows have empty SM_SYMBOL_NAME)."""
+    expiry_date = datetime.strptime(expiry[:10], "%Y-%m-%d")
     rows = []
     for offset, strike in enumerate(strikes):
-        strike_text = f"{strike:g}"
         rows.append(
             {
-                "SM_SYMBOL_NAME": symbol,
                 "SEM_EXM_EXCH_ID": exchange,
+                "SEM_SEGMENT": "M" if exchange == "MCX" else "D",
                 "SEM_SMST_SECURITY_ID": str(start_id + offset),
-                "SEM_STRIKE_PRICE": str(strike),
-                "SEM_OPTION_TYPE": side,
-                "SEM_EXCH_INSTRUMENT_TYPE": inst_type,
-                "SEM_TRADING_SYMBOL": f"{symbol.replace(' ', '')}-{expiry[:10]}-{strike_text}-{side}",
+                "SEM_INSTRUMENT_NAME": instrument,
+                "SEM_TRADING_SYMBOL": f"{root}-{expiry_date.strftime('%d%b%Y')}-{strike:g}-{side}",
+                "SEM_LOT_UNITS": "75",
                 "SEM_EXPIRY_DATE": expiry,
+                "SEM_STRIKE_PRICE": f"{float(strike):.5f}",
+                "SEM_OPTION_TYPE": side,
+                "SM_SYMBOL_NAME": sm_symbol_name,
             }
         )
     return rows
 
 
+def _both_sides(root, strikes, **kwargs):
+    start = kwargs.pop("start_id", 1000)
+    return _option_rows(root, strikes, "CE", start_id=start, **kwargs) + _option_rows(
+        root, strikes, "PE", start_id=start + 500, **kwargs
+    )
+
+
 def _fetcher(rows):
-    manager = DataManager()
-    manager._security_master_cache = rows
-    manager._security_master_cache_ts = 1
-    return ATMOptionsFetcher(manager)
+    cache = SecurityMasterCache(row_source=lambda: iter(rows))
+    return ATMOptionsFetcher(DataManager(security_master=cache))
 
 
 class ContractDrivenStrikeSelectionTests(unittest.TestCase):
     def test_atm_uses_nearest_listed_strike_not_fixed_rounding(self):
         # GOLD lists strikes every 500; fixed 100-step rounding would give 72100 (not listed).
         strikes = [71000, 71500, 72000, 72500, 73000]
-        fetcher = _fetcher(_option_rows("GOLD", strikes, "CE") + _option_rows("GOLD", strikes, "PE", start_id=2000))
+        fetcher = _fetcher(_both_sides("GOLD", strikes))
 
         ce = fetcher._resolve_option_contract(_instrument("GOLD"), 72140.0, "CE", now=NON_EXPIRY_DAY)
         pe = fetcher._resolve_option_contract(_instrument("GOLD"), 72140.0, "PE", now=NON_EXPIRY_DAY)
 
-        self.assertEqual(72000, ce["atm_strike"])
-        self.assertEqual(72000, pe["atm_strike"])
+        self.assertEqual(72000, ce["strike"])
         self.assertEqual(REASON_ATM, ce["strike_reason"])
-        self.assertEqual(REASON_ATM, pe["strike_reason"])
-        self.assertEqual(1002, ce["security_id"])
-        self.assertEqual(2002, pe["security_id"])
-        self.assertEqual("27OCT2026", ce["expiry"])
+        self.assertEqual("CE", ce["option_type"])
+        self.assertEqual("GOLD-27Oct2026-72000-CE", ce["option_symbol"])
+        self.assertEqual(72000, pe["strike"])
+        self.assertEqual("PE", pe["option_type"])
+
+    def test_ce_and_pe_strike_band_itm_atm_otm(self):
+        strikes = [24300, 24350, 24400, 24450, 24500, 24550]
+        rows = _both_sides("NIFTY", strikes, exchange="NSE", instrument="OPTIDX")
+        rows.append({"SEM_EXM_EXCH_ID": "NSE", "SEM_SMST_SECURITY_ID": "13", "SEM_INSTRUMENT_NAME": "INDEX",
+                     "SEM_TRADING_SYMBOL": "NIFTY", "SM_SYMBOL_NAME": "Nifty 50"})
+        fetcher = _fetcher(rows)
+        instrument = _instrument("NIFTY", "index_options")
+
+        ce = fetcher.resolve_strike_band(instrument, 24460.0, "CE", now=NON_EXPIRY_DAY)
+        pe = fetcher.resolve_strike_band(instrument, 24460.0, "PE", now=NON_EXPIRY_DAY)
+
+        self.assertEqual(
+            [(BAND_ITM_PLUS_1, 24400), (BAND_ATM, 24450), (BAND_OTM_PLUS_1, 24500)],
+            [(c["strike_band"], c["strike"]) for c in ce],
+        )
+        self.assertEqual(
+            [(BAND_ITM_PLUS_1, 24500), (BAND_ATM, 24450), (BAND_OTM_PLUS_1, 24400)],
+            [(c["strike_band"], c["strike"]) for c in pe],
+        )
+        self.assertTrue(all(c["exchange_segment"] == "NSE_FNO" for c in ce + pe))
+        self.assertTrue(all(c["expiry"] == "27OCT2026" for c in ce + pe))
+        self.assertEqual({"CE"}, {c["option_type"] for c in ce})
+        self.assertEqual({"PE"}, {c["option_type"] for c in pe})
+        self.assertEqual(13, fetcher.data_manager.resolve_underlying("NIFTY", NON_EXPIRY_DAY.date()).security_id)
+
+    def test_band_uses_listed_uneven_strikes(self):
+        strikes = [2900, 2950, 3000, 3100, 3200]
+        fetcher = _fetcher(_both_sides("RELIANCE", strikes, exchange="NSE", instrument="OPTSTK"))
+        band = fetcher.resolve_strike_band(
+            _instrument("RELIANCE", "nifty50_stock_options"), 3040.0, "CE", now=NON_EXPIRY_DAY
+        )
+        self.assertEqual([2950, 3000, 3100], [c["strike"] for c in band])
+
+    def test_band_skips_missing_neighbour_at_chain_edge(self):
+        fetcher = _fetcher(_both_sides("GOLD", [72000, 72500]))
+        band = fetcher.resolve_strike_band(_instrument("GOLD"), 71900.0, "CE", now=NON_EXPIRY_DAY)
+        self.assertEqual([(BAND_ATM, 72000), (BAND_OTM_PLUS_1, 72500)], [(c["strike_band"], c["strike"]) for c in band])
 
     def test_selects_nearest_active_expiry_and_skips_expired_contracts(self):
         rows = (
-            _option_rows("GOLD", [72000], "CE", expiry="2026-09-25 00:00:00", start_id=1)
-            + _option_rows("GOLD", [72000], "CE", expiry="2026-11-25 00:00:00", start_id=2)
-            + _option_rows("GOLD", [72000], "CE", expiry=EXPIRY, start_id=3)
+            _both_sides("GOLD", [72000], expiry="2026-09-25 00:00:00", start_id=1)
+            + _both_sides("GOLD", [72000], expiry=NEXT_EXPIRY, start_id=100)
+            + _both_sides("GOLD", [72000], expiry=EXPIRY, start_id=200)
         )
         contract = _fetcher(rows)._resolve_option_contract(_instrument("GOLD"), 72000.0, "CE", now=NON_EXPIRY_DAY)
-
-        self.assertEqual(3, contract["security_id"])
         self.assertEqual("27OCT2026", contract["expiry"])
+        self.assertEqual(200, contract["security_id"])
 
-    def test_expiry_day_ce_and_pe_use_itm_plus_one(self):
-        strikes = [24300, 24350, 24400, 24450, 24500, 24550, 24600]
+    def test_expiry_day_skips_same_day_contract_and_uses_next_expiry(self):
+        strikes = [24400, 24450, 24500]
         rows = (
-            _option_rows("NIFTY", strikes, "CE", exchange="NSE", inst_type="OPTIDX")
-            + _option_rows("NIFTY", strikes, "PE", exchange="NSE", inst_type="OPTIDX", start_id=2000)
+            _both_sides("NIFTY", strikes, exchange="NSE", instrument="OPTIDX", expiry=EXPIRY, start_id=1)
+            + _both_sides("NIFTY", strikes, exchange="NSE", instrument="OPTIDX", expiry=NEXT_EXPIRY, start_id=5000)
         )
         fetcher = _fetcher(rows)
-        nifty = _instrument("NIFTY", "index_options")
+        instrument = _instrument("NIFTY", "index_options")
 
-        with self.assertLogs("atm_options_fetcher", level=logging.INFO) as logs:
-            ce = fetcher._resolve_option_contract(nifty, 24460.0, "CE", now=EXPIRY_DAY)
-            pe = fetcher._resolve_option_contract(nifty, 24460.0, "PE", now=EXPIRY_DAY)
+        for side in ("CE", "PE"):
+            with self.subTest(side=side):
+                band = fetcher.resolve_strike_band(instrument, 24450.0, side, now=EXPIRY_DAY)
+                self.assertEqual(3, len(band))
+                self.assertEqual({"24NOV2026"}, {c["expiry"] for c in band})
+                self.assertEqual(BAND_ATM, band[1]["strike_band"])
+                self.assertEqual(24450, band[1]["strike"])
 
-        self.assertEqual(24400, ce["atm_strike"])
-        self.assertEqual(24450, ce["listed_atm_strike"])
-        self.assertEqual(REASON_EXPIRY_ITM_PLUS_1, ce["strike_reason"])
-        self.assertEqual(24500, pe["atm_strike"])
-        self.assertEqual(REASON_EXPIRY_ITM_PLUS_1, pe["strike_reason"])
-        joined = "\n".join(logs.output)
-        self.assertIn("[NIFTY] CE contract selected | spot=24460.00 | expiry=27OCT2026 | strike=24400 | reason=EXPIRY_ITM_PLUS_1", joined)
-        self.assertIn("[NIFTY] PE contract selected | spot=24460.00 | expiry=27OCT2026 | strike=24500 | reason=EXPIRY_ITM_PLUS_1", joined)
-
-    def test_non_expiry_day_logs_atm_reason(self):
-        fetcher = _fetcher(_option_rows("SENSEX", [80000, 80100, 80200], "CE", exchange="BSE", inst_type="OPTIDX"))
-
-        with self.assertLogs("atm_options_fetcher", level=logging.INFO) as logs:
-            contract = fetcher._resolve_option_contract(_instrument("SENSEX", "index_options"), 80120.0, "CE", now=NON_EXPIRY_DAY)
-
-        self.assertEqual(80100, contract["atm_strike"])
-        self.assertEqual("BSE_FNO", contract["exchange_segment"])
-        self.assertIn("reason=ATM", "\n".join(logs.output))
-
-    def test_expiry_day_falls_back_to_further_itm_when_one_step_missing(self):
-        # 71900 (one step below ATM 72000) is not listed.
-        strikes = [71700, 71800, 72000, 72100, 72200]
-        fetcher = _fetcher(_option_rows("GOLD", strikes, "CE"))
-
-        contract = fetcher._resolve_option_contract(_instrument("GOLD"), 72010.0, "CE", now=EXPIRY_DAY)
-
-        self.assertEqual(71800, contract["atm_strike"])
-        self.assertEqual(REASON_EXPIRY_ITM_PLUS_1, contract["strike_reason"])
-
-    def test_expiry_day_falls_back_to_atm_when_no_itm_strike_exists(self):
-        strikes = [7000, 7050, 7100]
-        fetcher = _fetcher(_option_rows("NATURALGAS", strikes, "PE"))
-
-        contract = fetcher._resolve_option_contract(_instrument("NATURALGAS"), 7120.0, "PE", now=EXPIRY_DAY)
-
-        self.assertEqual(7100, contract["atm_strike"])
-        self.assertEqual(REASON_ATM, contract["strike_reason"])
+        before = fetcher.resolve_strike_band(instrument, 24450.0, "CE", now=datetime(2026, 10, 26, 15, 0, tzinfo=IST))
+        self.assertEqual({"27OCT2026"}, {c["expiry"] for c in before})
 
     def test_expiry_day_uses_ist_date(self):
-        strikes = [72000, 72100, 72200]
-        fetcher = _fetcher(_option_rows("GOLD", strikes, "CE"))
-        # 2026-10-26 20:00 UTC is already 2026-10-27 01:30 IST (expiry day).
-        utc_now = datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
+        # 2026-10-26 19:00 UTC is already 27-Oct 00:30 IST (expiry day) -> next expiry.
+        from datetime import timezone
 
-        contract = fetcher._resolve_option_contract(_instrument("GOLD"), 72100.0, "CE", now=utc_now)
-
-        self.assertEqual(72000, contract["atm_strike"])
-        self.assertEqual(REASON_EXPIRY_ITM_PLUS_1, contract["strike_reason"])
-
-    def test_commodity_contracts_resolve_from_listed_strikes(self):
-        cases = [
-            ("GOLD", [125000, 125500, 126000, 126500], 125730.0, 125500, 125000, 126000),
-            ("SILVER", [150000, 151000, 152000, 153000], 151620.0, 152000, 151000, 153000),
-            ("CRUDE OIL", [5400, 5450, 5500, 5550], 5468.0, 5450, 5400, 5500),
-            ("NATURALGAS", [270, 275, 280, 285], 277.4, 275, 270, 280),
-        ]
-        for symbol, strikes, spot, atm, ce_itm, pe_itm in cases:
-            with self.subTest(symbol=symbol):
-                rows = _option_rows(symbol, strikes, "CE") + _option_rows(symbol, strikes, "PE", start_id=5000)
-                fetcher = _fetcher(rows)
-                instrument = _instrument(symbol)
-
-                ce = fetcher._resolve_option_contract(instrument, spot, "CE", now=NON_EXPIRY_DAY)
-                pe = fetcher._resolve_option_contract(instrument, spot, "PE", now=NON_EXPIRY_DAY)
-                self.assertEqual((atm, atm), (ce["atm_strike"], pe["atm_strike"]))
-                self.assertEqual("MCX_COMM", ce["exchange_segment"])
-
-                ce_exp = fetcher._resolve_option_contract(instrument, spot, "CE", now=EXPIRY_DAY)
-                pe_exp = fetcher._resolve_option_contract(instrument, spot, "PE", now=EXPIRY_DAY)
-                self.assertEqual(ce_itm, ce_exp["atm_strike"])
-                self.assertEqual(pe_itm, pe_exp["atm_strike"])
-
-    def test_nifty50_stock_option_uses_listed_strike(self):
-        strikes = [2900, 2920, 2940, 2960, 2980]
-        fetcher = _fetcher(_option_rows("RELIANCE", strikes, "CE", exchange="NSE", inst_type="OPTSTK"))
-
-        contract = fetcher._resolve_option_contract(
-            _instrument("RELIANCE", "nifty50_stock_options"), 2936.0, "CE", now=NON_EXPIRY_DAY
+        strikes = [72000]
+        rows = _both_sides("GOLD", strikes, expiry=EXPIRY, start_id=1) + _both_sides(
+            "GOLD", strikes, expiry=NEXT_EXPIRY, start_id=100
         )
+        fetcher = _fetcher(rows)
+        utc_now = datetime(2026, 10, 26, 19, 0, tzinfo=timezone.utc)
+        contract = fetcher._resolve_option_contract(_instrument("GOLD"), 72000.0, "CE", now=utc_now)
+        self.assertEqual("24NOV2026", contract["expiry"])
 
-        self.assertEqual(2940, contract["atm_strike"])
-        self.assertEqual("NSE_FNO", contract["exchange_segment"])
+    def test_commodity_root_matching_is_exact(self):
+        rows = _both_sides("GOLDM", [72000], start_id=1) + _both_sides("GOLD", [72000], start_id=100)
+        contract = _fetcher(rows)._resolve_option_contract(_instrument("GOLD"), 72000.0, "CE", now=NON_EXPIRY_DAY)
+        self.assertEqual(100, contract["security_id"])
 
+    def test_crude_oil_resolves_from_custom_symbol(self):
+        rows = _both_sides("CRUDEOIL", [8800, 8850, 8900])
+        contract = _fetcher(rows)._resolve_option_contract(_instrument("CRUDE OIL"), 8849.0, "CE", now=NON_EXPIRY_DAY)
+        self.assertEqual("CRUDEOIL-27Oct2026-8850-CE", contract["option_symbol"])
 
-class PremiumThresholdGatingTests(unittest.TestCase):
-    def test_low_or_high_premium_does_not_block_selection(self):
-        strikes = [72000, 72500]
-        fetcher = _fetcher(_option_rows("GOLD", strikes, "CE"))
-        instrument = _instrument("GOLD")
+    def test_sensex_resolves_on_bse(self):
+        rows = _both_sides("SENSEX", [81100, 81200, 81300], exchange="BSE", instrument="OPTIDX",
+                           sm_symbol_name="BSXOPT")
+        contract = _fetcher(rows)._resolve_option_contract(
+            _instrument("SENSEX", "index_options"), 81234.0, "PE", now=NON_EXPIRY_DAY
+        )
+        self.assertEqual(81200, contract["strike"])
+        self.assertEqual("BSE_FNO", contract["exchange_segment"])
 
-        for premium in (0.05, 1.0, 99999.0):
-            with self.subTest(premium=premium):
-                candles = [{"open": premium, "high": premium, "low": premium, "close": premium, "timestamp": "t"}]
-                with (
-                    patch.object(fetcher.data_manager, "fetch_candles", return_value=[{"close": 72100.0}]),
-                    patch.object(fetcher.data_manager, "_fetch_dhan_intraday_data", return_value=candles),
-                    patch("atm_options_fetcher._apply_rate_limit"),
-                    patch.object(ATMOptionsFetcher, "_ist_date", return_value=NON_EXPIRY_DAY.date()),
-                ):
-                    result, contract = fetcher.fetch_atm_premium_candles(instrument, "CE", "10min")
+    def test_band_logs_selection(self):
+        fetcher = _fetcher(_both_sides("GOLD", [71500, 72000, 72500]))
+        with self.assertLogs("atm_options_fetcher", level=logging.INFO) as logs:
+            fetcher.resolve_strike_band(_instrument("GOLD"), 72000.0, "CE", now=NON_EXPIRY_DAY)
+        self.assertIn("[GOLD] CE band", "\n".join(logs.output))
+        self.assertIn("ITM+1=71500 ATM=72000 OTM+1=72500", "\n".join(logs.output))
 
-                self.assertEqual(candles, result)
-                self.assertEqual(72000, contract["atm_strike"])
-                self.assertEqual(round(premium, 2), contract["premium_ltp"])
+    def test_unknown_symbol_returns_no_contracts(self):
+        fetcher = _fetcher(_both_sides("GOLD", [72000]))
+        self.assertEqual([], fetcher.resolve_strike_band(_instrument("PLATINUM"), 100.0, "CE", now=NON_EXPIRY_DAY))
 
 
 if __name__ == "__main__":
