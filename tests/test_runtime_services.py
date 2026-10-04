@@ -1,14 +1,18 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 from database import TradingDatabase
 from order_executor import OrderExecutor
 from runtime_services import MarketScannerWorker, QueueConsumerWorker, SignalNotifier
 from signal_processor import SignalQueueProcessor
 from telegram_handler import TelegramHandler
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class _FakeTelegramHandler:
@@ -284,7 +288,7 @@ class SignalNotifierRoutingTests(unittest.TestCase):
             "BOT_SERVICE_ALERTS_TOKEN": "alerts-token",
             "CHANNEL_SERVICE_ALERTS_ID": "-1002",
         }
-        with patch.dict(os.environ, env), patch("telegram_handler.requests.post") as post:
+        with patch.dict(os.environ, env), patch("telegram_handler.requests.Session.post") as post:
             post.return_value = SimpleNamespace(status_code=200)
             notifier = SignalNotifier(TelegramHandler())
             self.assertTrue(notifier.send_test_message("trade_control", "probe"))
@@ -326,3 +330,51 @@ class MarketScannerWorkerTests(unittest.TestCase):
         self.assertTrue(worker._enqueue_signal({"symbol": "BTC"}))
         self.assertEqual([("BTC", False)], accepted)
         self.assertEqual(1, worker.status()["submitted_signals"])
+
+    def test_closed_markets_idle_without_scanning_and_release_security_master(self):
+        worker = MarketScannerWorker(lambda *_: True, {"scanner_enabled": True})
+        worker._scanner = _FakePremiumScreener()
+        data_manager = MagicMock()
+        data_manager.release_security_master.return_value = True
+        worker._data_manager = data_manager
+        waits = []
+
+        def fake_wait(seconds):
+            waits.append(seconds)
+            worker._stop_event.set()
+            return True
+
+        saturday = datetime(2026, 10, 3, 12, 0, tzinfo=IST)
+        with patch("runtime_services.ensure_timezone", return_value=saturday), patch.object(
+            worker._stop_event, "wait", side_effect=fake_wait
+        ):
+            worker.run_forever(poll_seconds=5)
+
+        self.assertEqual(0, worker._scanner.calls)
+        data_manager.release_security_master.assert_called_once()
+        self.assertEqual([worker.idle_seconds], waits)
+        self.assertEqual("closed", worker.status()["market_state"])
+
+    def test_open_market_runs_scanner_cycle(self):
+        worker = MarketScannerWorker(lambda *_: True, {"scanner_enabled": True})
+        worker._scanner = _FakePremiumScreener()
+        monday = datetime(2026, 10, 5, 10, 0, tzinfo=IST)
+
+        def fake_wait(_seconds):
+            worker._stop_event.set()
+            return True
+
+        with patch("runtime_services.ensure_timezone", return_value=monday), patch.object(
+            worker._stop_event, "wait", side_effect=fake_wait
+        ):
+            worker.run_forever(poll_seconds=5)
+        self.assertEqual(1, worker._scanner.calls)
+        self.assertEqual("open", worker.status()["market_state"])
+
+    def test_scanner_uses_shared_data_manager(self):
+        shared = MagicMock()
+        shared.get_instruments.return_value = {}
+        with patch("runtime_services.get_shared_data_manager", return_value=shared):
+            first = MarketScannerWorker(lambda *_: True, {"scanner_enabled": True})._build_scanner()
+            second = MarketScannerWorker(lambda *_: True, {"scanner_enabled": True})._build_scanner()
+        self.assertIs(first.data_manager, second.data_manager)

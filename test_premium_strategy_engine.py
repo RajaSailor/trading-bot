@@ -20,8 +20,9 @@ class PremiumStrategyEngineTests(unittest.TestCase):
         self.assertEqual(1, len(signals))
         self.assertEqual("CALL", signals[0]["signal"])
         self.assertEqual(127.0, signals[0]["entry"])
-        self.assertEqual(113.0, signals[0]["stop_loss"])
-        self.assertEqual([137.0, 147.0, 157.0], signals[0]["targets"])
+        self.assertEqual(107.35, signals[0]["stop_loss"])  # red low 113 - 5%
+        self.assertEqual(19.65, signals[0]["risk_points"])
+        self.assertEqual([166.3], signals[0]["targets"])   # entry + 2R
 
     def test_pe_breakout_creates_put_signal(self):
         engine = PremiumStrategyEngine()
@@ -39,10 +40,10 @@ class PremiumStrategyEngineTests(unittest.TestCase):
         self.assertEqual(1, len(signals))
         self.assertEqual("PUT", signals[0]["signal"])
         self.assertEqual(137.0, signals[0]["entry"])
-        self.assertEqual(123.0, signals[0]["stop_loss"])
-        self.assertEqual([147.0, 157.0, 167.0], signals[0]["targets"])
+        self.assertEqual(116.85, signals[0]["stop_loss"])  # red low 123 - 5%
+        self.assertEqual([177.3], signals[0]["targets"])   # entry + 2R
 
-    def test_breakout_can_be_found_from_cached_history_if_recent_window_has_no_setup(self):
+    def test_red_candle_outside_lookback_window_is_ignored(self):
         engine = PremiumStrategyEngine(lookback=7)
         candles = []
         for i in range(12):
@@ -64,11 +65,10 @@ class PremiumStrategyEngineTests(unittest.TestCase):
 
         signals = engine.evaluate_premiums("GOLD", "commodity_options")
 
-        self.assertEqual(1, len(signals))
-        self.assertEqual("PUT", signals[0]["signal"])
-        self.assertEqual(137.0, signals[0]["entry"])
+        # Only the last `lookback` candles are considered; the RED candle at t1 is too old.
+        self.assertEqual([], signals)
 
-    def test_equal_open_close_reference_candle_still_triggers_breakout(self):
+    def test_equal_open_close_candle_is_not_a_red_reference(self):
         engine = PremiumStrategyEngine()
         candles = [
             {"open": 1.6, "high": 1.65, "low": 1.6, "close": 1.6, "timestamp": "c1"},
@@ -80,9 +80,7 @@ class PremiumStrategyEngineTests(unittest.TestCase):
 
         signals = engine.evaluate_premiums("NATURALGAS", "commodity_options")
 
-        self.assertEqual(1, len(signals))
-        self.assertEqual("CALL", signals[0]["signal"])
-        self.assertEqual(1.65, signals[0]["entry"])
+        self.assertEqual([], signals)
 
 
 if __name__ == "__main__":

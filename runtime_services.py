@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from time import monotonic
 import time
@@ -9,9 +10,13 @@ from typing import Callable, Optional
 from data_manager import (
     REQUIRED_SCANNER_DEPENDENCIES,
     DataManager,
+    get_shared_data_manager,
     log_market_data_dependency_status,
     market_data_dependency_status,
 )
+from exchange_calendar import next_session_start, open_exchanges, seconds_until_next_open
+from latency_tracker import get_latency_tracker, now_mark
+from memory_diagnostics import current_rss_mb, log_rss
 from order_executor import Order, OrderExecutor, OrderStatus
 from screener_premium import PremiumScreener
 from telegram_handler import (
@@ -19,6 +24,7 @@ from telegram_handler import (
     SCREENER_CATEGORIES,
     SCREENER_CATEGORY_ALIASES,
     TelegramHandler,
+    format_option_breakout_alert,
 )
 from timezone_utils import ensure_timezone, now_local_iso
 
@@ -48,9 +54,15 @@ DISABLED_STRATEGY_CATEGORIES = DISABLED_CATEGORIES
 
 
 class SignalNotifier:
-    def __init__(self, telegram_handler: TelegramHandler, metrics_collector=None) -> None:
+    def __init__(
+        self,
+        telegram_handler: TelegramHandler,
+        metrics_collector=None,
+        practice_mode: Optional[bool] = None,
+    ) -> None:
         self.telegram_handler = telegram_handler
         self.metrics_collector = metrics_collector
+        self.practice_mode = practice_mode
         self.delivery_attempts = 0
         self.delivery_failures = 0
 
@@ -72,15 +84,42 @@ class SignalNotifier:
         self._send(TRADE_CONTROL_CHANNEL, message)
 
     def notify_strategy_signal(self, signal: dict) -> None:
-        message = (
-            "📡 Strategy signal queued\n"
-            f"Symbol: {signal['symbol']}\n"
-            f"Action: {signal['action']}\n"
-            f"Source: {signal.get('metadata', {}).get('source', 'unknown')}\n"
-            f"Time: {signal.get('timestamp', now_local_iso())}"
-        )
+        metadata = signal.get("metadata") or {}
+        message = self.format_strategy_signal(signal)
+        latency_marks = metadata.get("latency_marks")
         for channel in self.channels_for_signal(signal):
+            if latency_marks and channel == SCREENER_ALERTS_CHANNEL:
+                marks = dict(latency_marks)
+                marks["send_start"] = now_mark()
+                get_latency_tracker().record(marks)
             self._send(channel, message)
+
+    def format_strategy_signal(self, signal: dict) -> str:
+        metadata = signal.get("metadata") or {}
+        if metadata.get("premium_strategy") and metadata.get("option_symbol"):
+            alert = {
+                **metadata,
+                "symbol": signal.get("symbol"),
+                "underlying": metadata.get("underlying") or signal.get("symbol"),
+                "category": metadata.get("category") or signal.get("category") or metadata.get("route_category"),
+                "entry": metadata.get("entry", signal.get("entry_price")),
+                "stop_loss": metadata.get("stop_loss", signal.get("stop_loss")),
+                "target": metadata.get("target", signal.get("target_price")),
+            }
+            return format_option_breakout_alert(alert, practice_mode=self.practice_mode)
+        lines = [
+            "📡 Strategy signal queued",
+            f"Symbol: {signal['symbol']}",
+            f"Action: {signal['action']}",
+        ]
+        for label, key in (("Entry", "entry_price"), ("Stop Loss", "stop_loss"), ("Target", "target_price")):
+            if signal.get(key) is not None:
+                lines.append(f"{label}: {signal[key]}")
+        if metadata.get("timeframe"):
+            lines.append(f"Timeframe: {metadata['timeframe']}")
+        lines.append(f"Source: {metadata.get('source', 'unknown')}")
+        lines.append(f"Time: {signal.get('timestamp', now_local_iso())}")
+        return "\n".join(lines)
 
     def notify_order(self, signal: dict, order: Order, practice_mode: bool) -> None:
         state = "practice" if practice_mode else "live"
@@ -341,18 +380,43 @@ class QueueConsumerWorker:
         return new_qty, round(new_avg, 4)
 
 
+def _env_seconds(name: str, default: float, minimum: float) -> float:
+    try:
+        return max(minimum, float(os.getenv(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
 class MarketScannerWorker:
+    """Runs the premium screener while at least one exchange (NSE/BSE/MCX) is open.
+
+    * ``market-scanner`` thread: candle refresh (once per completed 10-min bucket).
+    * ``live-trigger`` thread: batched LTP poll for armed contracts (immediate alert).
+    When every exchange is closed (weekend, holiday, off-hours) both threads sleep
+    until the next session (capped by ``SCANNER_IDLE_SECONDS``) and the filtered
+    security master is released; the Flask health endpoint keeps running.
+    """
+
     def __init__(self, signal_acceptor: Callable[[dict, bool], bool], runtime_config: dict) -> None:
         self.signal_acceptor = signal_acceptor
         self.runtime_config = runtime_config
         self.enabled = bool(runtime_config.get("scanner_enabled"))
+        self.idle_seconds = _env_seconds("SCANNER_IDLE_SECONDS", 300.0, 5.0)
+        self.live_poll_seconds = _env_seconds("LIVE_TRIGGER_POLL_SECONDS", 1.0, 1.0)
+        self.live_trigger_enabled = os.getenv("LIVE_TRIGGER_ENABLED", "true").strip().lower() not in {
+            "0", "false", "no", "off"
+        }
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._live_thread: Optional[threading.Thread] = None
         self._scanner: Optional[PremiumScreener] = None
+        self._data_manager: Optional[DataManager] = None
         self._last_run_at: str | None = None
+        self._last_live_check_at: str | None = None
         self._last_error: str | None = None
         self._submitted_signals = 0
         self._dependencies: dict[str, bool] = {}
+        self._market_state: str = "unknown"
 
     def check_dependencies(self) -> bool:
         """Log data-source dependency diagnostics; return False if the scanner cannot run."""
@@ -375,6 +439,7 @@ class MarketScannerWorker:
         if not self.enabled:
             return False
         if self._thread and self._thread.is_alive():
+            logger.info("Market scanner already running; duplicate start ignored")
             return False
         if not self.check_dependencies():
             return False
@@ -387,25 +452,62 @@ class MarketScannerWorker:
             name="market-scanner",
         )
         self._thread.start()
+        if self.live_trigger_enabled and callable(getattr(self._scanner, "live_check_once", None)):
+            self._live_thread = threading.Thread(target=self.live_forever, daemon=True, name="live-trigger")
+            self._live_thread.start()
+        log_rss("market scanner started")
         return True
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=2)
+        for thread in (self._thread, self._live_thread):
+            if thread and thread is not threading.current_thread():
+                thread.join(timeout=5)
 
     def status(self) -> dict:
+        scanner_status = getattr(self._scanner, "status", None)
+        data_manager = self._data_manager
         return {
             "enabled": self.enabled,
             "running": bool(self._thread and self._thread.is_alive()),
+            "live_trigger_running": bool(self._live_thread and self._live_thread.is_alive()),
+            "market_state": self._market_state,
             "submitted_signals": self._submitted_signals,
             "last_run_at": self._last_run_at,
+            "last_live_check_at": self._last_live_check_at,
             "last_error": self._last_error,
             "dependencies": dict(self._dependencies),
+            "screener": scanner_status() if callable(scanner_status) else {},
+            "security_master": data_manager.security_master_status() if data_manager is not None else {},
+            "latency_ms": get_latency_tracker().summary(),
+            "rss_mb": current_rss_mb(),
         }
+
+    def _idle_wait(self) -> None:
+        """Sleep while every exchange is closed; free the security master once."""
+        now = ensure_timezone()
+        if self._market_state != "closed":
+            self._market_state = "closed"
+            if self._data_manager is not None and self._data_manager.release_security_master():
+                log_rss("security master released (markets closed)")
+            upcoming = [next_session_start(exchange, now) for exchange in ("NSE", "BSE", "MCX")]
+            upcoming = [moment for moment in upcoming if moment is not None]
+            logger.info(
+                "😴 All exchanges closed (weekend/holiday/off-hours); scanner idle. Next session: %s",
+                min(upcoming).isoformat() if upcoming else "unknown",
+            )
+        until_open = seconds_until_next_open(now)
+        wait = self.idle_seconds if until_open is None else min(self.idle_seconds, max(1.0, until_open))
+        self._stop_event.wait(wait)
 
     def run_forever(self, poll_seconds: float = 5.0) -> None:
         while not self._stop_event.is_set():
+            if not open_exchanges(ensure_timezone()):
+                self._idle_wait()
+                continue
+            if self._market_state != "open":
+                self._market_state = "open"
+                logger.info("🔔 Exchange session open; market scanner active")
             try:
                 self.run_once()
             except Exception as exc:
@@ -413,11 +515,29 @@ class MarketScannerWorker:
                 logger.error("Scanner cycle failed: %s", exc.__class__.__name__)
             self._stop_event.wait(max(1.0, poll_seconds))
 
+    def live_forever(self) -> None:
+        while not self._stop_event.is_set():
+            if not open_exchanges(ensure_timezone()):
+                self._stop_event.wait(self.idle_seconds)
+                continue
+            try:
+                self.live_check_once()
+            except Exception as exc:
+                self._last_error = exc.__class__.__name__
+                logger.error("Live trigger check failed: %s", exc.__class__.__name__)
+            self._stop_event.wait(self.live_poll_seconds)
+
     def run_once(self) -> int:
         if self._scanner is None:
             self._scanner = self._build_scanner()
         self._last_run_at = now_local_iso()
         return self._scanner.run_once(now=ensure_timezone())
+
+    def live_check_once(self) -> int:
+        if self._scanner is None or not callable(getattr(self._scanner, "live_check_once", None)):
+            return 0
+        self._last_live_check_at = now_local_iso()
+        return self._scanner.live_check_once(now=ensure_timezone())
 
     def _build_scanner(self) -> PremiumScreener:
         class _NullTelegramHandler:
@@ -428,8 +548,9 @@ class MarketScannerWorker:
             def add_position(self, **_kwargs):
                 return True
 
+        self._data_manager = get_shared_data_manager()
         return PremiumScreener(
-            DataManager(),
+            self._data_manager,
             _NullTelegramHandler(),
             _NullPositionManager(),
             signal_callback=self._enqueue_signal,

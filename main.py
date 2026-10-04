@@ -15,6 +15,7 @@ import os
 import sys
 import logging
 import atexit
+import time
 from dotenv import load_dotenv
 from datetime import datetime
 from uuid import uuid4
@@ -277,17 +278,22 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
     if not signal_queue_processor.enqueue_signal(signal):
         return None, ("Signal rejected by queue", 409)
 
+    latency_marks = signal.get("metadata", {}).get("latency_marks")
+    if isinstance(latency_marks, dict):
+        latency_marks["queue"] = time.monotonic()
+
+    # Screener alert goes out first (latency-sensitive); persistence follows.
+    if signal_notifier is not None and signal.get("metadata", {}).get("source") == "scanner":
+        signal_notifier.notify_strategy_signal(signal)
+
     if trading_db is not None:
         try:
             trading_db.log_signal(signal)
         except Exception as db_error:
             logger.warning("Signal accepted but could not be persisted: %s", db_error.__class__.__name__)
 
-    if signal_notifier is not None:
-        if notify_acceptance:
-            signal_notifier.notify_signal_accepted(signal)
-        if signal.get("metadata", {}).get("source") == "scanner":
-            signal_notifier.notify_strategy_signal(signal)
+    if signal_notifier is not None and notify_acceptance:
+        signal_notifier.notify_signal_accepted(signal)
 
     return {
         "status": "accepted",
@@ -301,13 +307,22 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
 # INITIALIZATION
 # ============================================================================
 
-def initialize_app():
-    """Initialize all application components"""
+def initialize_app(force: bool = False):
+    """Initialize all application components.
+
+    Idempotent: ``python main.py`` imports this module (module-level init for
+    WSGI servers) and then calls ``main()``; a second call must not allocate a
+    second scanner/DataManager/cache set. Pass ``force=True`` to re-initialize.
+    """
     global dhan_bridge, postback_handler, dhan_integration
     global strategy_manager, risk_manager, order_executor, signal_queue_processor
     global trading_db, state_manager, metrics_collector, alert_manager
     global telegram_handler, signal_notifier, queue_consumer_worker, market_scanner_worker, token_manager
     global phase_components, runtime_config, initialized
+
+    if initialized and not force:
+        logger.info("✅ Application already initialized; duplicate initialization skipped")
+        return True
 
     if initialized:
         logger.info("♻️ Re-initializing application components...")
@@ -461,7 +476,15 @@ def initialize_app():
 
         if TelegramHandler is not None:
             telegram_handler = TelegramHandler()
-            signal_notifier = SignalNotifier(telegram_handler, metrics_collector) if SignalNotifier is not None else None
+            signal_notifier = (
+                SignalNotifier(
+                    telegram_handler,
+                    metrics_collector,
+                    practice_mode=bool(runtime_config.get("practice_mode", True)),
+                )
+                if SignalNotifier is not None
+                else None
+            )
         else:
             telegram_handler = None
             signal_notifier = None

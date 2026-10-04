@@ -71,6 +71,14 @@ class LiveSignalDetector:
             except (OverflowError, OSError, ValueError):
                 return False
 
+        try:
+            aware = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            aware = None
+        if aware is not None and aware.tzinfo is not None:
+            # Offset-aware ISO timestamps (e.g. live LTP triggers in IST).
+            return abs(reference_now - aware) <= self.freshness
+
         for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%H:%M", "%H:%M:%S"):
             try:
                 parsed = datetime.strptime(timestamp, fmt)
