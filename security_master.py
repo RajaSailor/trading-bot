@@ -400,6 +400,8 @@ class SecurityMasterCache:
         return had_index
 
     def status(self) -> dict:
+        # Lock-free on purpose: get_index() holds the lock during the download and
+        # /health must stay responsive. Diagnostic counters may lag by one load.
         index = self._index
         return {
             "loaded": index is not None,

@@ -55,7 +55,7 @@ Flask app, including `/health`, keeps running.
 | `LIVE_TRIGGER_ENABLED` | `true` | Live LTP breakout checks between candles. |
 | `LIVE_TRIGGER_POLL_SECONDS` | `1` | Live LTP poll interval (Dhan LTP limit is 1 request/s). |
 | `SCANNER_REFRESH_RETRY_SECONDS` | `120` | Retry delay after a failed candle refresh. |
-| `EXCHANGE_EXTRA_HOLIDAYS` | – | Extra closures, e.g. `ALL:2027-01-26,MCX:2026-12-31`. Required for 2027+ until the calendar is updated. |
+| `EXCHANGE_EXTRA_HOLIDAYS` | – | Extra closures, e.g. `ALL:2027-01-26,MCX:2026-12-31`; MCX half days via `MCX_MORNING:<date>` / `MCX_EVENING:<date>`. Required for 2027+ until the calendar is updated. |
 | `DHAN_SECURITY_MASTER_URL` | Dhan compact CSV | Override the security master source. |
 
 ## Running in PRACTICE_MODE

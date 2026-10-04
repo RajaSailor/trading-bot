@@ -77,6 +77,14 @@ class ExchangeCalendarTests(unittest.TestCase):
             self.assertFalse(is_trading_day(MCX, date(2026, 10, 7)))
             self.assertFalse(is_trading_day(BSE, date(2026, 10, 7)))
 
+    def test_mcx_half_day_closures_from_env(self):
+        with patch.dict(os.environ, {"EXCHANGE_EXTRA_HOLIDAYS": "MCX_MORNING:2026-10-06,MCX_EVENING:2026-10-07"}):
+            self.assertFalse(is_exchange_open(MCX, _ist(2026, 10, 6, 10, 0)))
+            self.assertTrue(is_exchange_open(MCX, _ist(2026, 10, 6, 18, 0)))
+            self.assertTrue(is_exchange_open(MCX, _ist(2026, 10, 7, 10, 0)))
+            self.assertFalse(is_exchange_open(MCX, _ist(2026, 10, 7, 18, 0)))
+            self.assertTrue(is_exchange_open(NSE, _ist(2026, 10, 6, 10, 0)))
+
 
 if __name__ == "__main__":
     unittest.main()

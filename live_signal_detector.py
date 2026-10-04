@@ -46,6 +46,10 @@ class LiveSignalDetector:
         self._evict_if_needed()
         return True
 
+    def forget(self, key: str) -> None:
+        """Drop ``key`` so a signal whose delivery failed can be emitted again."""
+        self._signals.pop(key, None)
+
     def _evict_if_needed(self) -> None:
         while len(self._order) > self.cache_size:
             expired_key, expired_breakout = self._order.popleft()

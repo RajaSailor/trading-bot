@@ -159,7 +159,7 @@ class PremiumScreener:
         return {
             symbol: float(prices[(ref.exchange_segment, int(ref.security_id))])
             for symbol, ref in refs.items()
-            if prices.get((ref.exchange_segment, int(ref.security_id)))
+            if prices.get((ref.exchange_segment, int(ref.security_id))) is not None
         }
 
     def _refresh_instrument(self, instrument, interval: str, now: datetime, spot: Optional[float] = None) -> int:
@@ -304,6 +304,7 @@ class PremiumScreener:
         signal_key = self._signal_key(instrument.category, {**signal, "option_symbol": contract["option_symbol"]})
         with self._lock:
             reference = state.get("reference")
+            was_armed = bool(reference.get("armed")) if reference is not None else False
             if reference is not None:
                 # Each RED reference fires at most once (live or candle).
                 reference["armed"] = False
@@ -316,6 +317,8 @@ class PremiumScreener:
                 str(signal.get("breakout_timestamp", "")),
                 now=self._as_ist(now).astimezone(timezone.utc),
             ):
+                if reference is not None:
+                    reference["armed"] = was_armed
                 logger.debug("⚠️ [%s] Non-live/historical signal skipped: %s", instrument.symbol, signal_key)
                 return 0
             self._remember_signal_key(signal_key)
@@ -337,6 +340,12 @@ class PremiumScreener:
             return 1
         with self._lock:
             self._processed_signal_keys.discard(signal_key)
+            forget = getattr(self.live_signal_detector, "forget", None)
+            if callable(forget):
+                forget(signal_key)
+            if reference is not None:
+                # Let the live trigger retry a reference whose alert was not delivered.
+                reference["armed"] = was_armed
         logger.warning("⚠️ Alert rejected/skipped for %s %s", instrument.symbol, signal["signal"])
         return 0
 

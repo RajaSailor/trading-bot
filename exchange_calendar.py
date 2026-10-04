@@ -12,6 +12,8 @@ Holiday lists follow the official NSE / BSE / MCX 2026 circulars. Additional
 closures (or a future year) can be supplied at runtime without a code change via
 ``EXCHANGE_EXTRA_HOLIDAYS`` (comma separated ``EXCHANGE:YYYY-MM-DD``; use ``ALL``
 for every exchange), e.g. ``EXCHANGE_EXTRA_HOLIDAYS=ALL:2026-11-09,MCX:2026-12-31``.
+MCX half-day closures use ``MCX_MORNING:YYYY-MM-DD`` (evening session only) or
+``MCX_EVENING:YYYY-MM-DD`` (morning session only).
 """
 
 from __future__ import annotations
@@ -180,9 +182,9 @@ def session_windows(exchange: str, day: date) -> tuple[tuple[time, time], ...]:
         return (EQUITY_SESSION,)
     if exchange == MCX:
         close = mcx_close_time(day)
-        if day in MCX_MORNING_CLOSED_2026:
+        if day in MCX_MORNING_CLOSED_2026 or day in _extra_holidays("MCX_MORNING"):
             return ((MCX_EVENING_OPEN, close),)
-        if day in MCX_EVENING_CLOSED_2026:
+        if day in MCX_EVENING_CLOSED_2026 or day in _extra_holidays("MCX_EVENING"):
             return ((MCX_OPEN, MCX_EVENING_OPEN),)
         return ((MCX_OPEN, close),)
     return ()

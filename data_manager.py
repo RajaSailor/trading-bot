@@ -1031,6 +1031,14 @@ class DataManager:
         if underlying is None:
             logger.warning(f"Could not find security_id for {symbol} on {exchange_segment}")
             return None
+        if (exchange_segment and exchange_segment != underlying.exchange_segment) or (
+            instrument_type and instrument_type != underlying.instrument_type
+        ):
+            logger.warning(
+                f"Security master underlying for {symbol} is {underlying.exchange_segment}/"
+                f"{underlying.instrument_type}, not the requested {exchange_segment}/{instrument_type}"
+            )
+            return None
         logger.info(
             f"✅ Found security_id={underlying.security_id} for {symbol} on {underlying.exchange_segment}"
         )

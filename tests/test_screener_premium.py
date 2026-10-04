@@ -183,6 +183,20 @@ class BreakoutFlowTests(_Base):
         self.assertIn("IST", meta["breakout_time_ist"])
         self.assertEqual({"receive", "evaluate"}, set(meta["latency_marks"]))
 
+    def test_failed_delivery_keeps_reference_armed_for_retry(self):
+        candles = [_candle(0, 50, 55, 45, 48)]
+        self._prime({201: candles})
+        delivered = []
+        self.screener.signal_callback = lambda payload: bool(delivered)
+        self.screener.position_manager.add_position.return_value = None
+        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 201): 56}
+
+        self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
+        self.assertEqual(1, len(self.screener.armed_contracts()))
+        delivered.append(True)
+        self.assertEqual(1, self.screener.live_check_once(MONDAY_MORNING))
+        self.assertEqual(0, len(self.screener.armed_contracts()))
+
     def test_put_side_alert_is_buy_put(self):
         candles = [_candle(0, 50, 55, 45, 48)]
         self._prime({201: candles})
