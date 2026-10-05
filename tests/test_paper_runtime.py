@@ -137,3 +137,21 @@ def test_trailing_provider_excludes_incomplete_and_previous_day_candles():
             "exchange_segment": "NSE_FNO", "security_id": 123, "segment": "index_options",
         }) == candles[1]
         assert fetcher.return_value.fetch_option_candles.call_args.args[0]["instrument_type"] == "OPTIDX"
+
+
+def test_trailing_cache_refreshes_at_exchange_completed_candle_boundary():
+    adapter = PaperMarketData(data_manager=Mock())
+    trade = {"exchange_segment": "NSE_FNO", "security_id": 123, "segment": "index"}
+    earlier = {"timestamp": datetime(2026, 10, 5, 9, 15, tzinfo=IST).timestamp(), "low": 90}
+    newest = {"timestamp": datetime(2026, 10, 5, 9, 25, tzinfo=IST).timestamp(), "low": 95}
+    with patch("paper_runtime.datetime") as clock, \
+            patch("paper_runtime.market_timestamp", side_effect=lambda value: datetime.fromtimestamp(value, IST)), \
+            patch("paper_runtime.ATMOptionsFetcher") as fetcher:
+        fetcher.return_value.fetch_option_candles.side_effect = [[earlier], [earlier, newest]]
+        clock.now.return_value = datetime(2026, 10, 5, 9, 30, tzinfo=IST)
+        assert adapter.candle(trade) == earlier
+        clock.now.return_value = datetime(2026, 10, 5, 9, 34, tzinfo=IST)
+        assert adapter.candle(trade) == earlier
+        clock.now.return_value = datetime(2026, 10, 5, 9, 35, tzinfo=IST)
+        assert adapter.candle(trade) == newest
+        assert fetcher.return_value.fetch_option_candles.call_count == 2

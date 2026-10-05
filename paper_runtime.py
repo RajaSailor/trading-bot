@@ -9,7 +9,9 @@ from zoneinfo import ZoneInfo
 import requests
 
 from atm_options_fetcher import ATMOptionsFetcher
-from data_manager import _apply_rate_limit, _quote_rate_limiter, get_shared_data_manager
+from data_manager import (
+    _apply_rate_limit, _quote_rate_limiter, _session_anchor_minutes, get_shared_data_manager,
+)
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -102,7 +104,8 @@ class PaperMarketData:
     def candle(self, trade):
         now = datetime.now(IST)
         key = (trade["exchange_segment"], trade["security_id"])
-        bucket = int(now.timestamp()) // 600
+        anchor = _session_anchor_minutes(trade["exchange_segment"])
+        bucket = (now.date(), (now.hour * 60 + now.minute - anchor) // 10)
         cached = self._candles.get(key)
         if cached and cached[0] == bucket:
             return cached[1]
