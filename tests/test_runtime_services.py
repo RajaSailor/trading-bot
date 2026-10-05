@@ -173,7 +173,7 @@ class QueueConsumerWorkerTests(unittest.TestCase):
             )
 
             self.assertTrue(worker.process_one())
-            self.assertEqual([("telegram", "delivery_failed"), ("telegram", "delivery_failed")], metrics.errors)
+            self.assertEqual([("telegram", "delivery_failed")], metrics.errors)
 
     def test_failures_are_requeued_with_retry_metadata(self):
         queue = SignalQueueProcessor()
@@ -229,7 +229,75 @@ class SignalNotifierRoutingTests(unittest.TestCase):
         notifier.notify_order(self._signal(category="commodity_options"), order, True)
         notifier.notify_position_update(self._signal(category="commodity_options"), 1, 100.0)
 
-        self.assertEqual(["trade_control", "trade_control"], [channel for channel, _ in handler.calls])
+        self.assertEqual(["trade_control"], [channel for channel, _ in handler.calls])
+        self.assertIn("Position updated", handler.calls[0][1])
+        self.assertNotIn("Order FILLED", handler.calls[0][1])
+
+    def test_paper_option_lifecycle_reports_open_and_all_close_reasons(self):
+        for exit_price, reason, expected_rupees in (
+            (110.0, "TARGET1", "₹+1,000.00"),
+            (120.0, "TARGET2", "₹+2,000.00"),
+            (90.0, "STOP LOSS", "₹-1,000.00"),
+        ):
+            with self.subTest(reason=reason):
+                handler = _FakeTelegramHandler()
+                notifier = SignalNotifier(handler)
+                signal = self._signal(
+                    category="index_options",
+                    metadata={
+                        "premium_strategy": True,
+                        "underlying": "NIFTY",
+                        "option_symbol": "NIFTY-Oct2026-25000-CE",
+                        "security_id": 123,
+                        "exchange_segment": "NSE_FNO",
+                        "entry": 100.0,
+                        "stop_loss": 90.0,
+                        "lot_size": 50,
+                    },
+                    stop_loss=90.0,
+                    quantity=2,
+                )
+                order = SimpleNamespace(
+                    order_id="PAPER-1",
+                    status=SimpleNamespace(value="FILLED"),
+                    price=100.0,
+                    quantity=2,
+                    filled_quantity=2,
+                    updated_at="2026-10-05T10:00:00+05:30",
+                )
+
+                self.assertTrue(notifier.notify_paper_trade_opened(signal, order))
+                self.assertEqual(
+                    [{"security_id": 123, "exchange_segment": "NSE_FNO"}],
+                    notifier.paper_option_contracts(),
+                )
+                opened = handler.calls[0][1]
+                for field in (
+                    "PAPER TRADE OPENED",
+                    "NIFTY-Oct2026-25000-CE",
+                    "Entry Premium: ₹100.00",
+                    "Stop Loss: ₹90.00",
+                    "Target 1 (1R): ₹110.00",
+                    "Target 2 (2R): ₹120.00",
+                    "Qty/Lots: 100 units (2 lot(s) × 50)",
+                    "Time: 2026-10-05T10:00:00+05:30",
+                ):
+                    self.assertIn(field, opened)
+
+                self.assertEqual(
+                    1,
+                    notifier.update_paper_trades(
+                        {("NSE_FNO", 123): exit_price},
+                        exit_time="2026-10-05T10:05:00+05:30",
+                    ),
+                )
+                closed = handler.calls[1][1]
+                self.assertIn("PAPER TRADE CLOSED", closed)
+                self.assertIn(f"Reason: {reason}", closed)
+                self.assertIn(f"P&L: {exit_price - 100:+.2f} points | {expected_rupees}", closed)
+                self.assertIn("Entry Time: 2026-10-05T10:00:00+05:30", closed)
+                self.assertIn("Exit Time: 2026-10-05T10:05:00+05:30", closed)
+                self.assertEqual([], notifier.paper_option_contracts())
 
     def test_option_strategy_signals_route_only_to_service_alerts(self):
         categories = [

@@ -540,6 +540,7 @@ def initialize_app(force: bool = False):
             market_scanner_worker = MarketScannerWorker(
                 signal_acceptor=lambda payload, notify: _queue_signal_from_payload(payload, notify)[0] is not None,
                 runtime_config=runtime_config,
+                paper_trade_notifier=signal_notifier,
             )
             scanner_started = market_scanner_worker.start(runtime_config["scanner_poll_seconds"])
             scanner_status = market_scanner_worker.status()

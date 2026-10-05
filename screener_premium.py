@@ -13,7 +13,6 @@ from exchange_calendar import MCX, exchange_for_instrument, open_exchanges
 from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
-from strategy_engine import StrategyEngine
 from telegram_handler import SCREENER_CATEGORIES, format_ist_timestamp
 
 
@@ -58,6 +57,7 @@ class PremiumScreener:
         trade_control_bot=None,
         live_signal_detector: LiveSignalDetector | None = None,
         signal_callback=None,
+        paper_trade_notifier=None,
     ) -> None:
         self.data_manager = data_manager
         self.telegram_handler = telegram_handler
@@ -66,10 +66,9 @@ class PremiumScreener:
         self.trade_control_bot = trade_control_bot
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=LOOKBACK_CANDLES)
-        self.spot_engine = StrategyEngine(lookback=7)
         self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.signal_callback = signal_callback
-        self.spot_scan_interval_seconds = 10 * 60
+        self.paper_trade_notifier = paper_trade_notifier
         self.refresh_retry_seconds = _env_float("SCANNER_REFRESH_RETRY_SECONDS", REFRESH_RETRY_SECONDS)
         self._lock = threading.RLock()
         self._processed_signal_keys: set[str] = set()
@@ -82,8 +81,6 @@ class PremiumScreener:
         self.index_instruments = universe.get("index_options", [])
         self.commodity_instruments = universe.get("commodity_options", [])
         self.stock_instruments = universe.get("nifty50_stock_options", [])
-        self.stock_spot_instruments = universe.get("nifty50_stock_spot", [])
-        self.last_run = {"stock_spot_10min": 0.0}
 
     # ================================================================ scan
     def option_instruments(self) -> List:
@@ -103,16 +100,6 @@ class PremiumScreener:
             if exchange_for_instrument(instrument) in open_now and self._refresh_due(instrument, now)
         ]
         alerts = self._scan_instruments(due, INTERVAL, now) if due else 0
-
-        if "NSE" in open_now and self.stock_spot_instruments:
-            if time.time() - self.last_run["stock_spot_10min"] >= self.spot_scan_interval_seconds:
-                alerts += self._scan_spot_instruments(
-                    self.stock_spot_instruments,
-                    INTERVAL,
-                    StrategyEngine.GROUP_2,
-                    primary_category="nifty50_stock_options",
-                )
-                self.last_run["stock_spot_10min"] = time.time()
         return alerts
 
     def _refresh_due(self, instrument, now: datetime) -> bool:
@@ -264,16 +251,35 @@ class PremiumScreener:
         """Poll batched LTPs for armed contracts and trigger on RED-high crosses."""
         now = self._as_ist(now)
         open_now = open_exchanges(now)
+        paper_contracts = []
+        if self.paper_trade_notifier is not None:
+            get_contracts = getattr(self.paper_trade_notifier, "paper_option_contracts", None)
+            if callable(get_contracts):
+                paper_contracts = [
+                    contract for contract in get_contracts()
+                    if self._contract_exchange(contract) in open_now
+                ]
         armed = [
             state for state in self.armed_contracts()
             if exchange_for_instrument(state["instrument"]) in open_now
         ]
-        if not armed:
+        if not armed and not paper_contracts:
             return 0
         request: Dict[str, List[int]] = {}
+        requested_ids: Dict[str, set[int]] = {}
         for state in armed:
             contract = state["contract"]
-            request.setdefault(contract["exchange_segment"], []).append(int(contract["security_id"]))
+            segment = contract["exchange_segment"]
+            security_id = int(contract["security_id"])
+            if security_id not in requested_ids.setdefault(segment, set()):
+                request.setdefault(segment, []).append(security_id)
+                requested_ids[segment].add(security_id)
+        for contract in paper_contracts:
+            segment = contract["exchange_segment"]
+            security_id = int(contract["security_id"])
+            if security_id not in requested_ids.setdefault(segment, set()):
+                request.setdefault(segment, []).append(security_id)
+                requested_ids[segment].add(security_id)
         prices = self.data_manager.fetch_ltp(request) or {}
         receive_mark = now_mark()
         if not prices:
@@ -298,7 +304,20 @@ class PremiumScreener:
             alerts += self._emit(
                 state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now, require_armed=True
             )
+        if paper_contracts and self.paper_trade_notifier is not None:
+            update_trades = getattr(self.paper_trade_notifier, "update_paper_trades", None)
+            if callable(update_trades):
+                update_trades(prices, exit_time=now.isoformat(timespec="seconds"))
         return alerts
+
+    @staticmethod
+    def _contract_exchange(contract: dict) -> str:
+        segment = str(contract.get("exchange_segment") or "").upper()
+        if segment.startswith("MCX"):
+            return "MCX"
+        if segment.startswith("BSE"):
+            return "BSE"
+        return "NSE"
 
     # ================================================================ emit
     def _emit(
@@ -424,89 +443,6 @@ class PremiumScreener:
             return True
         return False
 
-    # ================================================================ spot
-    def _scan_spot_instruments(
-        self,
-        instruments,
-        interval: str,
-        strategy_group: str,
-        primary_category: str,
-    ) -> int:
-        alerts = 0
-        logger.debug("📊 Scanning %s spot instruments for interval %s", len(instruments), interval)
-
-        for instrument in instruments:
-            try:
-                engine = self._fresh_spot_engine()
-                candles = self.data_manager.fetch_candles(instrument, interval)
-                if len(candles) < 2:
-                    logger.debug("❌ [%s] Insufficient spot candles", instrument.symbol)
-                    continue
-
-                latest = candles[-1]
-                for historical in candles[-8:-1]:
-                    engine.add_candle(instrument.symbol, historical)
-                if not engine.add_candle(instrument.symbol, latest):
-                    continue
-
-                for signal in engine.evaluate(instrument.symbol, strategy_group):
-                    signal_key = self._signal_key(primary_category, signal)
-                    if signal_key in self._processed_signal_keys:
-                        continue
-                    if not self.live_signal_detector.should_emit(
-                        signal_key,
-                        str(signal.get("reference_timestamp", "")),
-                        str(signal.get("breakout_timestamp", "")),
-                    ):
-                        continue
-                    logger.info(
-                        "🚀 [%s] %s spot breakout for %s @ %.2f",
-                        primary_category,
-                        signal["signal"],
-                        instrument.symbol,
-                        signal["entry"],
-                    )
-                    signal["timeframe"] = self._display_timeframe(interval)
-                    signal["spot_strategy"] = True
-                    signal["category"] = primary_category
-                    signal["signal_time_ist"] = datetime.now(IST).strftime("%H:%M:%S")
-                    signal["signal_date_ist"] = datetime.now(IST).strftime("%d:%m:%Y")
-
-                    if self.signal_callback and self.signal_callback(
-                        self._build_queue_payload(
-                            instrument=instrument,
-                            signal=signal,
-                            route_category=primary_category,
-                            strategy_name="spot_screener",
-                            option_data={"instrument_label": "SPOT", "spot_ltp": latest["close"]},
-                        )
-                    ):
-                        self._remember_signal_key(signal_key)
-                        alerts += 1
-                        continue
-
-                    accepted = self.position_manager.add_position(
-                        symbol=instrument.symbol,
-                        side=signal["signal"],
-                        entry_price=signal["entry"],
-                        stop_loss=signal["stop_loss"],
-                        targets=signal["targets"],
-                    )
-                    if not accepted:
-                        continue
-
-                    spot_payload = {
-                        "instrument_label": "SPOT",
-                        "spot_ltp": latest["close"],
-                    }
-                    if self.telegram_handler.send_signal_alert(primary_category, signal, spot_payload):
-                        self._remember_signal_key(signal_key)
-                        alerts += 1
-            except Exception as exc:
-                logger.error("❌ Spot screener failed for %s: %s", instrument.symbol, exc, exc_info=True)
-
-        return alerts
-
     # ================================================================ helpers
     @staticmethod
     def _display_timeframe(interval: str) -> str:
@@ -520,13 +456,6 @@ class PremiumScreener:
         # Single combined options screener channel: no fan-out to retired
         # NIFTY50 5X / pay-later routes.
         return self.telegram_handler.send_signal_alert(category, signal, telegram_payload)
-
-    def _fresh_spot_engine(self):
-        engine_class = self.spot_engine.__class__
-        try:
-            return engine_class(lookback=getattr(self.spot_engine, "lookback", 7))
-        except TypeError:
-            return engine_class()
 
     @staticmethod
     def _build_queue_payload(
