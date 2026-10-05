@@ -97,6 +97,7 @@ class SignalNotifier:
     def format_strategy_signal(self, signal: dict) -> str:
         metadata = signal.get("metadata") or {}
         if metadata.get("premium_strategy") and metadata.get("option_symbol"):
+            compact = SCREENER_ALERTS_CHANNEL in self.channels_for_signal(signal)
             alert = {
                 **metadata,
                 "symbol": signal.get("symbol"),
@@ -106,7 +107,7 @@ class SignalNotifier:
                 "stop_loss": metadata.get("stop_loss", signal.get("stop_loss")),
                 "target": metadata.get("target", signal.get("target_price")),
             }
-            return format_option_breakout_alert(alert, practice_mode=self.practice_mode)
+            return format_option_breakout_alert(alert, practice_mode=self.practice_mode, compact=compact)
         lines = [
             "📡 Strategy signal queued",
             f"Symbol: {signal['symbol']}",

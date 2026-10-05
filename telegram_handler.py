@@ -69,7 +69,11 @@ _CATEGORY_LABELS = {
 _TRIGGER_LABELS = {"live_ltp": "live LTP crossed red high", "candle_high": "10-min candle high crossed red high"}
 
 
-def format_option_breakout_alert(alert: dict, practice_mode: Optional[bool] = None) -> str:
+def format_option_breakout_alert(
+    alert: dict,
+    practice_mode: Optional[bool] = None,
+    compact: bool = False,
+) -> str:
     """Complete SERVICE_ALERTS message for an option premium breakout (HTML-safe).
 
     Expected keys: underlying, category, option_symbol, strike, option_type,
@@ -79,7 +83,7 @@ def format_option_breakout_alert(alert: dict, practice_mode: Optional[bool] = No
     esc = lambda value: html.escape(str(value if value not in (None, "") else "N/A"))  # noqa: E731
     option_type = str(alert.get("option_type") or "").upper()
     action = alert.get("action_text") or ("BUY CALL" if option_type == "CE" else "BUY PUT")
-    icon = "🚀" if option_type == "CE" else "📉"
+    icon = "🚀" if compact or option_type == "CE" else "📉"
     category = str(alert.get("category") or alert.get("route_category") or "")
     category_label = _CATEGORY_LABELS.get(category, category.replace("_", " ").upper() or "OPTIONS")
     target = alert.get("target")
@@ -87,25 +91,41 @@ def format_option_breakout_alert(alert: dict, practice_mode: Optional[bool] = No
         target = alert["targets"][0]
     reference_ist = alert.get("reference_time_ist") or format_ist_timestamp(alert.get("reference_timestamp"))
     breakout_ist = alert.get("breakout_time_ist") or format_ist_timestamp(
-        alert.get("breakout_timestamp"), with_seconds=True
+        alert.get("breakout_timestamp"), with_seconds=not compact
     )
     trigger = _TRIGGER_LABELS.get(str(alert.get("trigger") or ""), alert.get("trigger") or "breakout")
-    lines = [
-        f"{icon} <b>{esc(action)}</b> | <b>{esc(alert.get('underlying') or alert.get('symbol'))}</b> ({esc(category_label)})",
-        f"Option: <b>{esc(alert.get('option_symbol'))}</b>",
-        f"Strike: {esc(_fmt_strike(alert.get('strike')))} {esc(option_type)} | Band: {esc(alert.get('strike_band'))}",
-        f"Expiry: {esc(alert.get('expiry'))}",
-        "Timeframe: 10-min | Rule: most recent RED candle high breakout (last 20 candles)",
-        "",
-        "📊 <b>TRADE LEVELS</b>",
-        f"Entry: {esc(_fmt_price(alert.get('entry')))} (red candle high)",
-        f"Stop Loss: {esc(_fmt_price(alert.get('stop_loss')))} (red low {esc(_fmt_price(alert.get('reference_low')))} − 5%)",
-        f"Risk: {esc(_fmt_price(alert.get('risk_points')))} points",
-        f"Target (2R): {esc(_fmt_price(target))}",
-        "",
-        f"🔴 Reference RED candle: {esc(reference_ist)}",
-        f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(alert.get('premium_ltp') or alert.get('breakout_price')))} ({esc(trigger)})",
-    ]
+    if compact:
+        lines = [
+            f"{icon} <b>{esc(action)}</b> | <b>{esc(alert.get('underlying') or alert.get('symbol'))}</b> ({esc(category_label)})",
+            f"Option: <b>{esc(alert.get('option_symbol'))}</b>",
+            f"Strike: {esc(_fmt_strike(alert.get('strike')))} {esc(option_type)} | Band: {esc(alert.get('strike_band'))}",
+            f"Expiry: {esc(alert.get('expiry'))}",
+            "",
+            "📊 <b>TRADE LEVELS</b>",
+            f"Entry: {esc(_fmt_price(alert.get('entry')))}",
+            f"Stop Loss: {esc(_fmt_price(alert.get('stop_loss')))}",
+            f"Risk: {esc(_fmt_price(alert.get('risk_points')))} points",
+            f"Target (2R): {esc(_fmt_price(target))}",
+            "",
+            f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(alert.get('premium_ltp') or alert.get('breakout_price')))}",
+        ]
+    else:
+        lines = [
+            f"{icon} <b>{esc(action)}</b> | <b>{esc(alert.get('underlying') or alert.get('symbol'))}</b> ({esc(category_label)})",
+            f"Option: <b>{esc(alert.get('option_symbol'))}</b>",
+            f"Strike: {esc(_fmt_strike(alert.get('strike')))} {esc(option_type)} | Band: {esc(alert.get('strike_band'))}",
+            f"Expiry: {esc(alert.get('expiry'))}",
+            "Timeframe: 10-min | Rule: most recent RED candle high breakout (last 20 candles)",
+            "",
+            "📊 <b>TRADE LEVELS</b>",
+            f"Entry: {esc(_fmt_price(alert.get('entry')))} (red candle high)",
+            f"Stop Loss: {esc(_fmt_price(alert.get('stop_loss')))} (red low {esc(_fmt_price(alert.get('reference_low')))} − 5%)",
+            f"Risk: {esc(_fmt_price(alert.get('risk_points')))} points",
+            f"Target (2R): {esc(_fmt_price(target))}",
+            "",
+            f"🔴 Reference RED candle: {esc(reference_ist)}",
+            f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(alert.get('premium_ltp') or alert.get('breakout_price')))} ({esc(trigger)})",
+        ]
     if alert.get("spot_ltp") is not None:
         lines.append(f"Underlying spot: {esc(_fmt_price(alert.get('spot_ltp')))}")
     if practice_mode:
@@ -418,7 +438,8 @@ class TelegramHandler:
                 alert[key] = option_data[key]
         if alert.get("strike") is None:
             alert["strike"] = option_data.get("strike_price", option_data.get("strike"))
-        return format_option_breakout_alert(alert)
+        compact = self.CHANNEL_ALIASES.get(category, category) == "service_alerts"
+        return format_option_breakout_alert(alert, compact=compact)
 
     def _format_spot_signal_message(self, category: str, signal_data: dict, option_data: dict) -> str:
         is_long = signal_data["signal"] == "CALL"
