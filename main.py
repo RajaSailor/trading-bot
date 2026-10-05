@@ -281,6 +281,7 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
                 signal_notifier.notify_service_alert("Risk check rejected signal", reason)
             return None, (reason, 400)
 
+    signal["signal_detected_at"] = payload.get("signal_detected_at") or now_local_iso()
     if not signal_queue_processor.enqueue_signal(signal):
         return None, ("Signal rejected by queue", 409)
 
@@ -336,7 +337,9 @@ def initialize_app(force: bool = False):
         if queue_consumer_worker:
             queue_consumer_worker.stop()
         if paper_runtime:
-            paper_runtime.stop()
+            if not paper_runtime.stop():
+                logger.error("Paper monitor is still stopping; reinitialization refused")
+                return False
             paper_runtime = None
         if trading_db:
             try:
@@ -508,6 +511,7 @@ def initialize_app(force: bool = False):
             candle_provider=paper_data.candle,
             approval_timeout=max(1, _env_int("PAPER_APPROVAL_TIMEOUT_SECONDS", 60)),
         )
+        paper_data.portfolio = paper_engine
         paper_controller = PaperTelegramController(
             paper_engine,
             token=os.getenv("BOT_TRADE_CONTROL_TOKEN", ""),
@@ -1158,7 +1162,7 @@ def main():
     logger.info("=" * 70)
     logger.info(f"📅 Started at: {now_local_iso()}")
     logger.info(f"🌍 Timezone: {os.getenv('TIMEZONE', 'Asia/Kolkata')}")
-    logger.info(f"🧪 Practice Mode: {os.getenv('PRACTICE_MODE', 'true')}")
+    logger.info("🧪 Practice Mode: true (paper-only)")
     logger.info(f"⚙️  Port: {os.getenv('PORT', '5000')}")
     logger.info(f"📡 Server Mode: Direct Python Execution")
     logger.info("=" * 70)

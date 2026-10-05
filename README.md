@@ -44,11 +44,15 @@ The `main.py` application is **PRACTICE-only**, including when live-mode
 environment flags are set. Dhan is used for market data, not order placement.
 Run one application process/worker per portfolio and Telegram bot; do not run
 another polling bot (including the legacy `unified_main.py`) with the same token.
+The Procfile and container startup use one web worker; the legacy live-order
+worker is no longer launched.
 
 Set `BOT_TRADE_CONTROL_TOKEN`, `CHANNEL_TRADE_CONTROL_ID`, and
 `TELEGRAM_AUTHORIZED_USER_IDS` (comma-separated numeric **user IDs**, not chat IDs).
 An empty authorization list denies all control actions. Set
 `PAPER_APPROVAL_TIMEOUT_SECONDS` to change the default 60-second approval timeout.
+Authorized users can send commands in the control group or in a private chat
+with the control bot; confirmations and alerts are delivered to `trade_control`.
 `TRADING_DB_PATH` must point to a persistent disk; the portfolio, requests,
 execution timings, daily snapshots, configuration, and actor audit survive restart.
 The new portfolio starts at ₹500,000; legacy JSON/in-memory trades are not imported.

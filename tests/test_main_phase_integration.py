@@ -57,7 +57,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
 
     def test_main_initializes_phase_components_and_exposes_new_routes(self):
         main_module = _load_main()
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(main_module.PaperTradingRuntime, "start"):
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
@@ -184,7 +184,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
             def send(self, _alert):
                 return True
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(main_module.PaperTradingRuntime, "start"):
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
@@ -231,7 +231,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
             def __init__(self, bot_token, chat_id):
                 created_channels.append((bot_token, chat_id))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(main_module.PaperTradingRuntime, "start"):
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
@@ -253,7 +253,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
 
     def test_main_handles_missing_optional_phase_modules(self):
         main_module = _load_main()
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(main_module.PaperTradingRuntime, "start"):
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),

@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS paper_trades (
     id TEXT PRIMARY KEY,
+    signal_id TEXT,
     status TEXT NOT NULL,
     trading_day TEXT NOT NULL,
     payload TEXT NOT NULL
@@ -9,6 +10,11 @@ CREATE INDEX IF NOT EXISTS paper_trades_day ON paper_trades(trading_day);
 CREATE TABLE IF NOT EXISTS paper_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_portfolio_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    payload TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS paper_daily_snapshots (
     trading_day TEXT PRIMARY KEY,

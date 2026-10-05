@@ -138,8 +138,13 @@ class PaperTelegramController:
         message = event.get("message") if callback is not None else event
         chat = message.get("chat") if isinstance(message, dict) else None
         actor = sender.get("id") if isinstance(sender, dict) else None
+        allowed_chat = isinstance(chat, dict) and (
+            str(chat.get("id")) == self.chat_id
+            or (chat.get("type") == "private" and type(chat.get("id")) is int
+                and chat["id"] == actor)
+        )
         authorized = (type(actor) is int and actor in self.authorized_user_ids
-                      and isinstance(chat, dict) and str(chat.get("id")) == self.chat_id)
+                      and allowed_chat and not event.get("sender_chat"))
         if not authorized:
             if callback is not None:
                 self._answer(callback, "Not authorized.")
@@ -278,6 +283,10 @@ class PaperTelegramController:
         elif command == "/positions" and not args:
             positions = (self.engine.trades(status="OPEN")
                          + self.engine.trades(status="EXIT_PENDING"))
+            unique = {}
+            for index, trade in enumerate(positions):
+                unique[trade.get("id") or trade.get("trade_id") or index] = trade
+            positions = list(unique.values())
             text = f"Paper positions: {self._format(self.engine.portfolio())}"
             buttons = []
             for trade in positions:
@@ -293,7 +302,12 @@ class PaperTelegramController:
                 ])
             return text, buttons
         elif command == "/approve" and len(args) in {1, 2}:
-            result = self.engine.approve(args[0], self._order_type(args[1] if len(args) == 2 else "limit"), actor=actor)
+            if len(args) == 2:
+                order_type = self._order_type(args[1])
+            else:
+                trade = self.engine.get(args[0])
+                order_type = self._order_type(trade.get("entry_order_type", "limit"))
+            result = self.engine.approve(args[0], order_type, actor=actor)
         elif command == "/modify" and len(args) >= 2:
             changes = {}
             for item in args[1:]:

@@ -15,6 +15,7 @@ def controller():
     engine.reject.return_value = {"id": "T1", "status": "REJECTED"}
     engine.exit.return_value = {"id": "T1", "status": "CLOSED"}
     engine.configure.return_value = {"approval_required": True}
+    engine.config = {"approval_required": True}
     engine.trades.return_value = []
     engine.portfolio.return_value = {"positions": []}
     engine.squareoff.return_value = []
@@ -68,6 +69,41 @@ def test_authorization_env_parsed(monkeypatch):
     assert control.authorized_user_ids == {7, 8}
 
 
+@pytest.mark.parametrize("is_callback", [False, True])
+def test_authorized_private_chat_controls(controller, is_callback):
+    update = callback("approve_market", chat=7) if is_callback else message("/squareoff", chat=7)
+    event = update["callback_query"] if is_callback else update["message"]
+    chat = event["message"]["chat"] if is_callback else event["chat"]
+    chat["type"] = "private"
+    assert controller.handle_update(update)
+    if is_callback:
+        controller.engine.approve.assert_called_once_with("T1", "market", actor=7)
+    else:
+        controller.engine.squareoff.assert_called_once_with(reason="EMERGENCY", actor=7)
+    assert controller.session.post.call_args.kwargs["json"]["chat_id"] == "-100"
+
+
+@pytest.mark.parametrize("actor,chat_id,chat_type,sender_chat", [
+    (8, 8, "private", None), (7, 8, "private", None),
+    (7, 7, "group", None), (7, -200, "supergroup", None),
+    (7, 7, "private", {"id": -100}), (7, -100, "channel", {"id": -100}),
+])
+def test_unrelated_private_or_channel_sender_rejected(controller, actor, chat_id, chat_type, sender_chat):
+    update = message("/squareoff", actor=actor, chat=chat_id)
+    update["message"]["chat"]["type"] = chat_type
+    if sender_chat:
+        update["message"]["sender_chat"] = sender_chat
+    assert not controller.handle_update(update)
+    assert not controller.engine.mock_calls
+
+
+def test_callback_unrelated_private_chat_rejected(controller):
+    update = callback("approve_market", chat=8)
+    update["callback_query"]["message"]["chat"]["type"] = "private"
+    assert not controller.handle_update(update)
+    controller.engine.approve.assert_not_called()
+
+
 @pytest.mark.parametrize("text,method,args,kwargs", [
     ("/mode approval off", "configure", ({"approval_required": False},), {"actor": 7}),
     ("/mode approval on", "configure", ({"approval_required": True},), {"actor": 7}),
@@ -108,6 +144,13 @@ def test_pending_includes_requests_and_approved_fills(controller):
     assert "T1" in text and "T2" in text
 
 
+def test_approve_defaults_to_stored_entry_order_type(controller):
+    controller.engine.get.return_value = {"id": "T1", "status": "REQUESTED",
+                                        "entry_order_type": "market"}
+    assert controller.handle_update(message("/approve T1"))
+    controller.engine.approve.assert_called_once_with("T1", "market", actor=7)
+
+
 def test_positions_exposes_ids_details_guidance_and_controls(controller):
     controller.engine.trades.side_effect = [
         [{"id": "T1", "status": "OPEN", "stop_loss": 90}],
@@ -127,6 +170,16 @@ def test_positions_exposes_ids_details_guidance_and_controls(controller):
     assert rows[0][0]["callback_data"] == "paper:T1:exit_market"
     assert rows[1][1]["callback_data"] == "paper:T2:exit_limit"
     assert rows[1][2]["callback_data"] == "paper:T2:trailing"
+
+
+def test_positions_deduplicates_open_alias_including_pending_exit(controller):
+    pending_exit = {"id": "T2", "status": "EXIT_PENDING"}
+    controller.engine.trades.side_effect = [
+        [{"id": "T1", "status": "OPEN"}, pending_exit], [pending_exit],
+    ]
+    assert controller.handle_update(message("/positions"))
+    rows = controller.session.post.call_args.kwargs["json"]["reply_markup"]["inline_keyboard"]
+    assert len(rows) == 2
 
 
 @pytest.mark.parametrize("text", [
@@ -321,9 +374,16 @@ def test_real_engine_field_mapping_and_confirmation(controller):
         assert controller.handle_update(message("/limits max_open 4 max_day10"))
         assert engine.config["max_open_positions"] == 4
         assert engine.config["max_daily_trades"] == 10
+        assert controller.handle_update(message("/mode approval off"))
+        assert engine.config["approval_required"] is False
+        assert controller.handle_update(message("/mode approval on"))
+        assert engine.config["approval_required"] is True
+        assert controller.handle_update(message("/cutoff index15:20 commodity22:55"))
+        assert engine.config["index_cutoff"] == "15:20"
+        assert engine.config["commodity_cutoff"] == "22:55"
         assert controller.handle_update(message(
             f"/modify {trade_id} entry_price_requested=101 target1=125 "
-            "target2=145 trailing_enabled=on"
+            "target2=145 trailing_enabled=on entry_order_type=market"
         ))
         modified = engine.get(trade_id)
         assert modified["status"] == "REQUESTED"
@@ -331,12 +391,13 @@ def test_real_engine_field_mapping_and_confirmation(controller):
         assert modified["target_1"] == 125
         assert modified["target_2"] == 145
         assert modified["trailing"] is True
+        assert modified["entry_order_type"] == "market"
         payload = controller.session.post.call_args.kwargs["json"]
         assert "Final confirmation" in payload["text"]
         assert "reply_markup" in payload
         assert controller.handle_update(message("/pending"))
         assert trade_id in controller.session.post.call_args.kwargs["json"]["text"]
-        assert controller.handle_update(message(f"/approve {trade_id} market"))
+        assert controller.handle_update(message(f"/approve {trade_id}"))
         assert engine.get(trade_id)["status"] == "OPEN"
         assert controller.handle_update(message(f"/exit {trade_id} market"))
         assert engine.get(trade_id)["status"] == "CLOSED"

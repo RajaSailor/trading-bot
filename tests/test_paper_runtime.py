@@ -1,11 +1,28 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
-from paper_runtime import PaperMarketData, PaperTradingRuntime
+from paper_runtime import PaperMarketData, PaperTradingRuntime, market_timestamp
 from runtime_services import QueueConsumerWorker
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def test_deployment_starts_one_paper_worker_without_legacy_live_worker():
+    root = Path(__file__).resolve().parents[1]
+    procfile = (root / "Procfile").read_text()
+    startup = (root / "deployment" / "startup.sh").read_text()
+    assert "unified_main.py" not in procfile
+    assert "--workers 1" in procfile
+    assert "--workers 1" in startup
+    assert "GUNICORN_WORKERS" not in startup
+
+
+def test_market_timestamp_supports_dhan_time_and_epoch_milliseconds():
+    moment = datetime(2026, 10, 5, 11, 0, tzinfo=IST)
+    assert market_timestamp("05/10/2026 11:00:00") == moment
+    assert market_timestamp(moment.timestamp() * 1000) == moment
 
 
 def test_queue_routes_to_paper_without_execution_or_broker():
@@ -49,6 +66,15 @@ def test_exit_signal_only_exits_matching_paper_positions():
     engine.submit.assert_not_called()
 
 
+def test_stop_does_not_close_engine_while_polling_thread_is_alive():
+    engine, controller = Mock(), Mock()
+    runtime = PaperTradingRuntime(engine, controller)
+    runtime._telegram_thread = Mock()
+    runtime._telegram_thread.is_alive.return_value = True
+    assert runtime.stop() is False
+    engine.close.assert_not_called()
+
+
 def test_quote_requires_source_timestamp_and_never_uses_receipt_time():
     session = Mock()
     adapter = PaperMarketData(session=session)
@@ -64,6 +90,28 @@ def test_quote_requires_source_timestamp_and_never_uses_receipt_time():
         quote = adapter.quote(trade)
         assert quote["timestamp"] == old
         assert quote["price"] == 100
+
+
+def test_quote_batches_active_contracts_and_reuses_source_timestamp():
+    session, engine = Mock(), Mock()
+    adapter = PaperMarketData(session=session)
+    adapter.portfolio = engine
+    trades = [
+        {"status": "OPEN", "exchange_segment": "NSE_FNO", "security_id": sid}
+        for sid in (123, 456)
+    ]
+    engine.trades.return_value = trades
+    source_time = datetime.now(IST).isoformat()
+    session.post.return_value.json.return_value = {"data": {"NSE_FNO": {
+        str(trade["security_id"]): {"last_price": 100, "last_trade_time": source_time}
+        for trade in trades
+    }}}
+    with patch.dict("os.environ", {"ACCESS_TOKEN": "test", "DHAN_CLIENT_ID": "test"}), \
+            patch("paper_runtime._apply_rate_limit"):
+        assert adapter.quote(trades[0])["timestamp"].isoformat() == source_time
+        assert adapter.quote(trades[1])["timestamp"].isoformat() == source_time
+    assert session.post.call_count == 1
+    assert session.post.call_args.kwargs["json"] == {"NSE_FNO": [123, 456]}
 
 
 def test_trailing_provider_excludes_incomplete_and_previous_day_candles():
@@ -83,3 +131,9 @@ def test_trailing_provider_excludes_incomplete_and_previous_day_candles():
         assert adapter.candle({
             "exchange_segment": "NSE_FNO", "security_id": 123, "segment": "index",
         }) == candles[1]
+        assert fetcher.return_value.fetch_option_candles.call_args.args[0]["instrument_type"] == "OPTIDX"
+        adapter._candles.clear()
+        assert adapter.candle({
+            "exchange_segment": "NSE_FNO", "security_id": 123, "segment": "index_options",
+        }) == candles[1]
+        assert fetcher.return_value.fetch_option_candles.call_args.args[0]["instrument_type"] == "OPTIDX"
