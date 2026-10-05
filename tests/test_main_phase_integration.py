@@ -48,6 +48,13 @@ def _load_main():
 
 
 class MainPhaseIntegrationTests(unittest.TestCase):
+    def test_runtime_is_paper_only_even_with_live_environment_flags(self):
+        main_module = _load_main()
+        with patch.dict(os.environ, {"PRACTICE_MODE": "false", "AUTO_TRADING_ENABLED": "true"}):
+            config = main_module._load_runtime_config()
+        self.assertTrue(config["practice_mode"])
+        self.assertFalse(config["auto_trading_enabled"])
+
     def test_main_initializes_phase_components_and_exposes_new_routes(self):
         main_module = _load_main()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -95,14 +102,13 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             self.assertEqual(payload["status"], "accepted")
                             self.assertEqual(payload["signal"]["action"], "BUY")
                             self.assertEqual(payload["queue_size"], 1)
-                            self.assertEqual(payload["proposed_quantity"], 2)
+                            self.assertEqual(payload["proposed_quantity"], 1)
                             deadline = time.time() + 2
-                            orders_payload = client.get("/orders").get_json()
-                            while orders_payload["count"] == 0 and time.time() < deadline:
+                            while main_module.queue_consumer_worker.status()["processed_signals"] == 0 and time.time() < deadline:
                                 time.sleep(0.05)
-                                orders_payload = client.get("/orders").get_json()
-                            self.assertEqual(orders_payload["count"], 1)
-                            self.assertIn("+05:30", orders_payload["orders"][0]["created_at"])
+                            orders_payload = client.get("/orders").get_json()
+                            self.assertEqual(orders_payload["count"], 0)
+                            self.assertEqual(main_module.paper_runtime.engine.trades(), [])
                             self.assertTrue(client.get("/health").get_json()["workers"]["queue_consumer"]["running"])
                             self.assertIn("telegram_routing", client.get("/api/status").get_json()["bot"])
                             self.assertEqual(

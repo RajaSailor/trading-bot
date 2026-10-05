@@ -298,6 +298,7 @@ class QueueConsumerWorker:
         notifier: SignalNotifier,
         metrics_collector=None,
         dhan_integration=None,
+        paper_runtime=None,
     ) -> None:
         self.queue_processor = queue_processor
         self.order_executor = order_executor
@@ -306,6 +307,7 @@ class QueueConsumerWorker:
         self.notifier = notifier
         self.metrics_collector = metrics_collector
         self.dhan_integration = dhan_integration
+        self.paper_runtime = paper_runtime
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
@@ -376,6 +378,9 @@ class QueueConsumerWorker:
             return True
 
     def _execute_signal(self, signal: dict) -> None:
+        if self.paper_runtime is not None:
+            self.paper_runtime.submit(signal)
+            return
         order_id = f"sig-{signal.get('signal_id', 'unknown')}"
         practice_mode = bool(self.runtime_config.get("practice_mode", True))
         live_allowed = (not practice_mode) and bool(self.runtime_config.get("auto_trading_enabled", False))

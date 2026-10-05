@@ -38,6 +38,50 @@ python main.py
 
 ## 🎯 Features Overview
 
+### Telegram-controlled paper portfolio
+
+The `main.py` application is **PRACTICE-only**, including when live-mode
+environment flags are set. Dhan is used for market data, not order placement.
+Run one application process/worker per portfolio and Telegram bot; do not run
+another polling bot (including the legacy `unified_main.py`) with the same token.
+
+Set `BOT_TRADE_CONTROL_TOKEN`, `CHANNEL_TRADE_CONTROL_ID`, and
+`TELEGRAM_AUTHORIZED_USER_IDS` (comma-separated numeric **user IDs**, not chat IDs).
+An empty authorization list denies all control actions. Set
+`PAPER_APPROVAL_TIMEOUT_SECONDS` to change the default 60-second approval timeout.
+`TRADING_DB_PATH` must point to a persistent disk; the portfolio, requests,
+execution timings, daily snapshots, configuration, and actor audit survive restart.
+The new portfolio starts at ₹500,000; legacy JSON/in-memory trades are not imported.
+
+Option signals need an actual listed `option_symbol`, `security_id`,
+`exchange_segment`, and `lot_size`, plus premium entry/SL/targets. Underlying
+prices, missing lot sizes, and fabricated premiums are not accepted.
+
+- Inline buttons approve limit/market, modify, or reject a request.
+- `/pending`, `/approve ID limit|market`, and `/positions` inspect/control trades.
+- `/modify ID stop_loss=90 target1=120 target2=140 trailing_enabled=on`
+  adjusts pending/open trades; pending requests also accept
+  `entry_order_type=limit|market` and `entry_price_requested=100`.
+- `/exit ID market`, `/exit ID limit PRICE`, and `/squareoff` manage exits.
+- `/mode approval on|off` toggles approval, **never live trading**.
+- `/risk pnl +30000 -10000`, `/limits max_open 5 max_day 20`, and
+  `/cutoff index 15:25 commodity 23:00` update persistent risk configuration.
+
+Every entry/fill is risk-checked: one lot, five open positions, twenty daily
+filled entries, and daily realized + unrealized caps of +₹30,000/−₹10,000.
+A breached cap halts entries for that IST day and initiates squareoff.
+Index/stock squareoff is at 15:25 IST; commodity at 23:00 IST.
+T1 keeps the full position open and protects breakeven; T2 closes it.
+Trailing uses only the previous completed 10-minute option candle low and
+never loosens the stop.
+
+Unfilled limit orders fetch a fresh quote after five seconds and fall back with
+1% adverse slippage (BUY ×1.01, SELL ×0.99). A missing/stale source quote cannot
+fill an order. Protective exits remain pending and retry with alerts if market
+data is unavailable; no simulator can truthfully guarantee closure at a cutoff
+without an executable quote. Keep market-data credentials configured and the
+monitor running through both cutoffs.
+
 ### **Telegram Integration**
 - ✅ Trade signal reception via Telegram (trade_control channel)
 - ✅ Combined options screener alerts via the service_alerts channel

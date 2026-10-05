@@ -98,6 +98,9 @@ except ImportError:
     SignalNotifier = None
 
 from timezone_utils import now_local_iso
+from paper_portfolio import PaperPortfolio
+from paper_telegram import PaperTelegramController
+from paper_runtime import PaperMarketData, PaperTradingRuntime
 
 # ============================================================================
 # CONFIGURATION
@@ -129,6 +132,7 @@ telegram_handler = None
 signal_notifier = None
 queue_consumer_worker = None
 market_scanner_worker = None
+paper_runtime = None
 token_manager = None
 phase_components = {}
 runtime_config = {}
@@ -167,7 +171,7 @@ def _env_int(name: str, default: int) -> int:
 
 def _load_runtime_config() -> dict:
     scanner_enabled = _env_bool("ENABLE_MARKET_SCANNER", False)
-    practice_mode = _env_bool("PRACTICE_MODE", True)
+    practice_mode = True
     return {
         "practice_mode": practice_mode,
         "auto_trading_enabled": (not practice_mode) and _env_bool("AUTO_TRADING_ENABLED", False),
@@ -258,6 +262,8 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
                 return None, ("Invalid quantity", 400)
         if quantity < 0:
             return None, ("Invalid quantity", 400)
+        if quantity <= 0 and paper_runtime is not None:
+            quantity = 1
         if quantity <= 0 and risk_manager is not None:
             quantity = risk_manager.calculate_position_size(entry_price, stop_loss)
         if quantity <= 0:
@@ -267,7 +273,7 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
         signal["stop_loss"] = stop_loss
         signal["quantity"] = quantity
 
-    if risk_manager is not None and signal.get("action") in {"BUY", "SELL"}:
+    if paper_runtime is None and risk_manager is not None and signal.get("action") in {"BUY", "SELL"}:
         proposed_trade_risk = max(0.0, abs(entry_price - stop_loss) * quantity)
         accepted, reason = risk_manager.can_take_trade(proposed_trade_risk, [])
         if not accepted:
@@ -318,6 +324,7 @@ def initialize_app(force: bool = False):
     global strategy_manager, risk_manager, order_executor, signal_queue_processor
     global trading_db, state_manager, metrics_collector, alert_manager
     global telegram_handler, signal_notifier, queue_consumer_worker, market_scanner_worker, token_manager
+    global paper_runtime
     global phase_components, runtime_config, initialized
 
     if initialized and not force:
@@ -326,6 +333,11 @@ def initialize_app(force: bool = False):
 
     if initialized:
         logger.info("♻️ Re-initializing application components...")
+        if queue_consumer_worker:
+            queue_consumer_worker.stop()
+        if paper_runtime:
+            paper_runtime.stop()
+            paper_runtime = None
         if trading_db:
             try:
                 trading_db.close()
@@ -489,6 +501,27 @@ def initialize_app(force: bool = False):
             telegram_handler = None
             signal_notifier = None
 
+        paper_data = PaperMarketData()
+        paper_engine = PaperPortfolio(
+            db_path=runtime_config["db_path"],
+            quote_provider=paper_data.quote,
+            candle_provider=paper_data.candle,
+            approval_timeout=max(1, _env_int("PAPER_APPROVAL_TIMEOUT_SECONDS", 60)),
+        )
+        paper_controller = PaperTelegramController(
+            paper_engine,
+            token=os.getenv("BOT_TRADE_CONTROL_TOKEN", ""),
+            chat_id=runtime_config["channels"].get("trade_control"),
+            authorized_user_ids={
+                int(value.strip()) for value in os.getenv("TELEGRAM_AUTHORIZED_USER_IDS", "").split(",")
+                if value.strip().isdigit()
+            },
+        )
+        paper_engine.notify = paper_controller.notify
+        paper_runtime = PaperTradingRuntime(paper_engine, paper_controller)
+        paper_runtime.start()
+        phase_components["paper_portfolio"] = True
+
         channels = []
         if (
             AlertManager is not None
@@ -528,6 +561,7 @@ def initialize_app(force: bool = False):
                 notifier=signal_notifier,
                 metrics_collector=metrics_collector,
                 dhan_integration=dhan_integration,
+                paper_runtime=paper_runtime,
             )
             queue_started = queue_consumer_worker.start(runtime_config["queue_poll_seconds"])
             phase_components["queue_consumer"] = True
@@ -1052,6 +1086,10 @@ def shutdown_handler():
     if queue_consumer_worker:
         queue_consumer_worker.stop()
         logger.info("✅ Queue consumer stopped")
+
+    if paper_runtime:
+        paper_runtime.stop()
+        logger.info("✅ Paper trading monitor stopped")
 
     if token_manager:
         token_manager.stop()
