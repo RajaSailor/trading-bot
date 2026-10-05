@@ -87,24 +87,6 @@ class _FakePositionManager:
         return object()
 
 
-class _FakeSpotEngine:
-    def add_candle(self, symbol, candle):
-        return True
-
-    def evaluate(self, symbol, strategy_group):
-        return [
-            {
-                "symbol": symbol,
-                "signal": "CALL",
-                "entry": 103,
-                "stop_loss": 97,
-                "targets": [113, 123, 133],
-                "reference_timestamp": "2026-09-13T10:00:00",
-                "breakout_timestamp": "2026-09-13T10:05:00",
-            }
-        ]
-
-
 class PremiumScreenerTests(unittest.TestCase):
     def test_scan_instruments_sends_ce_and_pe_premium_alerts(self):
         telegram = _FakeTelegramHandler()
@@ -138,21 +120,12 @@ class PremiumScreenerTests(unittest.TestCase):
             telegram.sent,
         )
 
-    def test_scan_spot_instruments_sends_stock_spot_alerts_to_primary_channel(self):
-        telegram = _FakeTelegramHandler()
-        screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
-        screener.spot_engine = _FakeSpotEngine()
-        screener.live_signal_detector = SimpleNamespace(should_emit=lambda *_args, **_kwargs: True)
-
-        alerts = screener._scan_spot_instruments(
-            screener.stock_spot_instruments,
-            "10min",
-            "group2",
-            primary_category="nifty50_stock_options",
-        )
-
-        self.assertEqual(1, alerts)
-        self.assertEqual([("nifty50_stock_options", "CALL", "SPOT")], telegram.sent)
+    def test_run_once_does_not_scan_stock_spot_instruments(self):
+        screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
+        screener._scan_instruments = lambda instruments, interval, now=None: 0
+        with patch("screener_premium.open_exchanges", return_value={"NSE"}):
+            self.assertEqual(0, screener.run_once(now=NOW))
+        self.assertEqual([], screener.telegram_handler.sent)
 
     def test_dispatch_option_alert_rejects_disabled_categories(self):
         telegram = _FakeTelegramHandler()

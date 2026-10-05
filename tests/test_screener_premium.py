@@ -66,31 +66,28 @@ class _Base(unittest.TestCase):
 
 class SessionGatingTests(_Base):
     def _scanned(self, now):
-        with patch.object(self.screener, "_scan_instruments", return_value=0) as scan, patch.object(
-            self.screener, "_scan_spot_instruments", return_value=0
-        ) as spot:
+        with patch.object(self.screener, "_scan_instruments", return_value=0) as scan:
             self.screener.run_once(now)
         scanned = [i.symbol for i in scan.call_args.args[0]] if scan.called else []
-        return scanned, spot.called
+        return scanned
 
     def test_weekend_skips_every_scan(self):
-        self.assertEqual(([], False), self._scanned(SATURDAY))
+        self.assertEqual([], self._scanned(SATURDAY))
         self.data_manager.fetch_candles.assert_not_called()
         self.data_manager.fetch_ltp.assert_not_called()
 
     def test_exchange_holiday_skips_every_scan(self):
-        self.assertEqual(([], False), self._scanned(GANDHI_JAYANTI))
+        self.assertEqual([], self._scanned(GANDHI_JAYANTI))
 
-    def test_market_hours_scan_all_segments_on_their_exchanges(self):
-        scanned, spot_called = self._scanned(MONDAY_MORNING)
-        self.assertEqual(["GOLD", "NIFTY", "SENSEX", "RELIANCE"], scanned)
-        self.assertTrue(spot_called)
+    def test_market_hours_scan_option_segments_without_stock_spot_signals(self):
+        self.assertEqual(["GOLD", "NIFTY", "SENSEX", "RELIANCE"], self._scanned(MONDAY_MORNING))
+        self.data_manager.fetch_candles.assert_not_called()
 
     def test_after_equity_close_only_mcx_is_scanned(self):
-        self.assertEqual((["GOLD"], False), self._scanned(MONDAY_EVENING))
+        self.assertEqual(["GOLD"], self._scanned(MONDAY_EVENING))
 
     def test_nse_holiday_with_mcx_evening_session_scans_commodities_only(self):
-        self.assertEqual((["GOLD"], False), self._scanned(DUSSEHRA_EVENING))
+        self.assertEqual(["GOLD"], self._scanned(DUSSEHRA_EVENING))
 
     def test_candles_refresh_once_per_completed_ten_minute_bucket(self):
         self.screener._refresh_instrument = MagicMock(return_value=0)
@@ -100,15 +97,14 @@ class SessionGatingTests(_Base):
                 "bucket": self.screener._bucket(instrument, now)[0], "retry_at": None
             }
             return 0
-
         self.screener._refresh_instrument.side_effect = refresh
-        with patch.object(self.screener, "_scan_spot_instruments", return_value=0):
-            self.screener.run_once(datetime(2026, 10, 5, 10, 31, tzinfo=IST))
-            first = self.screener._refresh_instrument.call_count
-            self.screener.run_once(datetime(2026, 10, 5, 10, 34, tzinfo=IST))
-            self.assertEqual(first, self.screener._refresh_instrument.call_count)
-            # NSE bucket boundary at 10:35 (session anchored at 09:15); MCX stays in its 10:30 bucket.
-            self.screener.run_once(datetime(2026, 10, 5, 10, 35, 10, tzinfo=IST))
+        self.screener._refresh_instrument.side_effect = refresh
+        self.screener.run_once(datetime(2026, 10, 5, 10, 31, tzinfo=IST))
+        first = self.screener._refresh_instrument.call_count
+        self.screener.run_once(datetime(2026, 10, 5, 10, 34, tzinfo=IST))
+        self.assertEqual(first, self.screener._refresh_instrument.call_count)
+        # NSE bucket boundary at 10:35 (session anchored at 09:15); MCX stays in its 10:30 bucket.
+        self.screener.run_once(datetime(2026, 10, 5, 10, 35, 10, tzinfo=IST))
         refreshed = [c.args[0].symbol for c in self.screener._refresh_instrument.call_args_list[first:]]
         self.assertEqual(["NIFTY", "SENSEX", "RELIANCE"], refreshed)
 
@@ -244,26 +240,28 @@ class BreakoutFlowTests(_Base):
 
 
 class SpotStrategyTests(_Base):
-    def test_stock_spot_alerts_display_ten_minute_breakout(self):
-        signal = {
-            "symbol": "RELIANCE", "signal": "CALL", "entry": 100, "stop_loss": 95, "targets": [110],
-            "reference_timestamp": "2026-10-05T10:20:00+05:30", "breakout_timestamp": "2026-10-05T10:30:00+05:30",
-        }
-        spot_engine = MagicMock()
-        spot_engine.add_candle.return_value = True
-        spot_engine.evaluate.return_value = [signal]
-        self.screener._fresh_spot_engine = MagicMock(return_value=spot_engine)
-        self.screener.live_signal_detector = MagicMock(should_emit=MagicMock(return_value=True))
-        self.data_manager.fetch_candles.return_value = [{"close": 99}, {"close": 100}]
-        self.assertEqual(
-            1,
-            self.screener._scan_spot_instruments(
-                [self.spot], "10min", StrategyEngine.GROUP_2, primary_category="nifty50_stock_options"
-            ),
-        )
-        self.assertEqual("spot_screener", self.alerts[0]["strategy"])
-        self.assertEqual("nifty50_stock_options", self.alerts[0]["metadata"]["route_category"])
-        self.assertEqual("10-MINUTE BREAKOUT", self.alerts[0]["metadata"]["timeframe"])
+    def test_stock_spot_instruments_are_not_scanned_for_signals(self):
+        with patch.object(self.screener, "_scan_instruments", return_value=0) as option_scan:
+            self.assertEqual(0, self.screener.run_once(MONDAY_MORNING))
+
+        self.assertEqual(1, option_scan.call_count)
+        self.assertNotIn(self.spot, option_scan.call_args.args[0])
+        self.data_manager.fetch_candles.assert_not_called()
+        self.assertEqual([], self.alerts)
+
+    def test_live_ltp_polls_open_paper_option_contracts(self):
+        notifier = MagicMock()
+        notifier.paper_option_contracts.return_value = [
+            {"security_id": 777, "exchange_segment": "NSE_FNO"}
+        ]
+        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 777): 125.0}
+        self.screener.paper_trade_notifier = notifier
+
+        self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
+
+        self.data_manager.fetch_ltp.assert_called_once_with({"NSE_FNO": [777]})
+        notifier.update_paper_trades.assert_called_once()
+        self.assertEqual({("NSE_FNO", 777): 125.0}, notifier.update_paper_trades.call_args.args[0])
 
 
 if __name__ == "__main__":

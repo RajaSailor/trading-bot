@@ -139,7 +139,8 @@ class TelegramHandlerEnvTests(unittest.TestCase):
         self.assertIn("Option: <b>GOLD-24OCT-127-CE</b>", message)
         self.assertIn("Entry: 127.00", message)
         self.assertIn("Stop Loss: 113.00", message)
-        self.assertIn("Target (2R): 137.00", message)
+        self.assertIn("Target 1 (1R): 141.00", message)
+        self.assertIn("Target 2 (2R): 155.00", message)
         self.assertIn("Timeframe: 10-min", message)
 
     def test_format_signal_message_uses_spot_breakout_layout(self):

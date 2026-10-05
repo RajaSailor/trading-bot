@@ -66,7 +66,8 @@ class AlertFormatTests(unittest.TestCase):
             "Entry: 120.00",
             "Stop Loss: 95.00",
             "Risk: 25.00 points",
-            "Target (2R): 170.00",
+            "Target 1 (1R): 145.00",
+            "Target 2 (2R): 170.00",
             "Breakout: 05-Oct-2026 10:31 IST @ 120.50",
             "PRACTICE MODE",
         ):
@@ -107,7 +108,8 @@ class AlertFormatTests(unittest.TestCase):
             "Entry: 10.80\n"
             "Stop Loss: 9.03\n"
             "Risk: 1.77 points\n"
-            "Target (2R): 14.34\n"
+            "Target 1 (1R): 12.57\n"
+            "Target 2 (2R): 14.34\n"
             "\n"
             "⚡ Breakout: 05-Oct-2026 09:50 IST @ 10.95\n"
             "Underlying spot: 379.40\n"
@@ -145,7 +147,8 @@ class AlertFormatTests(unittest.TestCase):
             "Entry: 4.57\n"
             "Stop Loss: 3.12\n"
             "Risk: 1.45 points\n"
-            "Target (2R): 7.47\n"
+            "Target 1 (1R): 6.02\n"
+            "Target 2 (2R): 7.47\n"
             "\n"
             "⚡ Breakout: 05-Oct-2026 10:31 IST @ 4.62\n"
             "\n"
@@ -194,7 +197,8 @@ class AlertFormatTests(unittest.TestCase):
         ):
             SignalNotifier(handler).notify_strategy_signal(signal)
         self.assertEqual(["service_alerts"], [channel for channel, _ in handler.calls])
-        self.assertIn("Target (2R): 170.00", handler.calls[0][1])
+        self.assertIn("Target 1 (1R): 145.00", handler.calls[0][1])
+        self.assertIn("Target 2 (2R): 170.00", handler.calls[0][1])
         self.assertIn("Breakout: 05-Oct-2026 10:31 IST @ 120.50", handler.calls[0][1])
         self.assertNotIn("Timeframe:", handler.calls[0][1])
         self.assertNotIn("10:31:05", handler.calls[0][1])
@@ -220,7 +224,7 @@ class AlertFormatTests(unittest.TestCase):
         )
         for expected in ("BUY PUT", "NIFTY", "INDEX OPTIONS", "NIFTY-Oct2026-24500-PE", "Strike: 24500 PE",
                          "Band: ITM+1", "Expiry: 27OCT2026", "Entry: 50.00", "Stop Loss: 42.75",
-                         "Risk: 7.25 points", "Target (2R): 64.50"):
+                         "Risk: 7.25 points", "Target 1 (1R): 57.25", "Target 2 (2R): 64.50"):
             self.assertIn(expected, message)
 
     def test_non_premium_signals_keep_compact_format(self):
@@ -234,7 +238,8 @@ class AlertFormatTests(unittest.TestCase):
         handler = TelegramHandler()
         signal = {**_queue_signal()["metadata"], "symbol": "M&M", "signal": "CALL"}
         message = handler.format_signal_message("nifty50_stock_options", signal, {"option_symbol": "M&M-CE"})
-        self.assertIn("Target (2R): 170.00", message)
+        self.assertIn("Target 1 (1R): 145.00", message)
+        self.assertIn("Target 2 (2R): 170.00", message)
         self.assertIn("M&amp;M-CE", message)
         self.assertNotIn("Timeframe:", message)
         self.assertNotIn("Reference RED candle:", message)
