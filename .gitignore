@@ -1,6 +1,19 @@
 # Git Ignore File - Prevent secrets and unnecessary files from being committed
 # Copy this file as .gitignore in repository root
 
+# Persistent practice account and generated test/runtime artifacts.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+logs/
+
 # ============================================================================
 # ENVIRONMENT & SECRETS (CRITICAL - NEVER COMMIT!)
 # ============================================================================

@@ -58,7 +58,8 @@ class SecurityMasterFilterTests(unittest.TestCase):
     def test_only_needed_columns_are_kept(self):
         row = next(_rows())
         self.assertEqual(set(NEEDED_COLUMNS), set(row))
-        self.assertNotIn("SEM_TICK_SIZE", row)
+        self.assertIn("SEM_TICK_SIZE", row)
+        self.assertEqual("0", row["SEM_TICK_SIZE"])
 
     def test_index_keeps_only_universe_nearest_expiry_contracts(self):
         index = SecurityMasterIndex.build(_rows(), _universe(), date(2026, 10, 5))
@@ -69,6 +70,7 @@ class SecurityMasterFilterTests(unittest.TestCase):
         # Weekly 06-Oct is nearest (and not today) -> only that expiry is kept.
         self.assertEqual(date(2026, 10, 6), expiry)
         self.assertEqual([104], [c.security_id for c in contracts])
+        self.assertEqual(5.0, contracts[0].tick_size)
         self.assertEqual(4, index.contract_count)
         self.assertEqual([502], [c.security_id for c in index.option_chain("GOLD", "CE")[1]])
         self.assertEqual(13, index.underlying("NIFTY").security_id)

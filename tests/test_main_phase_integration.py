@@ -1,8 +1,12 @@
 import importlib
 import os
-import tempfile
+import shutil
+import sys
 import time
 import unittest
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -47,10 +51,33 @@ def _load_main():
         return importlib.reload(main)
 
 
+def _stop_workers():
+    module = sys.modules.get("main")
+    if module is not None:
+        for name in ("queue_consumer_worker", "market_scanner_worker", "paper_portfolio_worker"):
+            worker = getattr(module, name, None)
+            if worker is not None:
+                worker.stop()
+
+
+@contextmanager
+def _workspace():
+    path = Path("tests") / (".main-phase-workspace-" + uuid.uuid4().hex)
+    path.mkdir()
+    try:
+        yield str(path)
+    finally:
+        _stop_workers()
+        shutil.rmtree(path)
+
+
 class MainPhaseIntegrationTests(unittest.TestCase):
+    def tearDown(self):
+        _stop_workers()
+
     def test_main_initializes_phase_components_and_exposes_new_routes(self):
         main_module = _load_main()
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with _workspace() as tmpdir:
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
@@ -95,14 +122,16 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             self.assertEqual(payload["status"], "accepted")
                             self.assertEqual(payload["signal"]["action"], "BUY")
                             self.assertEqual(payload["queue_size"], 1)
-                            self.assertEqual(payload["proposed_quantity"], 2)
+                            self.assertEqual(payload["proposed_quantity"], 1)
                             deadline = time.time() + 2
                             orders_payload = client.get("/orders").get_json()
-                            while orders_payload["count"] == 0 and time.time() < deadline:
+                            while main_module.signal_queue_processor.queue_size() and time.time() < deadline:
                                 time.sleep(0.05)
                                 orders_payload = client.get("/orders").get_json()
-                            self.assertEqual(orders_payload["count"], 1)
-                            self.assertIn("+05:30", orders_payload["orders"][0]["created_at"])
+                            # Historical non-option webhooks lack a validated contract
+                            # and cannot reach the legacy executor or paper account.
+                            self.assertEqual(orders_payload["count"], 0)
+                            self.assertEqual(main_module.paper_portfolio.snapshot()["account"]["cash"], 500000)
                             self.assertTrue(client.get("/health").get_json()["workers"]["queue_consumer"]["running"])
                             self.assertIn("telegram_routing", client.get("/api/status").get_json()["bot"])
                             self.assertEqual(
@@ -178,7 +207,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
             def send(self, _alert):
                 return True
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with _workspace() as tmpdir:
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
@@ -225,7 +254,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
             def __init__(self, bot_token, chat_id):
                 created_channels.append((bot_token, chat_id))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with _workspace() as tmpdir:
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
@@ -247,7 +276,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
 
     def test_main_handles_missing_optional_phase_modules(self):
         main_module = _load_main()
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with _workspace() as tmpdir:
             env = {
                 "TRADING_DB_PATH": os.path.join(tmpdir, "trading.db"),
                 "STATE_FILE": os.path.join(tmpdir, "bot_state.json"),
@@ -270,8 +299,8 @@ class MainPhaseIntegrationTests(unittest.TestCase):
 
                                                                 self.assertEqual(client.get("/strategy").status_code, 503)
                                                                 self.assertEqual(client.get("/risk").status_code, 503)
-                                                                self.assertEqual(client.get("/orders").status_code, 503)
-                                                                self.assertEqual(client.get("/positions").status_code, 503)
+                                                                self.assertEqual(client.get("/orders").status_code, 200)
+                                                                self.assertEqual(client.get("/positions").status_code, 200)
                                                                 self.assertEqual(client.get("/metrics").status_code, 503)
                                                                 self.assertEqual(client.get("/dashboard/health").status_code, 503)
                                                                 self.assertEqual(

@@ -1,0 +1,782 @@
+"""Durable, broker-independent PRACTICE portfolio.
+
+All accounting changes use SQLite write transactions. Notifications use a durable
+at-least-once outbox: consumers may deduplicate on ``event_id``. Quotes contain
+``price``, optional ``bid``/``ask``, and an epoch-seconds ``timestamp``. Candle
+timestamps are interval starts; ``end_timestamp`` may explicitly specify the end.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import sqlite3
+import time
+import uuid
+from contextlib import contextmanager
+from datetime import date, datetime, time as daytime, timedelta
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from zoneinfo import ZoneInfo
+
+from exchange_calendar import is_exchange_open, session_windows
+
+IST = ZoneInfo("Asia/Kolkata")
+ACTIVE = ("awaiting_approval", "pending")
+
+
+def _number(value):
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a price")
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError("price must be finite and positive")
+    return result
+
+
+def _epoch(value):
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=IST)
+        return parsed.timestamp()
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("invalid timestamp")
+    return result
+
+
+def _round_tick(price, tick, side):
+    units = Decimal(str(price)) / Decimal(str(tick))
+    return float(units.to_integral_value(
+        rounding=ROUND_CEILING if side == "BUY" else ROUND_FLOOR
+    ) * Decimal(str(tick)))
+
+
+class PaperPortfolio:
+    """One persistent virtual account; no live execution path exists."""
+
+    def __init__(self, db_path, clock=time.time, notify=None, calendar=None,
+                 freshness_seconds=10, approval_expiry_seconds=60):
+        self.db_path = str(db_path)
+        self.clock = clock
+        self.notify = notify
+        self.calendar = calendar or is_exchange_open
+        self.session_windows = (
+            session_windows if calendar is None else getattr(calendar, "session_windows", None))
+        self.freshness_seconds = _number(freshness_seconds)
+        self.approval_expiry_seconds = _number(approval_expiry_seconds)
+        self._delivering = False
+        self.auto_deliver = True
+        with self._connection() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS paper_account (
+                    id INTEGER PRIMARY KEY CHECK(id=1), cash REAL NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    approval_required INTEGER NOT NULL DEFAULT 1,
+                    profit_limit REAL NOT NULL DEFAULT 30000,
+                    loss_limit REAL NOT NULL DEFAULT 10000);
+                INSERT OR IGNORE INTO paper_account(id,cash) VALUES(1,500000);
+                CREATE TABLE IF NOT EXISTS paper_orders (
+                    id TEXT PRIMARY KEY, signal_key TEXT UNIQUE NOT NULL,
+                    status TEXT NOT NULL, day TEXT NOT NULL, reserve REAL NOT NULL,
+                    data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_positions (
+                    id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_executions (
+                    id TEXT PRIMARY KEY, order_id TEXT NOT NULL,
+                    side TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_days (
+                    day TEXT PRIMARY KEY, opening REAL NOT NULL, closing REAL NOT NULL,
+                    filled INTEGER NOT NULL DEFAULT 0, realized REAL NOT NULL DEFAULT 0,
+                    risk_latched INTEGER NOT NULL DEFAULT 0, risk_reason TEXT,
+                    interim_sent INTEGER NOT NULL DEFAULT 0,
+                    final_sent INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS paper_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL NOT NULL,
+                    actor TEXT, action TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_updates (id TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS paper_quotes (
+                    contract TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_outbox (
+                    id TEXT PRIMARY KEY, timestamp REAL NOT NULL,
+                    data TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS paper_metrics (
+                    name TEXT PRIMARY KEY, count INTEGER NOT NULL,
+                    total_seconds REAL NOT NULL, max_seconds REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL, duration_ms REAL NOT NULL,
+                    success INTEGER NOT NULL);
+            """)
+        with self._transaction("initialize") as db:
+            self._day(db, self.clock())
+
+    @contextmanager
+    def _connection(self):
+        db = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA busy_timeout=30000")
+        try:
+            yield db
+        finally:
+            db.close()
+
+    @contextmanager
+    def _transaction(self, name):
+        started = time.monotonic()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                yield db
+                elapsed = time.monotonic() - started
+                db.execute("""INSERT INTO paper_metrics VALUES(?,1,?,?)
+                    ON CONFLICT(name) DO UPDATE SET count=count+1,
+                    total_seconds=total_seconds+excluded.total_seconds,
+                    max_seconds=MAX(max_seconds,excluded.max_seconds)""",
+                           (name, elapsed, elapsed))
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        if self.auto_deliver:
+            self._deliver()
+
+    @staticmethod
+    def _account(db):
+        return dict(db.execute("SELECT * FROM paper_account WHERE id=1").fetchone())
+
+    @staticmethod
+    def _positions(db):
+        return [json.loads(r["data"]) for r in db.execute(
+            "SELECT data FROM paper_positions WHERE status='open'")]
+
+    @staticmethod
+    def _orders(db, active=False):
+        sql = "SELECT data FROM paper_orders"
+        if active:
+            sql += " WHERE status IN ('awaiting_approval','pending')"
+        return [json.loads(r["data"]) for r in db.execute(sql)]
+
+    def _equity(self, db):
+        return self._account(db)["cash"] + sum(
+            p["quantity"] * p["mark_price"] for p in self._positions(db))
+
+    def _day(self, db, now):
+        day = datetime.fromtimestamp(now, IST).date().isoformat()
+        row = db.execute("SELECT * FROM paper_days WHERE day=?", (day,)).fetchone()
+        if row is None:
+            previous = db.execute(
+                "SELECT closing FROM paper_days WHERE day<? ORDER BY day DESC LIMIT 1",
+                (day,)).fetchone()
+            opening = previous["closing"] if previous else self._equity(db)
+            db.execute("INSERT INTO paper_days(day,opening,closing) VALUES(?,?,?)",
+                       (day, opening, opening))
+            for position in self._positions(db):
+                position.update(day_opening_price=position["mark_price"], valuation_day=day)
+                self._save_position(db, position)
+            for order in self._orders(db, True):
+                if order["day"] != day:
+                    self._finish_order(db, order, "expired", "day_rollover", now)
+            row = db.execute("SELECT * FROM paper_days WHERE day=?", (day,)).fetchone()
+        return dict(row)
+
+    def _audit(self, db, action, data, actor=None):
+        db.execute("INSERT INTO paper_audit(timestamp,actor,action,data) VALUES(?,?,?,?)",
+                   (self.clock(), None if actor is None else str(actor), action,
+                    json.dumps(data, sort_keys=True)))
+
+    def _event(self, db, kind, data, now):
+        event_id = uuid.uuid4().hex
+        event = {"event_id": event_id, "type": kind, "mode": "PRACTICE",
+                 "timestamp": datetime.fromtimestamp(now, IST).isoformat(), **data}
+        db.execute("INSERT INTO paper_outbox(id,timestamp,data) VALUES(?,?,?)",
+                   (event_id, now, json.dumps(event)))
+        self._audit(db, kind, data)
+
+    def _deliver(self):
+        if self.notify is None or self._delivering:
+            return
+        self._delivering = True
+        try:
+            with self._connection() as db:
+                events = db.execute(
+                    "SELECT id,data FROM paper_outbox WHERE delivered=0 ORDER BY rowid").fetchall()
+            for row in events:
+                try:
+                    result = self.notify(json.loads(row["data"]))
+                    if result is False:
+                        return
+                except Exception:
+                    return
+                with self._connection() as db:
+                    db.execute("UPDATE paper_outbox SET delivered=1 WHERE id=?", (row["id"],))
+        finally:
+            self._delivering = False
+
+    @staticmethod
+    def _contract(data):
+        return (data["exchange_segment"], int(data["security_id"]))
+
+    def _quote(self, db, data, now):
+        row = db.execute("SELECT data FROM paper_quotes WHERE contract=?",
+                         (json.dumps(self._contract(data)),)).fetchone()
+        if row is None:
+            return None
+        quote = json.loads(row["data"])
+        try:
+            age = now - _epoch(quote["timestamp"])
+            if not 0 <= age <= self.freshness_seconds:
+                return None
+            _number(quote["price"])
+            for side in ("bid", "ask"):
+                if quote.get(side) is not None:
+                    _number(quote[side])
+            if quote.get("bid") is not None and quote.get("ask") is not None:
+                if float(quote["bid"]) > float(quote["ask"]):
+                    return None
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        return quote
+
+    def _store_quote(self, db, contract, quote):
+        # Invalid updates replace old evidence so a malformed feed cannot fill.
+        db.execute("""INSERT INTO paper_quotes VALUES(?,?)
+            ON CONFLICT(contract) DO UPDATE SET data=excluded.data""",
+                   (json.dumps((str(contract[0]), int(contract[1]))),
+                    json.dumps(quote, default=str)))
+
+    @staticmethod
+    def _exchange(data):
+        segment = data["exchange_segment"].upper()
+        if "MCX" in segment or data["category"].startswith("commodity"):
+            return "MCX"
+        return "BSE" if "BSE" in segment else "NSE"
+
+    def _open(self, data, now):
+        checker = getattr(self.calendar, "is_exchange_open", self.calendar)
+        return bool(checker(self._exchange(data), datetime.fromtimestamp(now, IST)))
+
+    def _cutoff(self, data, now):
+        local = datetime.fromtimestamp(now, IST)
+        cutoff = daytime(23) if self._exchange(data) == "MCX" else daytime(15, 25)
+        cutoff_at = datetime.combine(local.date(), cutoff, IST)
+        if self.session_windows is not None:
+            windows = self.session_windows(self._exchange(data), local.date())
+            if windows:
+                last_close = max(end for _, end in windows)
+                early_close = datetime.combine(local.date(), last_close, IST) - timedelta(minutes=5)
+                cutoff_at = min(cutoff_at, early_close)
+        return local >= cutoff_at
+
+    def _entry_allowed(self, db, order, now):
+        daily = self._day(db, now)
+        if not self._account(db)["enabled"]:
+            return "practice_disabled"
+        if daily["risk_latched"]:
+            return daily["risk_reason"]
+        if order["day"] != daily["day"] or now >= order["expires_at"]:
+            return "expired"
+        if self._cutoff(order, now):
+            return "time_cutoff"
+        if not self._open(order, now):
+            return "exchange_closed"
+        if any(p.get("exit_reason") for p in self._positions(db)):
+            return "unresolved_exits"
+        return None
+
+    def _save_order(self, db, order):
+        db.execute("UPDATE paper_orders SET status=?,reserve=?,data=? WHERE id=?",
+                   (order["status"], order["reserved_cash"], json.dumps(order), order["id"]))
+
+    def _save_position(self, db, position):
+        if position.get("exit_reason"):
+            position.setdefault("exit_requested_at", self.clock())
+        db.execute("UPDATE paper_positions SET status=?,data=? WHERE id=?",
+                   (position["status"], json.dumps(position), position["id"]))
+
+    def _finish_order(self, db, order, status, reason, now):
+        order.update(status=status, reason=reason, reserved_cash=0,
+                     updated_at=now)
+        self._save_order(db, order)
+        self._event(db, "order_" + status, order, now)
+
+    def submit(self, signal, quote=None):
+        started = time.monotonic()
+        now = self.clock()
+        try:
+            data = {**signal, **(signal.get("metadata") or {})}
+            key = str(data.get("idempotency_key") or data.get("signal_id") or data.get("id") or hashlib.sha256(
+                json.dumps(signal, sort_keys=True, default=str).encode()).hexdigest())
+            with self._connection() as db:
+                existing = db.execute("SELECT data FROM paper_orders WHERE signal_key=?", (key,)).fetchone()
+            if existing:
+                if self.auto_deliver:
+                    self._deliver()
+                return json.loads(existing["data"])
+            lot = data["lot_size"]
+            if isinstance(lot, bool) or not isinstance(lot, (int, float)) or (
+                not math.isfinite(float(lot)) or lot <= 0 or not float(lot).is_integer()
+            ):
+                raise ValueError("lot_size must be a positive integer")
+            lot = int(lot)
+            security = data["security_id"]
+            if isinstance(security, bool) or int(security) <= 0 or str(int(security)) != str(security):
+                raise ValueError("security_id must be a positive integer")
+            entry = _number(data.get("entry_price", data.get("entry", data.get("price"))))
+            stop = _number(data["stop_loss"])
+            tick = _number(data["tick_size"])
+            if stop >= entry:
+                raise ValueError("stop_loss must be below premium entry")
+            for required in ("exchange_segment", "option_symbol", "timeframe", "category"):
+                if not str(data.get(required, "")).strip():
+                    raise ValueError("missing " + required)
+            if not str(data["exchange_segment"]).upper().startswith(("NSE", "BSE", "MCX")):
+                raise ValueError("unsupported exchange_segment")
+            self._timeframe_seconds(data["timeframe"])
+            signal_timestamp = _epoch(data["timestamp"]) if data.get("timestamp") is not None else now
+            if signal_timestamp > now:
+                raise ValueError("future signal")
+            if now - signal_timestamp >= self.approval_expiry_seconds:
+                raise ValueError("stale_signal")
+            if str(data.get("side", data.get("action", "BUY"))).upper() in {"SELL", "SHORT"}:
+                raise ValueError("only long option BUY entries are supported")
+            order = {k: data[k] for k in (
+                "security_id", "exchange_segment", "option_symbol", "timeframe", "category")}
+            order["instrument_type"] = data.get("instrument_type") or (
+                "OPTFUT" if self._exchange(order) == "MCX" else
+                "OPTSTK" if "stock" in order["category"] else "OPTIDX")
+            order.update(id=uuid.uuid4().hex, signal_key=key, security_id=int(security),
+                         quantity=lot, lot_size=lot, tick_size=tick, stop_loss=stop,
+                         initial_stop_loss=stop, limit_price=_round_tick(entry, tick, "BUY"),
+                         target_1=_number(data.get("target_1", entry + entry - stop)),
+                         target_2=_number(data.get("target_2", data.get(
+                             "target", data.get("target_price", entry + 2 * (entry - stop))))),
+                         created_at=now, updated_at=now, signal_timestamp=signal_timestamp,
+                         expires_at=signal_timestamp + self.approval_expiry_seconds,
+                         day=datetime.fromtimestamp(now, IST).date().isoformat(),
+                         order_type="LIMIT", side="BUY", reason=None)
+        except (KeyError, ValueError, TypeError, OverflowError) as exc:
+            with self._transaction("submit") as db:
+                self._audit(db, "invalid_signal", {"reason": str(exc)})
+            return {"status": "rejected", "id": None, "reason": str(exc)}
+        with self._transaction("submit") as db:
+            existing = db.execute("SELECT data FROM paper_orders WHERE signal_key=?", (key,)).fetchone()
+            if existing:
+                return json.loads(existing["data"])
+            daily = self._day(db, now)
+            if quote is not None:
+                self._store_quote(db, self._contract(order), quote)
+            self._risk(db, now)
+            reason = self._entry_allowed(db, order, now)
+            pending = self._orders(db, True)
+            if reason is None and len(pending) + len(self._positions(db)) >= 5:
+                reason = "position_limit"
+            if reason is None and daily["filled"] + len(pending) >= 20:
+                reason = "daily_entry_limit"
+            fresh = self._quote(db, order, now)
+            if reason is None and fresh is None:
+                reason = "no_price"
+            reference = float(fresh.get("ask") or fresh["price"]) if fresh else entry
+            reserve = _round_tick(max(entry, reference) * 1.01, tick, "BUY") * lot
+            available = self._account(db)["cash"] - sum(o["reserved_cash"] for o in pending)
+            if reason is None and reserve > available:
+                reason = "insufficient_cash"
+            order.update(status="rejected" if reason else (
+                "awaiting_approval" if self._account(db)["approval_required"] else "pending"),
+                         reason=reason, reserved_cash=0 if reason else reserve,
+                         submit_duration_seconds=time.monotonic() - started)
+            db.execute("INSERT INTO paper_orders VALUES(?,?,?,?,?,?)",
+                       (order["id"], key, order["status"], order["day"],
+                        order["reserved_cash"], json.dumps(order)))
+            self._event(db, "order_" + order["status"], order, now)
+            if order["status"] == "pending":
+                order["approved_at"] = now
+                self._save_order(db, order)
+                self._fill_entry(db, order, now)
+            return dict(order)
+
+    def action(self, action, request_id=None, actor=None, **kwargs):
+        started = time.monotonic()
+        now = self.clock()
+        with self._transaction("action") as db:
+            self._day(db, now)
+            self._risk(db, now)
+            self._audit(db, action, {"id": request_id, **kwargs}, actor)
+            account = self._account(db)
+            if action == "mode":
+                if not isinstance(kwargs.get("enabled"), bool):
+                    return {"status": "rejected", "reason": "enabled must be boolean"}
+                approval = kwargs.get("approval_required", bool(account["approval_required"]))
+                if not isinstance(approval, bool):
+                    return {"status": "rejected", "reason": "approval_required must be boolean"}
+                db.execute("UPDATE paper_account SET enabled=?,approval_required=? WHERE id=1",
+                           (kwargs["enabled"], approval))
+                if not kwargs["enabled"]:
+                    for order in self._orders(db, True):
+                        self._finish_order(db, order, "cancelled", "practice_disabled", now)
+                return {"status": "ok", "mode": "PRACTICE", "enabled": kwargs["enabled"],
+                        "approval_required": approval}
+            if action == "limits":
+                try:
+                    profit = _number(kwargs.get("profit_limit", account["profit_limit"]))
+                    loss = _number(abs(float(kwargs.get("loss_limit", account["loss_limit"]))))
+                except (TypeError, ValueError):
+                    return {"status": "rejected", "reason": "invalid_limits"}
+                db.execute("UPDATE paper_account SET profit_limit=?,loss_limit=? WHERE id=1",
+                           (profit, loss))
+                self._risk(db, now)
+                return {"status": "ok", "profit_limit": profit, "loss_limit": loss}
+            if action == "close":
+                position = next((p for p in self._positions(db) if p["id"] == request_id), None)
+                if position is None:
+                    return {"status": "rejected", "reason": "position_not_found", "id": request_id}
+                position["exit_reason"] = position.get("exit_reason") or "manual_close"
+                self._save_position(db, position)
+                self._exit(db, position, now)
+                return {"status": position["status"], "id": request_id,
+                        "reason": position["exit_reason"]}
+            row = db.execute("SELECT data FROM paper_orders WHERE id=?", (request_id,)).fetchone()
+            if row is None:
+                return {"status": "rejected", "id": request_id, "reason": "request_not_found"}
+            order = json.loads(row["data"])
+            if order["status"] not in ACTIVE:
+                return order
+            if action not in ("reject", "modify", "approve_limit", "approve_market"):
+                return {"status": "rejected", "id": request_id, "reason": "unknown_action"}
+            reason = self._entry_allowed(db, order, now)
+            if reason:
+                self._finish_order(db, order, "expired" if reason == "expired" else "cancelled",
+                                   reason, now)
+                return order
+            if action == "reject":
+                self._finish_order(db, order, "rejected", "operator_rejected", now)
+            elif action == "modify":
+                try:
+                    limit = _round_tick(_number(kwargs.get("limit_price", order["limit_price"])),
+                                        order["tick_size"], "BUY")
+                    stop = _number(kwargs.get("stop_loss", order["stop_loss"]))
+                    if stop >= limit:
+                        raise ValueError("stop_loss must be below entry")
+                    reserve = _round_tick(limit * 1.01, order["tick_size"], "BUY") * order["quantity"]
+                    other = sum(o["reserved_cash"] for o in self._orders(db, True) if o["id"] != request_id)
+                    if reserve + other > account["cash"]:
+                        raise ValueError("insufficient_cash")
+                except (ValueError, TypeError) as exc:
+                    return {"status": "rejected", "id": request_id, "reason": str(exc)}
+                risk = limit - stop
+                order.update(limit_price=limit, stop_loss=stop, initial_stop_loss=stop,
+                             target_1=limit + risk, target_2=limit + 2 * risk,
+                             reserved_cash=reserve, updated_at=now)
+                self._save_order(db, order)
+                self._event(db, "order_modified", order, now)
+            else:
+                if order["status"] == "awaiting_approval":
+                    order.update(status="pending", approved_at=now,
+                                 approval_duration_seconds=time.monotonic() - started,
+                                 signal_to_approval_seconds=now - order["created_at"],
+                                 order_type="MARKET" if action == "approve_market" else "LIMIT")
+                    self._save_order(db, order)
+                    self._event(db, "order_approved", order, now)
+                self._fill_entry(db, order, now)
+            return dict(order)
+
+    def _fill_entry(self, db, order, now):
+        started = time.monotonic()
+        reason = self._entry_allowed(db, order, now)
+        if reason:
+            self._finish_order(db, order, "expired" if reason == "expired" else "cancelled", reason, now)
+            return
+        quote = self._quote(db, order, now)
+        if quote is None:
+            return
+        evidence = float(quote.get("ask") or quote["price"])
+        source = "ASK" if quote.get("ask") is not None else "LTP"
+        adverse = order["order_type"] == "MARKET" or (
+            evidence > order["limit_price"] and now - order["approved_at"] >= 5)
+        if not adverse and evidence > order["limit_price"]:
+            return
+        price = _round_tick(evidence * (1.01 if adverse else 1),
+                            order["tick_size"], "BUY")
+        if not adverse and price > order["limit_price"]:
+            return
+        others = sum(o["reserved_cash"] for o in self._orders(db, True) if o["id"] != order["id"])
+        if price * order["quantity"] + others > self._account(db)["cash"]:
+            self._finish_order(db, order, "cancelled", "insufficient_cash_at_fill", now)
+            return
+        if price <= order["stop_loss"]:
+            self._finish_order(db, order, "cancelled", "entry_below_stop", now)
+            return
+        if len(self._positions(db)) >= 5 or self._day(db, now)["filled"] >= 20:
+            self._finish_order(db, order, "cancelled", "capacity_at_fill", now)
+            return
+        order.update(status="filled", reserved_cash=0, fill_price=price, filled_at=now,
+                     quote_source=source, fill_model="adverse_1pct" if adverse else "limit",
+                     quote_timestamp=quote["timestamp"], reason=None,
+                     signal_to_fill_seconds=now - order["created_at"],
+                     approval_to_fill_seconds=now - order["approved_at"],
+                     fill_duration_seconds=time.monotonic() - started)
+        self._save_order(db, order)
+        position = {**order, "status": "open", "entry_price": price,
+                    "mark_price": float(quote["price"]), "opened_at": now,
+                    "day_opening_price": price, "valuation_day": order["day"],
+                    "t1_reached": False, "stop_kind": "initial_stop",
+                    "last_candle_end": 0, "exit_reason": None}
+        db.execute("INSERT INTO paper_positions VALUES(?,?,?)",
+                   (position["id"], "open", json.dumps(position)))
+        db.execute("UPDATE paper_account SET cash=cash-? WHERE id=1", (price * order["quantity"],))
+        db.execute("UPDATE paper_days SET filled=filled+1 WHERE day=?", (order["day"],))
+        self._execution(db, order["id"], "BUY", price, order["quantity"], source,
+                        order["fill_model"], now, quote["timestamp"])
+        self._event(db, "entry_filled", position, now)
+        self._risk(db, now)
+        db.execute("UPDATE paper_days SET closing=? WHERE day=?",
+                   (self._equity(db), order["day"]))
+
+    def _execution(self, db, order_id, side, price, quantity, source, model, now, quote_timestamp):
+        row = db.execute("SELECT data FROM paper_orders WHERE id=?", (order_id,)).fetchone()
+        order = json.loads(row["data"])
+        data = {"id": uuid.uuid4().hex, "order_id": order_id, "side": side,
+                "price": price, "quantity": quantity, "quote_source": source,
+                "fill_model": model, "timestamp": now, "quote_timestamp": quote_timestamp,
+                "option_symbol": order["option_symbol"], "security_id": order["security_id"],
+                "exchange_segment": order["exchange_segment"], "entry_day": order["day"]}
+        if side == "SELL":
+            position_row = db.execute("SELECT data FROM paper_positions WHERE id=?", (order_id,)).fetchone()
+            data["reason"] = json.loads(position_row["data"])["exit_reason"]
+        else:
+            data["reason"] = "entry"
+        db.execute("INSERT INTO paper_executions VALUES(?,?,?,?)",
+                   (data["id"], order_id, side, json.dumps(data)))
+        self._audit(db, "execution", data)
+
+    def _exit(self, db, position, now):
+        started = time.monotonic()
+        quote = self._quote(db, position, now)
+        if quote is None or not self._open(position, now):
+            return
+        evidence = float(quote.get("bid") or quote["price"])
+        source = "BID" if quote.get("bid") is not None else "LTP"
+        price = _round_tick(evidence * .99, position["tick_size"], "SELL")
+        if price <= 0:
+            return
+        day = self._day(db, now)["day"]
+        if position.get("valuation_day") != day:
+            # A caller may have held an object loaded before rollover.
+            persisted = db.execute("SELECT data FROM paper_positions WHERE id=?",
+                                   (position["id"],)).fetchone()
+            baseline = json.loads(persisted["data"])["day_opening_price"]
+        else:
+            baseline = position["day_opening_price"]
+        pnl = (price - position["entry_price"]) * position["quantity"]
+        daily_pnl = (price - baseline) * position["quantity"]
+        position.update(status="closed", exit_price=price, closed_at=now, realized_pnl=pnl,
+                        holding_seconds=now - position["opened_at"],
+                        protection_latency_seconds=now - position.get("exit_requested_at", now),
+                        exit_fill_duration_seconds=time.monotonic() - started)
+        self._save_position(db, position)
+        db.execute("UPDATE paper_account SET cash=cash+? WHERE id=1",
+                   (price * position["quantity"],))
+        db.execute("UPDATE paper_days SET realized=realized+? WHERE day=?", (daily_pnl, day))
+        self._execution(db, position["id"], "SELL", price, position["quantity"], source,
+                        "adverse_1pct", now, quote["timestamp"])
+        self._event(db, "exit_filled", position, now)
+        db.execute("UPDATE paper_days SET closing=? WHERE day=?",
+                   (self._equity(db), day))
+
+    def _risk(self, db, now):
+        day = self._day(db, now)
+        account = self._account(db)
+        pnl = self._equity(db) - day["opening"]
+        reason = day["risk_reason"]
+        if not day["risk_latched"]:
+            reason = ("daily_profit_limit" if pnl >= account["profit_limit"] else
+                      "daily_loss_limit" if pnl <= -account["loss_limit"] else None)
+            if reason:
+                db.execute("UPDATE paper_days SET risk_latched=1,risk_reason=? WHERE day=?",
+                           (reason, day["day"]))
+                self._event(db, "risk_latched", {"reason": reason, "pnl": pnl}, now)
+        if reason:
+            for order in self._orders(db, True):
+                self._finish_order(db, order, "cancelled", reason, now)
+            for position in self._positions(db):
+                position["exit_reason"] = position.get("exit_reason") or reason
+                self._save_position(db, position)
+
+    @staticmethod
+    def _timeframe_seconds(timeframe):
+        text = str(timeframe).lower().replace(" ", "")
+        for suffix, multiplier in (("min", 60), ("m", 60), ("hour", 3600), ("h", 3600)):
+            if text.endswith(suffix):
+                return _number(text[:-len(suffix)]) * multiplier
+        return _number(text) * 60
+
+    def _trail(self, db, position, candles, now):
+        key = (*self._contract(position), position["timeframe"])
+        values = candles.get(key, candles.get(self._contract(position), []))
+        if isinstance(values, dict):
+            values = [values]
+        completed = []
+        for candle in values or []:
+            try:
+                if candle.get("completed") is False or (
+                    candle.get("timeframe") is not None and
+                    str(candle["timeframe"]) != str(position["timeframe"])
+                ):
+                    continue
+                start = _epoch(candle["timestamp"])
+                raw_end = candle.get("end_timestamp", candle.get("end"))
+                end = _epoch(raw_end) if raw_end is not None else (
+                    start + self._timeframe_seconds(position["timeframe"]))
+                low = _number(candle["low"])
+                if start >= position["opened_at"] and position["last_candle_end"] < end <= now and end > start:
+                    completed.append((end, low))
+            except (KeyError, ValueError, TypeError, OverflowError):
+                continue
+        if completed:
+            end, low = max(completed)
+            position["last_candle_end"] = end
+            if low > position["stop_loss"]:
+                position.update(stop_loss=low, stop_kind="trailing_stop")
+                self._event(db, "stop_tightened", {"id": position["id"], "stop_loss": low}, now)
+
+    def tick(self, quotes, candles=None):
+        now = self.clock()
+        with self._transaction("tick") as db:
+            day = self._day(db, now)
+            for contract, quote in (quotes or {}).items():
+                self._store_quote(db, contract, quote)
+            for position in self._positions(db):
+                quote = self._quote(db, position, now)
+                if quote is not None:
+                    position["mark_price"] = float(quote["price"])
+                    position["mark_timestamp"] = quote["timestamp"]
+                if position["day"] != day["day"] or self._cutoff(position, now):
+                    position["exit_reason"] = position.get("exit_reason") or "time_cutoff"
+                if not position.get("exit_reason"):
+                    self._trail(db, position, candles or {}, now)
+                if not position.get("exit_reason") and quote is not None:
+                    price = float(quote["price"])
+                    if price <= position["stop_loss"]:
+                        position["exit_reason"] = position["stop_kind"]
+                    elif price >= position["target_1"] and not position["t1_reached"]:
+                        position.update(t1_reached=True,
+                                        stop_loss=max(position["stop_loss"], position["entry_price"]))
+                        if position["stop_loss"] == position["entry_price"]:
+                            position["stop_kind"] = "breakeven_stop"
+                        self._event(db, "target_1", {"id": position["id"], "quantity": position["quantity"],
+                                                   "stop_loss": position["stop_loss"]}, now)
+                    if not position.get("exit_reason") and price >= position["target_2"]:
+                        position["exit_reason"] = "target_2"
+                self._save_position(db, position)
+            self._risk(db, now)
+            for position in self._positions(db):
+                if position.get("exit_reason"):
+                    self._exit(db, position, now)
+            self._risk(db, now)
+            for order in self._orders(db, True):
+                reason = self._entry_allowed(db, order, now)
+                if reason:
+                    self._finish_order(db, order, "expired" if reason == "expired" else "cancelled", reason, now)
+                elif order["status"] == "pending":
+                    self._fill_entry(db, order, now)
+            db.execute("UPDATE paper_days SET closing=? WHERE day=?",
+                       (self._equity(db), day["day"]))
+            self._summaries(db, now)
+
+    def _summaries(self, db, now):
+        local = datetime.fromtimestamp(now, IST)
+        for row in db.execute("SELECT * FROM paper_days WHERE final_sent=0").fetchall():
+            day = dict(row)
+            positions = self._positions(db)
+            log = [json.loads(r["data"]) for r in db.execute(
+                "SELECT data FROM paper_executions ORDER BY rowid")
+                if json.loads(r["data"]).get("entry_day") == day["day"] or
+                datetime.fromtimestamp(json.loads(r["data"])["timestamp"], IST).date().isoformat() == day["day"]]
+            day_orders = [o for o in self._orders(db) if o["day"] == day["day"]]
+            due = day["day"] < local.date().isoformat() or (
+                all(self._cutoff(o, now) for o in day_orders) if day_orders else
+                local.time().replace(tzinfo=None) >= daytime(15, 25))
+            if not due:
+                continue
+            unresolved = [p for p in positions if p["day"] <= day["day"]]
+            payload = {"day": day["day"], "opening_equity": day["opening"],
+                       "closing_equity": day["closing"], "pnl": day["closing"] - day["opening"],
+                       "unresolved_exits": unresolved, "trade_log": log}
+            if unresolved and not day["interim_sent"]:
+                self._event(db, "day_summary_interim", payload, now)
+                db.execute("UPDATE paper_days SET interim_sent=1 WHERE day=?", (day["day"],))
+            if not unresolved:
+                self._event(db, "day_summary_final", payload, now)
+                db.execute("UPDATE paper_days SET final_sent=1 WHERE day=?", (day["day"],))
+
+    def record_update(self, update_id):
+        with self._transaction("record_update") as db:
+            result = db.execute("INSERT OR IGNORE INTO paper_updates VALUES(?)", (str(update_id),))
+            return result.rowcount == 1
+
+    def record_delivery(self, event_id, duration_ms, success):
+        """Record an adapter's actual delivery latency, including failed attempts."""
+        duration = float(duration_ms)
+        if not math.isfinite(duration) or duration < 0 or not isinstance(success, bool):
+            raise ValueError("duration_ms must be finite/nonnegative and success boolean")
+        with self._transaction("record_delivery") as db:
+            db.execute("""INSERT INTO paper_deliveries
+                (event_id,timestamp,duration_ms,success) VALUES(?,?,?,?)""",
+                       (str(event_id), self.clock(), duration, success))
+            self._audit(db, "notification_delivery", {
+                "event_id": str(event_id), "duration_ms": duration, "success": success})
+
+    def deliver_notifications(self):
+        """Flush the outbox explicitly when ``auto_deliver`` is disabled."""
+        self._deliver()
+
+    def contracts(self):
+        snapshot = self.snapshot()
+        unique = {}
+        for contract in snapshot["pending"] + snapshot["positions"]:
+            key = (*self._contract(contract), str(contract["timeframe"]))
+            unique[key] = {name: contract.get(name) for name in (
+                "exchange_segment", "security_id", "timeframe", "instrument_type", "option_symbol")}
+        return [unique[key] for key in sorted(unique)]
+
+    def snapshot(self, day=None):
+        requested_day = date.fromisoformat(day).isoformat() if day is not None else None
+        with self._transaction("snapshot") as db:
+            day = self._day(db, self.clock())
+            today = day["day"]
+            selected_day = requested_day or today
+            if selected_day != today:
+                row = db.execute("SELECT * FROM paper_days WHERE day=?", (selected_day,)).fetchone()
+                if row is None:
+                    raise ValueError("no recorded trading day: " + selected_day)
+                day = dict(row)
+            account = self._account(db)
+            orders = [json.loads(r["data"]) for r in db.execute(
+                "SELECT data FROM paper_orders WHERE day=?", (selected_day,))]
+            pending = self._orders(db, True)
+            positions = self._positions(db)
+            account.update(mode="PRACTICE", initial_capital=500000,
+                           equity=self._equity(db), reserved_cash=sum(o["reserved_cash"] for o in pending))
+            account["available_cash"] = account["cash"] - account["reserved_cash"]
+            day.update(pnl=(account["equity"] if selected_day == today else day["closing"]) - day["opening"],
+                       reserved_entries=len(pending) if selected_day == today else 0)
+            closed = [json.loads(r["data"]) for r in db.execute(
+                "SELECT data FROM paper_positions WHERE status='closed'")]
+            executions = [json.loads(r["data"]) for r in db.execute(
+                "SELECT data FROM paper_executions ORDER BY rowid")]
+            def on_day(timestamp):
+                return datetime.fromtimestamp(timestamp, IST).date().isoformat() == selected_day
+            start = datetime.combine(date.fromisoformat(selected_day), daytime(), IST).timestamp()
+            end = start + 86400
+            return {"account": account, "daily": day, "positions": positions,
+                    "pending": pending, "orders": orders,
+                    "closed_positions": [p for p in closed if p["day"] == selected_day or on_day(p["closed_at"])],
+                    "executions": [e for e in executions if e.get("entry_day") == selected_day or on_day(e["timestamp"])],
+                    "audit": [dict(r) for r in db.execute(
+                        "SELECT * FROM paper_audit WHERE timestamp>=? AND timestamp<? ORDER BY id",
+                        (start, end))],
+                    "deliveries": [dict(r) for r in db.execute(
+                        "SELECT * FROM paper_deliveries WHERE timestamp>=? AND timestamp<? ORDER BY id",
+                        (start, end))],
+                    "metrics": [dict(r) for r in db.execute("SELECT * FROM paper_metrics")]}

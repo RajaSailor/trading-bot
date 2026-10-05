@@ -20,6 +20,7 @@ from __future__ import annotations
 import csv
 import gc
 import logging
+import math
 import os
 import re
 import threading
@@ -43,6 +44,7 @@ NEEDED_COLUMNS = (
     "SEM_INSTRUMENT_NAME",
     "SEM_TRADING_SYMBOL",
     "SEM_LOT_UNITS",
+    "SEM_TICK_SIZE",
     "SEM_CUSTOM_SYMBOL",
     "SEM_EXPIRY_DATE",
     "SEM_STRIKE_PRICE",
@@ -118,6 +120,7 @@ class OptionContract:
     exchange_segment: str
     instrument_type: str
     lot_size: float = 0.0
+    tick_size: Optional[float] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +216,9 @@ class SecurityMasterIndex:
                 if strike is None or strike <= 0 or expiry is None or expiry <= today:
                     continue
                 key = (entry.root, option_type)
+                tick_size = _parse_float(row.get("SEM_TICK_SIZE"))
+                if tick_size is not None and (not math.isfinite(tick_size) or tick_size <= 0):
+                    tick_size = None
                 current = best.get(key)
                 if current is not None and expiry > current[0]:
                     continue
@@ -230,6 +236,7 @@ class SecurityMasterIndex:
                         exchange_segment=_OPTION_SEGMENT[exchange],
                         instrument_type=instrument,
                         lot_size=_parse_float(row.get("SEM_LOT_UNITS")) or 0.0,
+                        tick_size=tick_size,
                     ),
                 )
             elif instrument == "INDEX" and entry.kind == KIND_INDEX:
