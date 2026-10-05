@@ -66,7 +66,6 @@ class PremiumScreener:
         self.trade_control_bot = trade_control_bot
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=LOOKBACK_CANDLES)
-        self.spot_engine = StrategyEngine(lookback=7)
         self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.signal_callback = signal_callback
         self.paper_trade_notifier = paper_trade_notifier

@@ -146,13 +146,11 @@ class PremiumScreenerTests(unittest.TestCase):
         screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
         calls = []
         screener._scan_instruments = lambda instruments, interval, now=None: calls.append(("options", interval, len(instruments))) or 0
-        screener._scan_spot_instruments = lambda instruments, interval, strategy_group, primary_category: calls.append(primary_category) or 0
-        screener.last_run["stock_spot_10min"] = 1000
 
-        with patch("screener_premium.time.time", return_value=1100):
+        with patch("screener_premium.open_exchanges", return_value={"NSE"}):
             screener.run_once(now=datetime(2026, 9, 9, 10, 0, 0))
 
-        self.assertEqual([("options", "10min", 2)], calls)
+        self.assertEqual([("options", "10min", 1)], calls)
 
     def test_scan_instruments_skips_duplicate_premium_signals(self):
         telegram = _FakeTelegramHandler()

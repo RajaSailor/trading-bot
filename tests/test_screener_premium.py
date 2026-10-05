@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 from screener_premium import IST, PremiumScreener
 from security_master import UnderlyingRef
-from strategy_engine import StrategyEngine
 
 
 def _candle(minute, o, h, l, c):

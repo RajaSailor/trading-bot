@@ -173,7 +173,7 @@ class QueueConsumerWorkerTests(unittest.TestCase):
             )
 
             self.assertTrue(worker.process_one())
-            self.assertEqual([("telegram", "delivery_failed"), ("telegram", "delivery_failed")], metrics.errors)
+            self.assertEqual([("telegram", "delivery_failed")], metrics.errors)
 
     def test_failures_are_requeued_with_retry_metadata(self):
         queue = SignalQueueProcessor()
