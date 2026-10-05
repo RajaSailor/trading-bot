@@ -353,32 +353,32 @@ class PaperPortfolio:
     def _control_price(self, position, action, value):
         if action == "trailing":
             if not isinstance(value, bool):
-                raise ValueError("trailing_must_be_boolean")
-            return value
+                return None, "trailing_must_be_boolean"
+            return value, None
         if action == "exit_market":
-            return None
+            return None, None
         try:
             price = _number(value)
             units = Decimal(str(price)) / Decimal(str(position["tick_size"]))
-            if units != units.to_integral_value():
-                raise ValueError("price_not_tick_aligned")
-        except (TypeError, OverflowError):
-            raise ValueError("invalid_price") from None
+        except (TypeError, ValueError, ArithmeticError):
+            return None, "invalid_price"
+        if units != units.to_integral_value():
+            return None, "price_not_tick_aligned"
         if action == "sl":
             if price < position["stop_loss"]:
-                raise ValueError("sl_cannot_loosen")
+                return None, "sl_cannot_loosen"
             if price >= position["mark_price"]:
-                raise ValueError("sl_must_be_below_mark")
+                return None, "sl_must_be_below_mark"
         if action in ("target_1", "target_2"):
             if action == "target_1" and position["t1_reached"]:
-                raise ValueError("target_1_already_reached")
+                return None, "target_1_already_reached"
             t1 = price if action == "target_1" else position["target_1"]
             t2 = price if action == "target_2" else position["target_2"]
             if not position["entry_price"] < t1 < t2:
-                raise ValueError("targets_must_be_ordered")
+                return None, "targets_must_be_ordered"
             if price <= position["mark_price"]:
-                raise ValueError("target_must_be_above_mark")
-        return price
+                return None, "target_must_be_above_mark"
+        return price, None
 
     def _sync_protection(self, db, now):
         day = self._day(db, now)
@@ -423,7 +423,7 @@ class PaperPortfolio:
                         workflow["input"] if workflow and action == "preview" else new)
                     try:
                         new = candidate if isinstance(candidate, bool) else _number(candidate)
-                    except (ValueError, TypeError, OverflowError):
+                    except (ValueError, TypeError, ArithmeticError):
                         new = None
                 self._audit(db, "position_control", {
                     "action": response["action"], "position_id": position_id,
@@ -517,10 +517,9 @@ class PaperPortfolio:
                 elif action == "confirm":
                     if workflow["stage"] != "confirm":
                         return result("workflow_not_confirm")
-                    try:
-                        checked = self._control_price(position, control, workflow["value"])
-                    except ValueError as exc:
-                        return result(str(exc))
+                    checked, reason = self._control_price(position, control, workflow["value"])
+                    if reason:
+                        return result(reason)
                     if control in ("exit_market", "exit_limit"):
                         position["exit_reason"] = "manual_close"
                         self._save_position(db, position)
@@ -552,15 +551,15 @@ class PaperPortfolio:
                 elif action in ("input", "preview") or value is not None or control == "exit_market":
                     if workflow["stage"] != "input":
                         return result("workflow_not_input")
-                    try:
-                        supplied = workflow["input"] if value is None else value
-                        if control not in ("trailing", "exit_market"):
-                            if len(str(supplied)) > 16:
-                                return result("input_too_long")
-                            workflow["input"] = str(supplied)
-                        workflow["value"] = self._control_price(position, control, supplied)
-                    except ValueError as exc:
-                        return result(str(exc))
+                    supplied = workflow["input"] if value is None else value
+                    checked, reason = self._control_price(position, control, supplied)
+                    if reason:
+                        return result(reason)
+                    if control not in ("trailing", "exit_market"):
+                        if len(str(supplied)) > 16:
+                            return result("input_too_long")
+                        workflow["input"] = str(supplied)
+                    workflow["value"] = checked
                     workflow["stage"] = "confirm"
             db.execute("INSERT INTO paper_position_controls VALUES(?,?) "
                        "ON CONFLICT(id) DO UPDATE SET data=excluded.data",
@@ -576,6 +575,7 @@ class PaperPortfolio:
     def submit(self, signal, quote=None):
         started = time.monotonic()
         now = self.clock()
+        invalid_reason = "invalid_signal"
         try:
             data = {**signal, **(signal.get("metadata") or {})}
             key = str(data.get("idempotency_key") or data.get("signal_id") or data.get("id") or hashlib.sha256(
@@ -610,6 +610,7 @@ class PaperPortfolio:
             if signal_timestamp > now:
                 raise ValueError("future signal")
             if now - signal_timestamp >= self.approval_expiry_seconds:
+                invalid_reason = "stale_signal"
                 raise ValueError("stale_signal")
             if str(data.get("side", data.get("action", "BUY"))).upper() in {"SELL", "SHORT"}:
                 raise ValueError("only long option BUY entries are supported")
@@ -631,10 +632,10 @@ class PaperPortfolio:
                          order_type="LIMIT", side="BUY", reason=None)
             intent_risk = Decimal(str(order["limit_price"])) - Decimal(str(stop))
             order.update(risk_points=float(intent_risk), risk_inr=float(intent_risk * lot))
-        except (KeyError, ValueError, TypeError, OverflowError) as exc:
+        except (KeyError, ValueError, TypeError, ArithmeticError):
             with self._transaction("submit") as db:
-                self._audit(db, "invalid_signal", {"reason": str(exc)})
-            return {"status": "rejected", "id": None, "reason": str(exc)}
+                self._audit(db, "invalid_signal", {"reason": invalid_reason})
+            return {"status": "rejected", "id": None, "reason": invalid_reason}
         with self._transaction("submit") as db:
             existing = db.execute("SELECT data FROM paper_orders WHERE signal_key=?", (key,)).fetchone()
             if existing:
@@ -738,8 +739,8 @@ class PaperPortfolio:
                 if order_type == "LIMIT":
                     limit_price = _round_tick(
                         _number(kwargs.get("limit_price")), position["tick_size"], "BUY")
-            except (TypeError, ValueError) as exc:
-                return {"status": "rejected", "reason": str(exc), "id": request_id}
+            except (TypeError, ValueError, ArithmeticError):
+                return {"status": "rejected", "reason": "invalid_exit_order", "id": request_id}
             position["exit_reason"] = position.get("exit_reason") or "manual_close"
             self._save_position(db, position)
             exit_order = self._request_exit_order(db, position, now, order_type, limit_price)
@@ -767,13 +768,14 @@ class PaperPortfolio:
                                     order["tick_size"], "BUY")
                 stop = _number(kwargs.get("stop_loss", order["stop_loss"]))
                 if stop >= limit:
-                    raise ValueError("stop_loss must be below entry")
+                    return {"status": "rejected", "id": request_id,
+                            "reason": "stop_loss must be below entry"}
                 reserve = _round_tick(limit * 1.01, order["tick_size"], "BUY") * order["quantity"]
                 other = sum(o["reserved_cash"] for o in self._orders(db, True) if o["id"] != request_id)
                 if reserve + other > account["cash"]:
-                    raise ValueError("insufficient_cash")
-            except (ValueError, TypeError) as exc:
-                return {"status": "rejected", "id": request_id, "reason": str(exc)}
+                    return {"status": "rejected", "id": request_id, "reason": "insufficient_cash"}
+            except (ValueError, TypeError, ArithmeticError):
+                return {"status": "rejected", "id": request_id, "reason": "invalid_modification"}
             risk = Decimal(str(limit)) - Decimal(str(stop))
             order.update(limit_price=limit, stop_loss=stop, initial_stop_loss=stop,
                          risk_points=float(risk), risk_inr=float(risk * order["quantity"]),

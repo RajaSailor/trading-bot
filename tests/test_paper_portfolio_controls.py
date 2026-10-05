@@ -4,6 +4,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from decimal import InvalidOperation
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
@@ -327,6 +328,44 @@ def test_digit_buffer_bounds_and_direct_input(engine):
         assert not control(portfolio, None, "digit", token=start["token"], value=value)["ok"]
     preview = control(portfolio, None, "input", token=start["token"], value=95)
     assert preview["stage"] == "confirm" and confirm(portfolio, preview)["ok"]
+
+
+@pytest.mark.parametrize("action", ["input", "preview"])
+def test_invalid_price_text_is_not_exposed_or_audited(engine, action):
+    portfolio, _, _ = engine
+    position = opened(engine)
+    start = control(portfolio, position["id"], "sl")
+    result = control(portfolio, None, action, token=start["token"], value="private-token")
+    assert result["reason"] == "invalid_price"
+    assert "private-token" not in json.dumps(result)
+    with portfolio._connection() as db:
+        records = [row["data"] for row in db.execute("SELECT data FROM paper_audit")]
+        records += [row["data"] for row in db.execute("SELECT data FROM paper_position_controls")]
+    assert all("private-token" not in record for record in records)
+
+
+@pytest.mark.parametrize("exception", [ValueError, TypeError, InvalidOperation])
+@pytest.mark.parametrize("action", ["input", "confirm"])
+def test_numeric_exception_details_never_escape_controls(engine, monkeypatch, exception, action):
+    import paper_portfolio
+
+    portfolio, _, _ = engine
+    position = opened(engine)
+    start = control(portfolio, position["id"], "sl",
+                    **({"value": 95} if action == "confirm" else {}))
+    original = paper_portfolio._number
+    def failing_number(value):
+        if value == 95:
+            raise exception("private-token secret stack trace")
+        return original(value)
+    monkeypatch.setattr(paper_portfolio, "_number", failing_number)
+    result = control(portfolio, None, action, token=start["token"],
+                     **({"value": 95} if action == "input" else {}))
+    assert result["reason"] == "invalid_price"
+    assert "private-token" not in json.dumps(result)
+    with portfolio._connection() as db:
+        records = [row["data"] for row in db.execute("SELECT data FROM paper_audit")]
+    assert all("private-token" not in record for record in records)
 
 
 def test_real_telegram_command_input_and_confirm(engine, monkeypatch):
