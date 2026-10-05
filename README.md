@@ -104,7 +104,10 @@ in-process quote coordination does not throttle independent replicas. All
 controllers must point to the same database; a database file on separate replica
 filesystems is not a shared account.
 
-Inline controls: **Approve Limit**, **Approve Market**, **Modify**, **Reject**.
+Pending-entry controls remain **Approve Limit**, **Approve Market**, **Modify**,
+**Reject**. Open positions have **Exit Market**, **Exit Limit**, **Modify SL**,
+**Modify Target 1/2**, **Trailing ON/OFF**, and **Refresh**. `/positions`,
+`/portfolio`, or `/position <id>` recovers current controls after a restart.
 Commands in the configured control chat:
 
 ```text
@@ -114,10 +117,61 @@ Commands in the configured control chat:
 /modify <request-id> <limit-price> [stop-loss]
 /reject <request-id>
 /portfolio
+/positions
+/orders
+/position <position-id>
 /close <position-id> [market|limit <limit-price>]
+/sl <position-id> [price]
+/target1 <position-id> [price]
+/target2 <position-id> [price]
+/trailing <position-id> on|off
+/input <edit-token> <price>
+/confirm <edit-token>
+/cancel <edit-token>
+/help
 /limits <profit-INR> <loss-INR>
 /trades [YYYY-MM-DD]
 ```
+
+Position edits and manual exits require an explicit confirmation preview;
+`/close` starts that preview rather than immediately submitting an exit.
+Price buttons start a keypad (digits, decimal point, backspace, Preview, Cancel)
+and an optional ForceReply prompt. Replies and `/input` must come from the same
+authorized actor in the same configured chat. Edit tokens persist in SQLite,
+expire after five minutes, and are bound to the position's protection version.
+A protection change, another confirmed edit, closure, or risk/cutoff exit
+invalidates a stale preview. No quantity edits are supported.
+
+In a **group/supergroup**, send commands/replies as your own allowlisted numeric
+Telegram user, not anonymously as `sender_chat`. In a **channel**, posts do not
+provide an authenticated user for commands or replies and are rejected; use the
+inline keypad and confirmation buttons instead. Channel callbacks are checked
+against the actual clicking user's numeric ID and the configured channel ID,
+not the channel post's sender. Forwarded messages/callbacks are rejected.
+No private-chat or linked-discussion-chat bypass is permitted. The bot needs
+permission to post and edit its own messages in the control chat.
+
+Manual SL may only tighten the effective stop, must be tick-aligned and below
+fresh option evidence. Trailing OFF freezes existing protection; it does not
+remove the stop. ON resumes monotonic completed-option-candle protection.
+Custom T1/T2 values are durable and explicitly labeled; T1 remains a milestone
+that raises protection to at least entry, and T2 exits the entire one lot.
+An exit request is `#EXIT_PENDING`, not a fill; LIMIT exits retain the existing
+five-second fresh-evidence/adverse-slippage fallback. Old keyboards are removed
+on closure where Telegram allows; server-side validation always remains active.
+
+Lifecycle messages use Telegram HTML bold and square emojis, not CSS:
+🟨 **ENTRY FILLED** `#PAPER #ENTRY`, 🟨 **PENDING APPROVAL**
+`#PAPER #APPROVAL`, 🟩 **EXIT PROFIT** `#PAPER #EXIT #PROFIT`,
+🟥 **EXIT LOSS** `#PAPER #EXIT #LOSS`, or neutral **EXIT BREAKEVEN**
+`#PAPER #EXIT #BREAKEVEN`. Exit classification uses authoritative realized
+ledger INR rounded half-up to INR 0.01, not signal prices or the exit reason.
+Points are exit minus entry; ledger INR applies units/multiplier exactly once.
+Fees are not modeled and are explicitly excluded. Messages show IST timestamps,
+contract identity, one-lot units, actual simulated prices and effective
+protection. Changes use `#SL_UPDATE`, `#TARGET_UPDATE`, `#TRAIL_UPDATE`;
+T1 uses `#TARGET1`, with stop/risk/cutoff reason tags on relevant exits.
+`service_alerts` routing and formatting are unchanged.
 
 Risk, cutoff, stop and emergency exits never wait for approval. Pending exits
 are informational, not approval requests. Protection escalates a

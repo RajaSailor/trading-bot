@@ -18,6 +18,10 @@ class Engine:
         self.updates = set()
         self.action = Mock(return_value={"ok": True})
         self.snapshot = Mock(return_value={"pending": [], "trades": []})
+        self.clock = Mock(return_value=1000)
+        self.position_control = Mock(return_value={"ok": True})
+        self.control_messages = Mock(return_value=[])
+        self.remember_control_message = Mock()
 
     def record_update(self, update_id):
         if update_id in self.updates:
@@ -158,10 +162,6 @@ def test_forwarded_channel_callback_still_denied(control):
                                   "stop_loss": 90}),
     ("/modify s1 100", "modify", {"request_id": "s1", "limit_price": 100}),
     ("/reject s1", "reject", {"request_id": "s1"}),
-    ("/close p1", "close", {"request_id": "p1"}),
-    ("/close p1 market", "close", {"request_id": "p1", "order_type": "MARKET"}),
-    ("/close p1 limit 110", "close", {"request_id": "p1", "order_type": "LIMIT",
-                                    "limit_price": 110}),
     ("/limits 500 200", "limits", {"profit_limit": 500, "loss_limit": 200}),
 ])
 def test_commands(control, text, action, kwargs):
@@ -171,6 +171,33 @@ def test_commands(control, text, action, kwargs):
     control.engine.action.assert_called_once_with(
         action, request_id=target_id, actor=42,
         telegram_request_id="telegram:update:1", **expected)
+
+
+def test_approval_acknowledgement_does_not_duplicate_fill_receipt(control):
+    control.engine.action.return_value = {
+        "id": "p1", "status": "filled", "fill_price": 100,
+        "quote": {"secret_internal_field": "not-for-notification"}}
+    assert control.handle_update(update("/approve p1"), SECRET)[1] == 200
+    text = sent_messages(control)[-1]["text"]
+    assert "lifecycle receipts are reported separately" in text
+    assert "fill_price" not in text and "secret_internal_field" not in text
+
+
+@pytest.mark.parametrize("text,action,kwargs", [
+    ("/close p1", "exit_market", {}),
+    ("/close p1 market", "exit_market", {}),
+    ("/close p1 limit 110", "exit_limit", {"value": 110}),
+    ("/sl p1 95", "sl", {"value": 95}),
+    ("/target1 p1 115", "target_1", {"value": 115}),
+    ("/target2 p1", "target_2", {}),
+    ("/trailing p1 off", "trailing", {"value": False}),
+    ("/position p1", "refresh", {}),
+])
+def test_position_commands_require_workflow(control, text, action, kwargs):
+    assert control.handle_update(update(text), SECRET)[1] == 200
+    control.engine.position_control.assert_called_once_with(
+        "p1", action, actor=42, chat_id=-100, **kwargs)
+    control.engine.action.assert_not_called()
 
 
 @pytest.mark.parametrize("command", ["/pending", "/portfolio", "/trades",
@@ -450,6 +477,243 @@ def test_optional_delivery_measurement_hook(control):
 def test_optional_delivery_hook_failure_does_not_mask_sent_message(control):
     control.engine.record_delivery = Mock(side_effect=RuntimeError("private"))
     assert control.send_event({"event_id": "e1", "type": "order_pending", "id": "s1"})
+
+
+def open_position(**changes):
+    return {"id": "a" * 32, "status": "open", "option_symbol": "NIFTY <CE>",
+            "security_id": 123, "exchange_segment": "NSE_FNO", "lots": 1,
+            "quantity": 75, "lot_size": 75, "entry_price": 100, "mark_price": 105,
+            "stop_loss": 90, "target_1": 110, "target_2": 120,
+            "control_version": 2, "trailing_enabled": True, **changes}
+
+
+def sent_messages(control):
+    return [call.kwargs["json"] for call in
+            control.telegram_handler._http_session.return_value.post.call_args_list
+            if call.args[0].endswith("/sendMessage")]
+
+
+@pytest.mark.parametrize("command", ["/positions", "/portfolio"])
+def test_recover_position_controls_after_restart(control, command):
+    position = open_position()
+    control.engine.snapshot.return_value = {"positions": [position]}
+    assert control.handle_update(update(command), SECRET)[1] == 200
+    payload = sent_messages(control)[-1]
+    buttons = [b for row in payload["reply_markup"]["inline_keyboard"] for b in row]
+    assert [b["text"] for b in buttons] == [
+        "Exit Market", "Exit Limit", "Modify SL", "Modify Target 1",
+        "Modify Target 2", "Trailing OFF", "Refresh"]
+    assert all(len(b["callback_data"].encode()) <= 64 for b in buttons)
+    assert all(f":2:1300:" in b["callback_data"] for b in buttons)
+    assert "NIFTY &lt;CE&gt;" in payload["text"]
+    assert "Units: 75" in payload["text"]
+    assert "Effective SL: 90" in payload["text"]
+
+
+@pytest.mark.parametrize("kind", ["entry_filled", "target_1", "stop_tightened",
+                                  "sl_updated", "target_updated", "trailing_updated"])
+def test_open_events_attach_authoritative_controls(control, kind):
+    position = open_position()
+    control.engine.snapshot.return_value = {"positions": [position]}
+    assert control.send_event({"type": kind, **position})
+    payload = sent_messages(control)[-1]
+    assert "reply_markup" in payload
+    assert payload["parse_mode"] == "HTML"
+
+
+def test_delayed_entry_notification_cannot_restore_closed_controls(control):
+    assert control.send_event({"type": "entry_filled", **open_position()})
+    assert "reply_markup" not in sent_messages(control)[-1]
+
+
+@pytest.mark.parametrize("changes", [{"status": "closed"}, {"exit_reason": "initial_stop"}])
+def test_no_controls_for_closed_or_exit_pending_position(control, changes):
+    assert control._position_buttons(open_position(**changes)) is None
+
+
+@pytest.mark.parametrize("code,action,value", [
+    ("em", "exit_market", None), ("el", "exit_limit", None), ("sl", "sl", None),
+    ("t1", "target_1", None), ("t2", "target_2", None),
+    ("tr0", "trailing", False), ("tr1", "trailing", True), ("rf", "refresh", None),
+])
+def test_authorized_channel_position_callback(control, code, action, value):
+    item = callback(f"pos:{'a' * 32}:2:1300:{code}")
+    item["callback_query"]["message"]["sender_chat"] = {"id": -100}
+    assert control.handle_update(item, SECRET)[1] == 200
+    kwargs = {"version": 2}
+    if value is not None:
+        kwargs["value"] = value
+    control.engine.position_control.assert_called_once_with(
+        "a" * 32, action, actor=42, chat_id=-100, **kwargs)
+    control.engine.action.assert_not_called()
+
+
+@pytest.mark.parametrize("data", [
+    f"pos:{'a' * 32}:2:999:sl", f"pos:{'a' * 32}:2:999999:sl",
+    f"pos:{'a' * 32}:x:1300:sl", "pc:token:unknown",
+])
+def test_expired_and_invalid_position_callbacks(control, data):
+    assert control.handle_update(callback(data), SECRET)[1] == 400
+    control.engine.position_control.assert_not_called()
+
+
+def test_expired_channel_refresh_recovers_current_buttons(control):
+    control.engine.position_control.return_value = {"ok": True, "position": open_position()}
+    assert control.handle_update(callback(f"pos:{'a' * 32}:0:999:rf"), SECRET)[1] == 200
+    assert "reply_markup" in sent_messages(control)[-1]
+
+
+def test_keypad_updates_existing_message_without_chat_spam(control):
+    control.engine.position_control.return_value = {
+        "ok": True, "token": "b" * 16, "position": open_position(),
+        "action": "sl", "stage": "input", "input": "9", "expires_at": 1300}
+    item = callback(f"pc:{'b' * 16}:d9")
+    item["callback_query"]["message"]["message_id"] = 7
+    assert control.handle_update(item, SECRET)[1] == 200
+    assert not sent_messages(control)
+    edits = [call.kwargs["json"] for call in
+             control.telegram_handler._http_session.return_value.post.call_args_list
+             if call.args[0].endswith("/editMessageText")]
+    assert edits[0]["message_id"] == 7 and "Input: 9" in edits[0]["text"]
+
+
+@pytest.mark.parametrize("code,action,kwargs", [
+    ("d5", "digit", {"value": "5"}), ("d.", "digit", {"value": "."}),
+    ("back", "digit", {"value": "back"}), ("preview", "preview", {}),
+    ("confirm", "confirm", {}), ("cancel", "cancel", {}),
+])
+def test_authenticated_workflow_keypad_callbacks(control, code, action, kwargs):
+    token = "b" * 16
+    assert control.handle_update(callback(f"pc:{token}:{code}"), SECRET)[1] == 200
+    control.engine.position_control.assert_called_once_with(
+        None, action, actor=42, chat_id=-100, token=token, **kwargs)
+
+
+def test_force_reply_bound_to_persisted_token(control):
+    token = "b" * 16
+    item = update("95")
+    item["message"]["reply_to_message"] = {
+        "text": f"Paper price input: /input {token} <price>"}
+    assert control.handle_update(item, SECRET)[1] == 200
+    control.engine.position_control.assert_called_once_with(
+        None, "input", actor=42, chat_id=-100, token=token, value=95)
+
+
+def test_workflow_preview_and_keypad(control):
+    result = {"ok": True, "token": "b" * 16, "position": open_position(),
+              "action": "sl", "expires_at": 1300, "stage": "input", "input": "9"}
+    control._workflow(result)
+    payloads = sent_messages(control)
+    assert "Input: 9" in payloads[0]["text"]
+    assert payloads[-1]["reply_markup"]["force_reply"] is True
+    control._workflow({**result, "stage": "confirm", "old": 90, "value": 95})
+    preview = sent_messages(control)[-1]
+    assert "not submitted yet" in preview["text"]
+    assert [b["text"] for b in preview["reply_markup"]["inline_keyboard"][0]] == [
+        "Confirm", "Cancel"]
+
+
+@pytest.mark.parametrize("realized,tag,heading", [
+    (750, "#PROFIT", "🟩 EXIT PROFIT"), (-750, "#LOSS", "🟥 EXIT LOSS"),
+    (0, "#BREAKEVEN", "EXIT BREAKEVEN"), (0.004, "#BREAKEVEN", "EXIT BREAKEVEN"),
+    (-0.005, "#LOSS", "🟥 EXIT LOSS"),
+])
+def test_exit_tags_use_realized_ledger_not_reason(control, realized, tag, heading):
+    assert control.send_event({"type": "exit_filled", **open_position(status="closed"),
+                               "exit_price": 110, "realized_pnl": realized,
+                               "exit_reason": "target_2", "closed_at": 1000})
+    payload = sent_messages(control)[-1]
+    assert heading in payload["text"] and tag in payload["text"]
+    assert "#TARGET2" in payload["text"]
+    assert "INR is the ledger result" in payload["text"]
+    assert "IST" in payload["text"]
+    assert "reply_markup" not in payload
+
+
+def test_exit_without_authoritative_ledger_result_is_not_classified(control):
+    assert not control.send_event({"type": "exit_filled", **open_position(status="closed"),
+                                   "exit_price": 110, "exit_reason": "target_2"})
+    assert not sent_messages(control)
+
+
+def test_manual_sl_exit_is_not_tagged_as_automatic_trailing(control):
+    assert control.send_event({"type": "exit_filled", **open_position(status="closed"),
+                               "exit_price": 105, "realized_pnl": 375,
+                               "exit_reason": "trailing_stop", "stop_source": "manual"})
+    text = sent_messages(control)[-1]["text"]
+    assert "#SL_UPDATE" in text and "#TRAIL" not in text
+    assert "source: manual" in text
+
+
+def test_closure_removes_persisted_old_keyboards(control):
+    control.engine.control_messages.return_value = [{"chat_id": -100, "message_id": 7}]
+    assert control.send_event({"type": "exit_filled", **open_position(status="closed"),
+                               "exit_price": 100, "realized_pnl": 0})
+    edits = [call.kwargs["json"] for call in
+             control.telegram_handler._http_session.return_value.post.call_args_list
+             if call.args[0].endswith("/editMessageReplyMarkup")]
+    assert edits == [{"chat_id": -100, "message_id": 7,
+                      "reply_markup": {"inline_keyboard": []}}]
+
+
+def test_control_message_id_is_persisted(control):
+    response = control.telegram_handler._http_session.return_value.post.return_value
+    response.json.return_value = {"ok": True, "result": {"message_id": 7}}
+    control._send_position(open_position())
+    control.engine.remember_control_message.assert_called_once_with("a" * 32, -100, 7)
+
+
+def test_only_keyboard_chunk_is_recorded(control):
+    response = control.telegram_handler._http_session.return_value.post.return_value
+    response.json.return_value = {"ok": True, "result": {"message_id": 7}}
+    control._send(["first chunk", "keyboard chunk"],
+                  control._position_buttons(open_position()), "a" * 32)
+    control.engine.remember_control_message.assert_called_once_with("a" * 32, -100, 7)
+
+
+def test_rejected_workflow_callback_has_rejection_toast(control):
+    control.engine.position_control.return_value = {"ok": False, "reason": "version_mismatch"}
+    assert control.handle_update(callback(f"pos:{'a' * 32}:1:1300:sl"), SECRET)[1] == 200
+    payload = control.telegram_handler._http_session.return_value.post.call_args.kwargs["json"]
+    assert "rejected" in payload["text"]
+
+
+def test_authorized_invalid_request_audits_without_raw_input(control):
+    control.engine.audit_control_attempt = Mock()
+    assert control.handle_update(update("/unknown private-token"), SECRET)[1] == 400
+    control.engine.audit_control_attempt.assert_called_once_with(42, {
+        "action": "telegram_control", "old": None, "new": None,
+        "outcome": "rejected", "update_id": 1})
+
+
+def test_pending_and_fill_headings_not_confused(control):
+    assert control.send_event({"type": "order_awaiting_approval", "id": "s1"})
+    text = sent_messages(control)[-1]["text"]
+    assert "<b>🟨 PENDING APPROVAL</b>" in text
+    assert "#PAPER #APPROVAL" in text and "ENTRY FILLED" not in text
+    assert control.send_event({"type": "entry_filled", **open_position()})
+    assert "<b>🟨 ENTRY FILLED</b>" in sent_messages(control)[-1]["text"]
+
+
+def test_large_escaped_position_fields_remain_bounded(control):
+    assert control.send_event({"type": "entry_filled",
+                               **open_position(option_symbol="<&>" * 4000)})
+    payloads = sent_messages(control)
+    assert len(payloads) > 1
+    assert all(len(p["text"]) < 4096 for p in payloads)
+    assert all("<&>" not in p["text"] for p in payloads)
+
+
+def test_astral_unicode_chunking_uses_telegram_utf16_limit():
+    chunks = format_portfolio({"contract": "🟨" * 5000})
+    assert len(chunks) > 1
+    assert all(len(text.encode("utf-16-le")) // 2 <= 3900 for text in chunks)
+
+
+def test_unknown_event_heading_cannot_overflow_message(control):
+    assert control.send_event({"type": "<&>" * 4000, "id": "s1"})
+    assert all(len(p["text"].encode("utf-16-le")) // 2 <= 3900
+               for p in sent_messages(control))
 
 
 def test_real_engine_persistent_limits_and_cross_instance_dedup(control):
