@@ -4,7 +4,7 @@ import logging
 from datetime import date, datetime
 from typing import Iterable, List, Optional, Sequence
 
-from data_manager import DataManager, Instrument, IST, _apply_rate_limit, get_shared_data_manager
+from data_manager import DataManager, Instrument, IST, _apply_rate_limit, _parse_interval_minutes, get_shared_data_manager
 from exchange_calendar import BSE, MCX, NSE, previous_trading_day
 from security_master import OptionContract
 
@@ -127,6 +127,9 @@ class ATMOptionsFetcher:
         spot_price: float,
     ) -> dict:
         strike_value = self._display_strike(contract.strike)
+        lot_size = contract.lot_size
+        if isinstance(lot_size, float) and lot_size > 0 and lot_size.is_integer():
+            lot_size = int(lot_size)
         return {
             "security_id": int(contract.security_id),
             "option_symbol": contract.trading_symbol,
@@ -145,7 +148,8 @@ class ATMOptionsFetcher:
             "option_type": contract.option_type,
             "expiry": contract.expiry.strftime("%d%b%Y").upper(),
             "expiry_date": contract.expiry.isoformat(),
-            "lot_size": contract.lot_size,
+            "lot_size": lot_size,
+            "tick_size": contract.tick_size,
         }
 
     # --------------------------------------------------------------- candles
@@ -154,15 +158,15 @@ class ATMOptionsFetcher:
         today = self._ist_date(now)
         exchange = _SEGMENT_EXCHANGE.get(str(contract.get("exchange_segment", "")).upper(), NSE)
         from_date = previous_trading_day(exchange, today).strftime("%Y-%m-%d")
-        _apply_rate_limit()
-        return self.data_manager._fetch_dhan_intraday_data(
+        return self.data_manager.fetch_contract_candles(
             security_id=contract["security_id"],
             exchange_segment=contract["exchange_segment"],
             instrument_type=contract["instrument_type"],
             from_date=from_date,
             to_date=today.strftime("%Y-%m-%d"),
-            interval=int(str(interval).replace("min", "")),
+            interval=_parse_interval_minutes(interval),
             symbol=contract["option_symbol"],
+            now=now,
         )
 
     def fetch_atm_premium_candles(

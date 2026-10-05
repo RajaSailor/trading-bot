@@ -18,7 +18,7 @@ from data_manager import (
 from exchange_calendar import next_session_start, open_exchanges, seconds_until_next_open
 from latency_tracker import get_latency_tracker, now_mark
 from memory_diagnostics import current_rss_mb, log_rss
-from order_executor import Order, OrderExecutor, OrderStatus
+from order_executor import Order, OrderExecutor
 from screener_premium import PremiumScreener
 from telegram_handler import (
     DISABLED_CATEGORIES,
@@ -298,6 +298,8 @@ class QueueConsumerWorker:
         notifier: SignalNotifier,
         metrics_collector=None,
         dhan_integration=None,
+        paper_portfolio=None,
+        quote_provider=None,
     ) -> None:
         self.queue_processor = queue_processor
         self.order_executor = order_executor
@@ -306,6 +308,8 @@ class QueueConsumerWorker:
         self.notifier = notifier
         self.metrics_collector = metrics_collector
         self.dhan_integration = dhan_integration
+        self.paper_portfolio = paper_portfolio
+        self.quote_provider = quote_provider
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
@@ -376,9 +380,23 @@ class QueueConsumerWorker:
             return True
 
     def _execute_signal(self, signal: dict) -> None:
+        if self.paper_portfolio is not None:
+            metadata = signal.get("metadata") or {}
+            quote = None
+            if self.quote_provider is not None:
+                segment = metadata.get("exchange_segment")
+                security_id = metadata.get("security_id")
+                try:
+                    security_id = int(security_id)
+                except (TypeError, ValueError):
+                    security_id = None
+                if segment and security_id:
+                    quote = self.quote_provider.fetch_quotes({segment: [security_id]}).get(
+                        (segment, security_id)
+                    )
+            self.paper_portfolio.submit(signal, quote=quote)
+            return
         order_id = f"sig-{signal.get('signal_id', 'unknown')}"
-        practice_mode = bool(self.runtime_config.get("practice_mode", True))
-        live_allowed = (not practice_mode) and bool(self.runtime_config.get("auto_trading_enabled", False))
         quantity = int(signal.get("quantity") or 1)
         price = float(signal.get("entry_price", signal.get("price", 0.0)) or 0.0)
         side = signal["action"]
@@ -401,38 +419,15 @@ class QueueConsumerWorker:
                 logger.info("Skipping duplicate execution for signal %s", signal.get("signal_id"))
                 return
 
-        if live_allowed and self.dhan_integration is not None and side in {"BUY", "SELL"}:
-            success, message, live_order_id = self.dhan_integration.place_trade(
+        order = self.order_executor.execute_order(
+            Order(
+                order_id=order_id,
                 symbol=signal["symbol"],
-                transaction_type=side,
+                side="SELL" if side == "EXIT" else side,
                 quantity=max(1, quantity),
-                entry_price=price,
-                sl_price=float(signal.get("stop_loss", price)),
-                target_price=float(signal.get("target_price", price)),
-                strategy=signal.get("strategy", "default"),
+                price=max(price, 0.01),
             )
-            order = Order(
-                order_id=live_order_id or order_id,
-                symbol=signal["symbol"],
-                side=side,
-                quantity=max(1, quantity),
-                price=price,
-                status=OrderStatus.FILLED if success else OrderStatus.REJECTED,
-                filled_quantity=max(1, quantity) if success else 0,
-                route="DHAN_LIVE",
-            )
-            if not success:
-                self.notifier.notify_service_alert("Dhan order rejected", message)
-        else:
-            order = self.order_executor.execute_order(
-                Order(
-                    order_id=order_id,
-                    symbol=signal["symbol"],
-                    side="SELL" if side == "EXIT" else side,
-                    quantity=max(1, quantity),
-                    price=max(price, 0.01),
-                )
-            )
+        )
 
         if self.trading_db is not None:
             self.trading_db.save_order(
@@ -449,10 +444,8 @@ class QueueConsumerWorker:
             quantity_after, average_price = self._update_position_snapshot(signal, order)
             self.trading_db.save_metric("queue_size", float(self.queue_processor.queue_size()))
             self.notifier.notify_position_update(signal, quantity_after, average_price)
-        paper_mode = not live_allowed
-        self.notifier.notify_order(signal, order, practice_mode=paper_mode)
-        if paper_mode:
-            self.notifier.notify_paper_trade_opened(signal, order)
+        self.notifier.notify_order(signal, order, practice_mode=True)
+        self.notifier.notify_paper_trade_opened(signal, order)
 
     def _update_position_snapshot(self, signal: dict, order: Order) -> tuple[int, float]:
         existing = self.trading_db.fetch_latest_position(order.symbol) if self.trading_db is not None else None
@@ -484,6 +477,98 @@ class QueueConsumerWorker:
             }
         )
         return new_qty, round(new_avg, 4)
+
+
+class PaperPortfolioWorker:
+    """Protection and recovery run even when scanning and approvals are idle."""
+
+    def __init__(self, portfolio, data_manager=None) -> None:
+        self.portfolio = portfolio
+        self.data_manager = data_manager
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._delivery_thread: Optional[threading.Thread] = None
+        self._last_error: str | None = None
+        self._last_run_at: str | None = None
+
+    def start(self, poll_seconds: float = 1.0) -> bool:
+        if self._thread and self._thread.is_alive():
+            return False
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self.run_forever, args=(poll_seconds,), daemon=True, name="paper-protection",
+        )
+        self._thread.start()
+        self._delivery_thread = threading.Thread(
+            target=self.deliver_forever, daemon=True, name="paper-notifications",
+        )
+        self._delivery_thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=15)
+        if self._delivery_thread:
+            self._delivery_thread.join(timeout=15)
+
+    def status(self) -> dict:
+        return {
+            "running": bool(self._thread and self._thread.is_alive()),
+            "last_run_at": self._last_run_at,
+            "last_error": self._last_error,
+            "delivery_running": bool(self._delivery_thread and self._delivery_thread.is_alive()),
+        }
+
+    def run_forever(self, poll_seconds: float = 1.0) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.run_once()
+            except Exception as exc:
+                self._last_error = exc.__class__.__name__
+                logger.error("Paper protection cycle failed: %s", exc.__class__.__name__)
+            self._stop_event.wait(max(0.1, poll_seconds))
+
+    def deliver_forever(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.portfolio.deliver_notifications()
+            except Exception as exc:
+                logger.warning("Paper notification delivery failed: %s", exc.__class__.__name__)
+            self._stop_event.wait(2)
+
+    def run_once(self) -> None:
+        # Apply cutoffs/expiry before any potentially slow or failed data request.
+        self.portfolio.tick({})
+        contracts = self.portfolio.contracts()
+        if self.data_manager is None:
+            self.data_manager = get_shared_data_manager()
+        request: dict[str, list[int]] = {}
+        for contract in contracts:
+            ids = request.setdefault(contract["exchange_segment"], [])
+            security_id = int(contract["security_id"])
+            if security_id not in ids:
+                ids.append(security_id)
+        try:
+            quotes = self.data_manager.fetch_quotes(request) if request else {}
+        except Exception as exc:
+            logger.warning("Paper quotes unavailable: %s", exc.__class__.__name__)
+            quotes = {}
+        # Marks and risk get priority over candle I/O.
+        self.portfolio.tick(quotes)
+        candles = {}
+        for contract in contracts:
+            key = (
+                contract["exchange_segment"], int(contract["security_id"]),
+                str(contract.get("timeframe", "10min")),
+            )
+            try:
+                candles[key] = self.data_manager.fetch_paper_candles(contract)
+            except Exception as exc:
+                logger.warning("Paper candles unavailable: %s", exc.__class__.__name__)
+        self.portfolio.tick(quotes, candles=candles)
+        self._last_run_at = now_local_iso()
+        self._last_error = None
 
 
 def _env_seconds(name: str, default: float, minimum: float) -> float:

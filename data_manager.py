@@ -3,11 +3,16 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import hashlib
+import math
 import os
+import re
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import requests
@@ -95,7 +100,7 @@ def log_market_data_dependency_status(status: Optional[Dict[str, bool]] = None) 
 
 
 def _parse_interval_minutes(interval: Any) -> int:
-    return int(str(interval).replace("min", "").strip())
+    return int(str(interval).replace("min", "").replace("-", "").strip())
 
 
 def _dhan_base_interval(target_minutes: int) -> int:
@@ -230,15 +235,94 @@ _api_rate_limiter = {
     'lock': threading.Lock()
 }
 
-# Dhan Market Quote APIs (LTP) have their own 1 request/second budget.
+# Serialize LTP and quote requests across workers in this process. The interval
+# is local tuning, not a claim about broker limits. Deploy one quote worker;
+# separate processes require external coordination of the broker budget.
 _quote_rate_limiter = {
     'last_call': 0,
     'min_interval': 1.0,
-    'lock': threading.Lock()
+    'lock': threading.Lock(),
+    'retry_at': 0.0,
+    'failures': 0,
 }
 
 DHAN_LTP_URL = "https://api.dhan.co/v2/marketfeed/ltp"
+DHAN_QUOTE_URL = "https://api.dhan.co/v2/marketfeed/quote"
 DHAN_LTP_MAX_INSTRUMENTS = 1000
+QUOTE_CACHE_TTL = 1.0
+QUOTE_MAX_AGE = 10.0
+QUOTE_CACHE_MAX = 2000
+_market_quote_cache = OrderedDict()
+_quote_interest = OrderedDict()
+
+
+def _positive_price(value: Any) -> Optional[float]:
+    try:
+        value = float(value)
+        return value if math.isfinite(value) and value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _quote_max_age() -> float:
+    return _positive_price(os.getenv("PAPER_QUOTE_FRESHNESS_SECONDS")) or QUOTE_MAX_AGE
+
+
+def _quote_trade_timestamp(value: Any) -> Optional[float]:
+    if isinstance(value, str) and re.fullmatch(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}", value.strip()):
+        try:
+            return datetime.strptime(value.strip(), "%d/%m/%Y %H:%M:%S").replace(tzinfo=IST).timestamp()
+        except ValueError:
+            return None
+    return _timestamp_to_epoch(value)
+
+
+def _parse_market_quote(quote: dict, requested_at: float) -> Optional[dict]:
+    price = _positive_price(quote.get("last_price"))
+    if price is None:
+        return None
+    depth = quote.get("depth") or {}
+
+    def best_price(side, choose):
+        levels = depth.get(side, []) if isinstance(depth, dict) else []
+        if not isinstance(levels, list):
+            return None
+        prices = [_positive_price(level.get("price")) for level in levels
+                  if isinstance(level, dict)
+                  and ("quantity" not in level or _positive_price(level["quantity"]) is not None)]
+        return choose((price for price in prices if price is not None), default=None)
+
+    bid = best_price("buy", max) or _positive_price(quote.get("bid"))
+    ask = best_price("sell", min) or _positive_price(quote.get("ask"))
+    if bid is not None and ask is not None and bid > ask:
+        return None
+    timestamp = requested_at
+    if bid is None or ask is None:
+        traded_at = _quote_trade_timestamp(quote.get("last_trade_time"))
+        if (traded_at is None or not math.isfinite(traded_at)
+                or requested_at - traded_at > _quote_max_age() or traded_at > requested_at + 1):
+            return None
+        timestamp = min(requested_at, traded_at)
+    return {"price": price, "bid": bid, "ask": ask, "timestamp": timestamp,
+            "model": "depth" if bid is not None and ask is not None else "ltp"}
+
+
+def _quote_backoff(response=None) -> None:
+    limiter = _quote_rate_limiter
+    limiter["failures"] = min(limiter.get("failures", 0) + 1, 6)
+    delay = min(60.0, 2.0 ** limiter["failures"])
+    if response is not None:
+        try:
+            value = response.headers.get("Retry-After", "")
+            try:
+                retry_after = float(value)
+            except ValueError:
+                retry_after = parsedate_to_datetime(value).timestamp() - time.time()
+            if math.isfinite(retry_after) and retry_after > 0:
+                delay = min(60.0, max(delay, retry_after))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    limiter["retry_at"] = time.time() + delay
 
 
 def _apply_rate_limit(limiter: Optional[dict] = None) -> None:
@@ -490,6 +574,8 @@ class DataManager:
     ) -> None:
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cache: Dict[Tuple[str, str], dict] = {}
+        self._contract_cache = OrderedDict()
+        self._contract_cache_lock = threading.Lock()
         self._webhook_cache: Dict[Tuple[str, str], dict] = {}
         self._webhook_lock = threading.Lock()
         self._tv = None
@@ -548,63 +634,174 @@ class DataManager:
         return index.underlying(entry.root)
 
     def fetch_ltp(self, instruments: Dict[str, List[int]]) -> Dict[Tuple[str, int], float]:
-        """Batch last-traded prices via Dhan ``/v2/marketfeed/ltp``.
+        """Scanner-compatible batched LTP API, sharing quote pacing/backoff."""
+        return self._fetch_marketfeed(instruments, quotes=False)
 
-        ``instruments`` maps exchange segment -> security ids. Returns
-        ``{(segment, security_id): last_price}``; empty on any failure so callers
-        can fall back to candle-based evaluation.
+    def fetch_quotes(self, instruments: Dict[str, List[int]]) -> Dict[Tuple[str, int], dict]:
+        """Executable market quotes only; never substitute candle closes.
+
+        Cache reads preserve timestamps. Concurrent callers share a bounded
+        interest union, cache and request lock; a cooldown returns no stale data.
         """
+        return self._fetch_marketfeed(instruments, quotes=True)
+
+    def _fetch_marketfeed(self, instruments, quotes):
         access_token = os.getenv("ACCESS_TOKEN")
         client_id = os.getenv("DHAN_CLIENT_ID") or os.getenv("API_KEY")
-        requested = {segment: sorted({int(sid) for sid in ids}) for segment, ids in instruments.items() if ids}
+        requested = set()
+        for segment, ids in instruments.items():
+            if not isinstance(ids, (list, tuple, set)):
+                continue
+            for sid in ids:
+                if isinstance(sid, bool) or not isinstance(sid, (int, float, str)):
+                    continue
+                try:
+                    normalized = int(sid)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if normalized <= 0 or (isinstance(sid, float) and sid != normalized):
+                    continue
+                requested.add((str(segment), normalized))
         if not requested or not access_token or not client_id:
             return {}
-
-        prices: Dict[Tuple[str, int], float] = {}
-        batch: Dict[str, List[int]] = {}
-        batch_size = 0
-        batches: List[Dict[str, List[int]]] = []
-        for segment, ids in requested.items():
-            for sid in ids:
-                if batch_size >= DHAN_LTP_MAX_INSTRUMENTS:
-                    batches.append(batch)
-                    batch, batch_size = {}, 0
-                batch.setdefault(segment, []).append(sid)
-                batch_size += 1
-        if batch:
-            batches.append(batch)
-
+        account = hashlib.sha256(f"{client_id}:{access_token}".encode()).digest()
+        url = DHAN_QUOTE_URL if quotes else DHAN_LTP_URL
         headers = {
             "access-token": access_token,
             "client-id": str(client_id),
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        for payload in batches:
-            _apply_rate_limit(_quote_rate_limiter)
-            try:
-                response = requests.post(DHAN_LTP_URL, json=payload, headers=headers, timeout=5)
-            except requests.RequestException as exc:
-                logger.warning("Dhan LTP request failed: %s", exc.__class__.__name__)
-                return prices
-            if response.status_code != 200:
-                logger.warning("Dhan LTP HTTP %s: %s", response.status_code, response.text[:200])
-                return prices
-            try:
-                data = response.json().get("data") or {}
-            except (ValueError, AttributeError):
-                logger.warning("Dhan LTP returned invalid JSON")
-                return prices
-            for segment, values in data.items():
-                if not isinstance(values, dict):
-                    continue
-                for sid, quote in values.items():
-                    try:
-                        price = float((quote or {}).get("last_price"))
-                        prices[(segment, int(sid))] = price
-                    except (TypeError, ValueError):
+        fetched = {}
+        with _quote_rate_limiter["lock"]:
+            now = time.time()
+            for key, item in list(_market_quote_cache.items()):
+                if now - item["received"] >= QUOTE_CACHE_TTL:
+                    del _market_quote_cache[key]
+            for key, seen in list(_quote_interest.items()):
+                if now - seen >= 60:
+                    del _quote_interest[key]
+            if quotes:
+                for key in sorted(requested):
+                    interest_key = (account, key)
+                    _quote_interest[interest_key] = now
+                    _quote_interest.move_to_end(interest_key)
+                while len(_quote_interest) > QUOTE_CACHE_MAX:
+                    _quote_interest.popitem(last=False)
+            union = requested | ({key for owner, key in _quote_interest if owner == account} if quotes else set())
+            missing = sorted(key for key in union if (account, url, key) not in _market_quote_cache)
+            for offset in range(0, len(missing), DHAN_LTP_MAX_INSTRUMENTS):
+                if time.time() < _quote_rate_limiter.get("retry_at", 0):
+                    break
+                wait = _quote_rate_limiter["min_interval"] - (time.time() - _quote_rate_limiter["last_call"])
+                if wait > 0:
+                    time.sleep(wait)
+                requested_at = time.time()
+                _quote_rate_limiter["last_call"] = requested_at
+                payload = {}
+                batch_keys = missing[offset:offset + DHAN_LTP_MAX_INSTRUMENTS]
+                for segment, sid in batch_keys:
+                    payload.setdefault(segment, []).append(sid)
+                try:
+                    response = requests.post(url, json=payload, headers=headers, timeout=5)
+                except requests.RequestException as exc:
+                    logger.warning("Dhan marketfeed request failed: %s", exc.__class__.__name__)
+                    _quote_backoff()
+                    break
+                if response.status_code != 200:
+                    logger.warning("Dhan marketfeed HTTP %s", response.status_code)
+                    if response.status_code == 429 or response.status_code >= 500:
+                        _quote_backoff(response)
+                    break
+                try:
+                    data = response.json().get("data") or {}
+                    if not isinstance(data, dict):
+                        raise ValueError
+                except (ValueError, AttributeError):
+                    logger.warning("Dhan marketfeed returned invalid JSON")
+                    _quote_backoff()
+                    break
+                _quote_rate_limiter["failures"] = 0
+                _quote_rate_limiter["retry_at"] = 0
+                for segment, sid in batch_keys:
+                    values = data.get(segment)
+                    raw = values.get(str(sid), values.get(sid)) if isinstance(values, dict) else None
+                    if not isinstance(raw, dict):
                         continue
-        return prices
+                    value = _parse_market_quote(raw, requested_at) if quotes else _positive_price(raw.get("last_price"))
+                    if value is not None:
+                        fetched[(segment, sid)] = value
+                        _market_quote_cache[(account, url, (segment, sid))] = {
+                            "received": requested_at, "value": value,
+                        }
+                while len(_market_quote_cache) > QUOTE_CACHE_MAX:
+                    _market_quote_cache.popitem(last=False)
+            result = {}
+            for key in requested:
+                cached = _market_quote_cache.get((account, url, key))
+                if key in fetched:
+                    value = fetched[key]
+                elif cached is not None and time.time() - cached["received"] < QUOTE_CACHE_TTL:
+                    value = cached["value"]
+                else:
+                    continue
+                if quotes:
+                    if time.time() - value["timestamp"] > _quote_max_age():
+                        continue
+                    value = dict(value)
+                result[key] = value
+            return result
+
+    def fetch_contract_candles(self, security_id, exchange_segment, instrument_type,
+                               from_date, to_date, interval=10, symbol="UNKNOWN", now=None):
+        """Share actual-contract candles between scanner and paper trailing."""
+        minutes = _parse_interval_minutes(interval)
+        now = time.time() if now is None else _timestamp_to_epoch(now)
+        seconds = minutes * 60
+        anchor = _session_anchor_minutes(exchange_segment) * 60 % seconds
+        bucket = int((now + _IST_OFFSET_SECONDS - anchor) // seconds)
+        key = (int(security_id), exchange_segment, instrument_type, from_date, to_date, minutes, bucket)
+        with self._contract_cache_lock:
+            if key in self._contract_cache:
+                return [dict(candle) for candle in self._contract_cache[key]]
+            _apply_rate_limit()
+            candles = self._fetch_dhan_intraday_data(
+                security_id=security_id, exchange_segment=exchange_segment,
+                instrument_type=instrument_type, from_date=from_date, to_date=to_date,
+                interval=minutes, symbol=symbol,
+            )
+            if candles:
+                self._contract_cache[key] = [dict(candle) for candle in candles]
+            while len(self._contract_cache) > 512:
+                self._contract_cache.popitem(last=False)
+            return candles
+
+    def fetch_paper_candles(self, contract: dict, now=None) -> List[dict]:
+        """Previous complete candles for the actual option, never its underlying."""
+        now_epoch = _timestamp_to_epoch(now) if now is not None else time.time()
+        if now_epoch is None or not math.isfinite(now_epoch):
+            return []
+        minutes = _parse_interval_minutes(contract.get("timeframe", "10min"))
+        if minutes <= 0:
+            return []
+        today = datetime.fromtimestamp(now_epoch, IST).date()
+        segment = contract["exchange_segment"]
+        exchange = "MCX" if segment.startswith("MCX") else "BSE" if segment.startswith("BSE") else "NSE"
+        candles = self.fetch_contract_candles(
+            security_id=int(contract["security_id"]), exchange_segment=segment,
+            instrument_type=contract["instrument_type"],
+            from_date=previous_trading_day(exchange, today).isoformat(),
+            to_date=today.isoformat(), interval=minutes,
+            symbol=contract.get("option_symbol", "UNKNOWN"),
+            now=now_epoch,
+        )
+        complete = []
+        for candle in candles:
+            start = _timestamp_to_epoch(candle.get("timestamp"))
+            low = _positive_price(candle.get("low"))
+            if start is not None and math.isfinite(start) and low is not None and start + minutes * 60 <= now_epoch:
+                complete.append({"timestamp": start, "end_timestamp": start + minutes * 60, "low": low})
+        return sorted(complete, key=lambda candle: candle["timestamp"])
 
     def fetch_dhanhq_candles(self, symbol: str, interval: str) -> List[dict]:
         """Fetch intraday candles from DhanHQ"""
@@ -812,20 +1009,14 @@ class DataManager:
             response = requests.post(url, json=payload, headers=headers, timeout=10)
             
             logger.debug(f"[{symbol}] Response status: {response.status_code}")
-            logger.debug(f"[{symbol}] Response headers: {dict(response.headers)}")
-            
-            # CRITICAL DEBUG: Print raw response text
-            logger.debug(f"[{symbol}] Raw response body (first 500 chars): {response.text[:500]}")
-            
             if response.status_code != 200:
-                logger.error(f"[{symbol}] DhanHQ API error: {response.status_code} - {response.text}")
+                logger.error(f"[{symbol}] DhanHQ API error: {response.status_code}")
                 return []
             
             try:
                 data = response.json()
             except json.JSONDecodeError as e:
-                logger.error(f"[{symbol}] Failed to parse JSON response: {e}")
-                logger.error(f"[{symbol}] Raw response: {response.text}")
+                logger.error(f"[{symbol}] Failed to parse JSON response: {e.__class__.__name__}")
                 return []
             
             logger.debug(f"[{symbol}] Parsed JSON response structure:")
@@ -884,7 +1075,7 @@ class DataManager:
             return candles
         
         except Exception as e:
-            logger.error(f"[{symbol}] Error fetching intraday data: {e}", exc_info=True)
+            logger.error(f"[{symbol}] Error fetching intraday data: {e.__class__.__name__}")
             return []
 
     def _build_instrument_universe(self) -> Dict[str, List[Instrument]]:

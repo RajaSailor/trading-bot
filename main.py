@@ -12,6 +12,7 @@ Official DhanHQ v2 API Reference: https://github.com/Kalaiviswa/dhan-api-v2-docs
 """
 
 import os
+import json
 import sys
 import logging
 import atexit
@@ -91,11 +92,16 @@ except ImportError:
     TokenManagerAuto = None
 
 try:
-    from runtime_services import MarketScannerWorker, QueueConsumerWorker, SignalNotifier
+    from runtime_services import MarketScannerWorker, PaperPortfolioWorker, QueueConsumerWorker, SignalNotifier
 except ImportError:
     MarketScannerWorker = None
     QueueConsumerWorker = None
     SignalNotifier = None
+    PaperPortfolioWorker = None
+
+from paper_portfolio import PaperPortfolio
+from paper_telegram import PaperTelegramControl
+from data_manager import get_shared_data_manager
 
 from timezone_utils import now_local_iso
 
@@ -130,6 +136,9 @@ signal_notifier = None
 queue_consumer_worker = None
 market_scanner_worker = None
 token_manager = None
+paper_portfolio = None
+paper_portfolio_worker = None
+paper_telegram_control = None
 phase_components = {}
 runtime_config = {}
 initialized = False
@@ -167,14 +176,14 @@ def _env_int(name: str, default: int) -> int:
 
 def _load_runtime_config() -> dict:
     scanner_enabled = _env_bool("ENABLE_MARKET_SCANNER", False)
-    practice_mode = _env_bool("PRACTICE_MODE", True)
+    practice_mode = True
     return {
         "practice_mode": practice_mode,
-        "auto_trading_enabled": (not practice_mode) and _env_bool("AUTO_TRADING_ENABLED", False),
+        "auto_trading_enabled": False,
         "max_loss_per_trade": _env_float("MAX_LOSS_PER_TRADE", 0.01),
         "max_position_size": max(1, _env_int("MAX_POSITION_SIZE", 5)),
         "min_rr_ratio": _env_float("MIN_RR_RATIO", 1.5),
-        "starting_capital": _env_float("STARTING_CAPITAL", 100000.0),
+        "starting_capital": 500000.0,
         "daily_loss_limit": _env_float("DAILY_LOSS_LIMIT", 0.05),
         "max_drawdown": _env_float("MAX_DRAWDOWN", 0.2),
         "max_portfolio_heat": _env_float("MAX_PORTFOLIO_HEAT", 0.06),
@@ -258,7 +267,7 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
                 return None, ("Invalid quantity", 400)
         if quantity < 0:
             return None, ("Invalid quantity", 400)
-        if quantity <= 0 and risk_manager is not None:
+        if quantity <= 0 and risk_manager is not None and paper_portfolio is None:
             quantity = risk_manager.calculate_position_size(entry_price, stop_loss)
         if quantity <= 0:
             quantity = 1
@@ -267,7 +276,7 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
         signal["stop_loss"] = stop_loss
         signal["quantity"] = quantity
 
-    if risk_manager is not None and signal.get("action") in {"BUY", "SELL"}:
+    if paper_portfolio is None and risk_manager is not None and signal.get("action") in {"BUY", "SELL"}:
         proposed_trade_risk = max(0.0, abs(entry_price - stop_loss) * quantity)
         accepted, reason = risk_manager.can_take_trade(proposed_trade_risk, [])
         if not accepted:
@@ -318,6 +327,7 @@ def initialize_app(force: bool = False):
     global strategy_manager, risk_manager, order_executor, signal_queue_processor
     global trading_db, state_manager, metrics_collector, alert_manager
     global telegram_handler, signal_notifier, queue_consumer_worker, market_scanner_worker, token_manager
+    global paper_portfolio, paper_portfolio_worker, paper_telegram_control
     global phase_components, runtime_config, initialized
 
     if initialized and not force:
@@ -326,6 +336,14 @@ def initialize_app(force: bool = False):
 
     if initialized:
         logger.info("♻️ Re-initializing application components...")
+        if queue_consumer_worker:
+            queue_consumer_worker.stop()
+        if market_scanner_worker:
+            market_scanner_worker.stop()
+        if token_manager:
+            token_manager.stop()
+        if paper_portfolio_worker:
+            paper_portfolio_worker.stop()
         if trading_db:
             try:
                 trading_db.close()
@@ -350,15 +368,12 @@ def initialize_app(force: bool = False):
         alert_manager = None
         telegram_handler = None
         signal_notifier = None
-        if queue_consumer_worker:
-            queue_consumer_worker.stop()
-        if market_scanner_worker:
-            market_scanner_worker.stop()
-        if token_manager:
-            token_manager.stop()
         queue_consumer_worker = None
         market_scanner_worker = None
         token_manager = None
+        paper_portfolio = None
+        paper_portfolio_worker = None
+        paper_telegram_control = None
         phase_components.clear()
         initialized = False
     
@@ -443,10 +458,7 @@ def initialize_app(force: bool = False):
                 phase_components["trading_database"] = True
                 logger.info("   ✅ Trading Database initialized")
             except Exception as db_error:
-                logger.warning(f"   ⚠️ Trading database fallback to in-memory: {db_error}")
-                trading_db = TradingDatabase()
-                phase_components["trading_database"] = True
-                logger.info("   ✅ Trading Database initialized (in-memory)")
+                raise RuntimeError("Persistent trading database unavailable; refusing to start") from db_error
         else:
             phase_components["trading_database"] = False
             logger.warning("   ⚠️ Trading database module unavailable")
@@ -489,6 +501,21 @@ def initialize_app(force: bool = False):
             telegram_handler = None
             signal_notifier = None
 
+        paper_db_path = os.getenv("PAPER_DB_PATH", runtime_config["db_path"])
+        if paper_db_path == ":memory:" or "mode=memory" in paper_db_path:
+            raise RuntimeError("PAPER_DB_PATH must be persistent")
+        paper_portfolio = PaperPortfolio(
+            paper_db_path,
+            freshness_seconds=max(0.1, float(os.getenv("PAPER_QUOTE_FRESHNESS_SECONDS", "10"))),
+            approval_expiry_seconds=max(1, float(os.getenv("PAPER_APPROVAL_EXPIRY_SECONDS", "60"))),
+        )
+        paper_telegram_control = PaperTelegramControl(paper_portfolio, telegram_handler)
+        paper_portfolio.notify = paper_telegram_control.send_event
+        paper_portfolio.auto_deliver = False
+        paper_portfolio_worker = PaperPortfolioWorker(paper_portfolio)
+        paper_portfolio_worker.start()
+        phase_components["paper_portfolio"] = True
+
         channels = []
         if (
             AlertManager is not None
@@ -528,6 +555,8 @@ def initialize_app(force: bool = False):
                 notifier=signal_notifier,
                 metrics_collector=metrics_collector,
                 dhan_integration=dhan_integration,
+                paper_portfolio=paper_portfolio,
+                quote_provider=get_shared_data_manager(),
             )
             queue_started = queue_consumer_worker.start(runtime_config["queue_poll_seconds"])
             phase_components["queue_consumer"] = True
@@ -540,7 +569,7 @@ def initialize_app(force: bool = False):
             market_scanner_worker = MarketScannerWorker(
                 signal_acceptor=lambda payload, notify: _queue_signal_from_payload(payload, notify)[0] is not None,
                 runtime_config=runtime_config,
-                paper_trade_notifier=signal_notifier,
+                paper_trade_notifier=None,
             )
             scanner_started = market_scanner_worker.start(runtime_config["scanner_poll_seconds"])
             scanner_status = market_scanner_worker.status()
@@ -593,6 +622,26 @@ def initialize_app(force: bool = False):
 # FLASK ROUTES
 # ============================================================================
 
+@app.route('/telegram/paper', methods=['POST'])
+def paper_telegram_webhook():
+    if paper_telegram_control is None:
+        return jsonify({"ok": False, "error": "unavailable"}), 503
+    if request.content_length is not None and request.content_length > 65536:
+        return jsonify({"ok": False, "error": "payload_too_large"}), 413
+    body = request.stream.read(65537)
+    if len(body) > 65536:
+        return jsonify({"ok": False, "error": "payload_too_large"}), 413
+    try:
+        payload = json.loads(body) if request.is_json else None
+    except (ValueError, UnicodeDecodeError):
+        payload = None
+    result, status = paper_telegram_control.handle_update(
+        payload,
+        request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""),
+    )
+    return jsonify(result), status
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -609,6 +658,7 @@ def health_check():
                 "queue_consumer": queue_consumer_worker.status() if queue_consumer_worker is not None else {"running": False},
                 "market_scanner": market_scanner_worker.status() if market_scanner_worker is not None else {"running": False},
                 "token_renewal": token_manager.status() if token_manager is not None else {"running": False},
+                "paper_portfolio": paper_portfolio_worker.status() if paper_portfolio_worker is not None else {"running": False},
             },
         }), 200
     except Exception as e:
@@ -815,6 +865,10 @@ def risk_status():
 
 @app.route('/orders', methods=['GET'])
 def order_status():
+    if paper_portfolio is not None:
+        snapshot = paper_portfolio.snapshot()
+        orders = snapshot["orders"] + snapshot.get("exit_orders", [])
+        return jsonify({"status": "ok", "mode": "PRACTICE", "count": len(orders), "orders": orders}), 200
     if order_executor is None:
         return jsonify({"status": "unavailable", "orders": []}), 503
     orders = []
@@ -834,6 +888,14 @@ def order_status():
 
 @app.route('/positions', methods=['GET'])
 def positions_status():
+    if paper_portfolio is not None:
+        snapshot = paper_portfolio.snapshot()
+        positions = snapshot["positions"]
+        return jsonify({
+            "status": "ok", "mode": "PRACTICE", "count": len(positions),
+            "positions": positions, "account": snapshot["account"], "daily": snapshot["daily"],
+            "pending_exit_orders": snapshot.get("pending_exit_orders", []),
+        }), 200
     if trading_db is None:
         return jsonify({"status": "unavailable", "positions": []}), 503
     if hasattr(trading_db, "fetch_latest_positions"):
@@ -1045,6 +1107,9 @@ def shutdown_handler():
     logger.info("🛑 Shutting down DhanHQ Trading Bot...")
     logger.info("=" * 70)
 
+    if paper_portfolio_worker:
+        paper_portfolio_worker.stop()
+
     if market_scanner_worker:
         market_scanner_worker.stop()
         logger.info("✅ Market scanner stopped")
@@ -1104,7 +1169,7 @@ def create_app():
 # Initialize app for Gunicorn
 if os.getenv('FLASK_ENV') != 'development':
     # Production mode: Initialize for Gunicorn
-    initialize_app()
+    create_app()
     atexit.register(shutdown_handler)
 
 # ============================================================================
@@ -1120,7 +1185,7 @@ def main():
     logger.info("=" * 70)
     logger.info(f"📅 Started at: {now_local_iso()}")
     logger.info(f"🌍 Timezone: {os.getenv('TIMEZONE', 'Asia/Kolkata')}")
-    logger.info(f"🧪 Practice Mode: {os.getenv('PRACTICE_MODE', 'true')}")
+    logger.info("🧪 Practice Mode: true (live execution disabled)")
     logger.info(f"⚙️  Port: {os.getenv('PORT', '5000')}")
     logger.info(f"📡 Server Mode: Direct Python Execution")
     logger.info("=" * 70)

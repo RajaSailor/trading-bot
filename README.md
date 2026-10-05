@@ -8,6 +8,129 @@
 
 ---
 
+## Persistent PRACTICE portfolio (`main.py`)
+
+The application runtime is **PRACTICE-only**, regardless of `PRACTICE_MODE` or
+`AUTO_TRADING_ENABLED`. It never sends paper orders to Dhan. Existing broker
+integration modules are not the paper execution path. Compact strategy alerts
+remain on `service_alerts`; approvals, simulated fills, protection, and account
+reports go to `trade_control`.
+
+### Persistence and controls
+
+- Set `PAPER_DB_PATH` (defaults to `TRADING_DB_PATH`, then `trading.db`) to a
+  persistent, backed-up SQLite file on a mounted volume. An ephemeral filesystem
+  is not restart-safe. Database failure stops startup instead of resetting an
+  in-memory account. Do not delete the database to restart the bot.
+- INR 500,000 is seeded once. Each position buys exactly **one metadata lot**,
+  whose lot size is the number of units; premium and P&L multiply by units once.
+  Dhan master tick sizes are converted from paise to INR once at ingestion.
+  Missing/invalid lot or tick metadata, capital, quotes, or session eligibility
+  cause rejection, not a made-up fill.
+- Five open/reserved positions and twenty filled/reserved entries per IST day
+  are global across segments. Pending approvals reserve cash and capacity.
+  Reject/cancel/expiry releases reservations without consuming filled entries.
+- Approval defaults ON. `PAPER_APPROVAL_EXPIRY_SECONDS=60` controls its bounded
+  lifetime. Expired signals are never replayed merely because capacity returns.
+- Daily P&L is equity minus day-opening equity, not lifetime realized P&L plus
+  current unrealized P&L. Closing equity becomes the next opening equity; cash
+  never resets. Paid premium is **premium committed**, not margin.
+- Aggregate daily P&L at +INR 30,000 or -INR 10,000 latches an entry block,
+  cancels pending entries, and requests all-segment square-off. Increasing limits
+  does not clear today's latch. These thresholds trigger exits; they cannot
+  guarantee a realized exit price.
+
+### Quote and protection model
+
+`PAPER_QUOTE_FRESHNESS_SECONDS=10` is the default maximum evidence age.
+Executable quotes use option-contract bid/ask where available; otherwise they
+explicitly use an **LTP-only simulation**, not actual broker fills. Request-start
+time conservatively bounds snapshot age; LTP-only/partial-book quotes require
+a usable fresh source last-trade timestamp. Cached quotes keep their original timestamps.
+Missing, stale, nonpositive, nonfinite, or invalid evidence never fills.
+Partial books also require fresh LTP evidence, because the missing execution
+side would otherwise fall back to LTP.
+
+BUY LIMIT is fillable only at a fresh ask/LTP at or below its limit (SELL uses
+bid/LTP at or above). After five seconds an unfilled limit requires new quote
+evidence and falls back with adverse 1% slippage: BUY ×1.01 rounded up to a tick,
+SELL ×0.99 rounded down. MARKET uses the same adverse fresh-quote model. Marks
+are valuation evidence, not executable prices. Requests share batching, a bounded
+cache, pacing and HTTP 429 backoff; pacing is a local policy, not a claimed API
+quota. There is no execution-speed guarantee.
+
+Protection runs independently of signal arrival and approval state, including
+startup recovery: equity options square off at 15:25 IST, commodities at 23:00
+IST (earlier exchange closing takes precedence). Entry is blocked after cutoff.
+An unresolved exit remains exposed and pending, blocks new exposure, alerts, and
+retries; quote outages never become fictitious closed/no-overnight reports.
+
+Long-option initial targets are entry +1R and +2R from valid entry-stop risk.
+Target1 records one milestone, keeps the entire lot, and tightens SL to at least
+entry. Target2 closes the entire lot. Trailing uses only the previous completed
+option candle in the strategy timeframe; stops only tighten. A candle low
+already breached triggers protection instead of installing an invalid stop.
+Tick/candle processing checks account risk and time exits before strategy exits;
+existing stop breaches take precedence over targets, then completed-candle
+tightening is evaluated. Gaps execute at fresh executable quote evidence with
+the documented model, not at an assumed stop/target price.
+
+### Authorized Telegram webhook deployment
+
+Configure **all** of:
+
+- `BOT_TRADE_CONTROL_TOKEN` and `CHANNEL_TRADE_CONTROL_ID`;
+- `PAPER_TELEGRAM_ALLOWED_USER_IDS`: comma-separated numeric Telegram user IDs;
+- `PAPER_TELEGRAM_WEBHOOK_SECRET`: a random secret of at least 32 characters
+  stored only in deployment secrets.
+
+Controls deny by default, require both the allowlisted sender and the correct
+control chat, and persist update/callback deduplication and actor audit. Never
+expose the database or webhook secret in logs. Put the Flask app behind HTTPS
+and a reverse proxy request-size limit (64 KiB is sufficient).
+
+Register the **trade_control bot's** Telegram `setWebhook` with your HTTPS
+`/telegram/paper` URL, `secret_token` equal to the configured webhook secret,
+and `allowed_updates=["message","callback_query"]`. Telegram sends the
+`X-Telegram-Bot-Api-Secret-Token` header; the endpoint validates it. Use your
+deployment's secret-aware tooling for registration, not a committed token URL.
+Do not run `getUpdates`/long polling or another webhook for this same bot.
+The separate `service_alerts` bot remains outbound-only.
+
+Run one application/quote-worker process per Dhan credential (`gunicorn --workers
+1` without preloading; `deployment/startup.sh` defaults to one worker).
+SQLite admission/deduplication remains process-safe, but
+in-process quote coordination does not throttle independent replicas. All
+controllers must point to the same database; a database file on separate replica
+filesystems is not a shared account.
+
+Inline controls: **Approve Limit**, **Approve Market**, **Modify**, **Reject**.
+Commands in the configured control chat:
+
+```text
+/mode approval on|off
+/pending
+/approve <request-id> [limit|market]
+/modify <request-id> <limit-price> [stop-loss]
+/reject <request-id>
+/portfolio
+/close <position-id> [market|limit <limit-price>]
+/limits <profit-INR> <loss-INR>
+/trades [YYYY-MM-DD]
+```
+
+Risk, cutoff, stop and emergency exits never wait for approval. Pending exits
+are informational, not approval requests. Protection escalates a
+pending manual LIMIT exit to MARKET when necessary. Reports include
+account valuation, positions, capacity, milestones, exit reasons and the trade
+log. Interim equity-segment and final commodity summaries are persisted once per
+IST day, explicitly including unresolved exits. Orders/executions/audit retain
+separate approval, order/fill, protection/fill, and Telegram delivery timings.
+Delivery retries are at-least-once: a transport failure after Telegram accepts a
+message can produce a duplicate notification, but cannot duplicate execution.
+The application drains its persistent notification outbox on a separate thread,
+so slow Telegram delivery does not hold up quote evaluation or cutoff recovery.
+
 ## 📋 Quick Start
 
 ### 30-Second Setup
