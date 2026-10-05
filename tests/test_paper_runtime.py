@@ -1,5 +1,8 @@
 import threading
+from pathlib import Path
 from unittest.mock import Mock
+
+import pytest
 
 from runtime_services import PaperPortfolioWorker, QueueConsumerWorker
 
@@ -53,6 +56,21 @@ def test_quote_outage_does_not_skip_protection_or_fabricate_a_price():
     assert all(call.args[0] == {} for call in portfolio.tick.call_args_list)
 
 
+def test_candles_remain_separate_for_each_contract_timeframe():
+    portfolio, data = Mock(), Mock()
+    portfolio.contracts.return_value = [
+        {"exchange_segment": "NSE_FNO", "security_id": 42, "timeframe": "5min"},
+        {"exchange_segment": "NSE_FNO", "security_id": 42, "timeframe": "10-min"},
+    ]
+    data.fetch_quotes.return_value = {}
+    data.fetch_paper_candles.side_effect = [[{"low": 95}], [{"low": 96}]]
+    PaperPortfolioWorker(portfolio, data).run_once()
+    assert portfolio.tick.call_args.kwargs["candles"] == {
+        ("NSE_FNO", 42, "5min"): [{"low": 95}],
+        ("NSE_FNO", 42, "10-min"): [{"low": 96}],
+    }
+
+
 def test_main_forces_practice_and_forwards_webhook_header(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.setenv("PRACTICE_MODE", "false")
@@ -85,13 +103,16 @@ def test_main_reports_persistent_account_not_legacy_positions(monkeypatch):
     portfolio = Mock()
     portfolio.snapshot.return_value = {
         "orders": [{"id": "paper-order"}],
+        "exit_orders": [{"id": "paper-exit", "side": "SELL"}],
         "positions": [{"id": "contract-position", "quantity": 65}],
         "account": {"cash": 493500},
         "daily": {"filled": 1},
     }
     monkeypatch.setattr(main, "paper_portfolio", portfolio)
     client = main.app.test_client()
-    assert client.get("/orders").get_json()["orders"] == [{"id": "paper-order"}]
+    assert client.get("/orders").get_json()["orders"] == [
+        {"id": "paper-order"}, {"id": "paper-exit", "side": "SELL"},
+    ]
     result = client.get("/positions").get_json()
     assert result["positions"][0]["quantity"] == 65
     assert result["account"]["cash"] == 493500
@@ -123,3 +144,17 @@ def test_slow_telegram_delivery_does_not_stop_protection():
     finally:
         release.set()
         worker.stop()
+
+
+def test_deployment_defaults_to_one_shared_quote_process():
+    startup = Path(__file__).resolve().parents[1] / "deployment" / "startup.sh"
+    assert '${GUNICORN_WORKERS:-1}' in startup.read_text()
+
+
+def test_application_factory_fails_closed_on_initialization_error(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    import main
+
+    monkeypatch.setattr(main, "initialize_app", lambda: False)
+    with pytest.raises(RuntimeError, match="Application initialization failed"):
+        main.create_app()

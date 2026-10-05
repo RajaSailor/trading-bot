@@ -217,6 +217,9 @@ class SecurityMasterIndex:
                     continue
                 key = (entry.root, option_type)
                 tick_size = _parse_float(row.get("SEM_TICK_SIZE"))
+                # Compact master option ticks are paise; executable prices use INR.
+                if tick_size is not None:
+                    tick_size /= 100.0
                 if tick_size is not None and (not math.isfinite(tick_size) or tick_size <= 0):
                     tick_size = None
                 current = best.get(key)

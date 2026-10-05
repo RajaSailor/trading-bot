@@ -558,7 +558,10 @@ class PaperPortfolioWorker:
         self.portfolio.tick(quotes)
         candles = {}
         for contract in contracts:
-            key = (contract["exchange_segment"], int(contract["security_id"]))
+            key = (
+                contract["exchange_segment"], int(contract["security_id"]),
+                str(contract.get("timeframe", "10min")),
+            )
             try:
                 candles[key] = self.data_manager.fetch_paper_candles(contract)
             except Exception as exc:

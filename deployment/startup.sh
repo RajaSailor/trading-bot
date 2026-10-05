@@ -10,4 +10,4 @@ if [[ "${FLASK_ENV_VALUE}" == "development" ]]; then
   exec python main.py
 fi
 
-exec gunicorn --bind "0.0.0.0:${PORT_VALUE}" --workers "${GUNICORN_WORKERS:-2}" --timeout "${GUNICORN_TIMEOUT:-120}" main:app
+exec gunicorn --bind "0.0.0.0:${PORT_VALUE}" --workers "${GUNICORN_WORKERS:-1}" --timeout "${GUNICORN_TIMEOUT:-120}" main:app

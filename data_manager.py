@@ -6,6 +6,7 @@ import logging
 import hashlib
 import math
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -132,10 +133,7 @@ def _timestamp_to_epoch(value: Any) -> Optional[float]:
         try:
             parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
         except ValueError:
-            try:
-                parsed = datetime.strptime(str(value).strip(), "%d/%m/%Y %H:%M:%S")
-            except ValueError:
-                return None
+            return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=IST)
     return parsed.timestamp()
@@ -270,6 +268,15 @@ def _quote_max_age() -> float:
     return _positive_price(os.getenv("PAPER_QUOTE_FRESHNESS_SECONDS")) or QUOTE_MAX_AGE
 
 
+def _quote_trade_timestamp(value: Any) -> Optional[float]:
+    if isinstance(value, str) and re.fullmatch(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}", value.strip()):
+        try:
+            return datetime.strptime(value.strip(), "%d/%m/%Y %H:%M:%S").replace(tzinfo=IST).timestamp()
+        except ValueError:
+            return None
+    return _timestamp_to_epoch(value)
+
+
 def _parse_market_quote(quote: dict, requested_at: float) -> Optional[dict]:
     price = _positive_price(quote.get("last_price"))
     if price is None:
@@ -290,13 +297,12 @@ def _parse_market_quote(quote: dict, requested_at: float) -> Optional[dict]:
     if bid is not None and ask is not None and bid > ask:
         return None
     timestamp = requested_at
-    if "last_trade_time" in quote:
-        traded_at = _timestamp_to_epoch(quote["last_trade_time"])
+    if bid is None or ask is None:
+        traded_at = _quote_trade_timestamp(quote.get("last_trade_time"))
         if (traded_at is None or not math.isfinite(traded_at)
                 or requested_at - traded_at > _quote_max_age() or traded_at > requested_at + 1):
             return None
-        if bid is None or ask is None:
-            timestamp = min(requested_at, traded_at)
+        timestamp = min(requested_at, traded_at)
     return {"price": price, "bid": bid, "ask": ask, "timestamp": timestamp,
             "model": "depth" if bid is not None and ask is not None else "ltp"}
 

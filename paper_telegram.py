@@ -143,9 +143,15 @@ class PaperTelegramControl:
                     pass
             identifier = (payload.get("id", payload.get("signal_id"))
                           if isinstance(payload, dict) else None)
+            needs_approval = (
+                isinstance(payload, dict)
+                and kind.lower() in {"order_awaiting_approval", "approval_request",
+                                     "approval_requested"}
+                and str(payload.get("side", payload.get("transaction_type", "BUY"))).upper() != "SELL"
+                and payload.get("approval_required") is not False
+            )
             buttons = (self._buttons(identifier)
-                       if ("pending" in kind.lower() or "awaiting_approval" in kind.lower())
-                       else None)
+                       if needs_approval else None)
             messages = _chunks([f"PAPER {kind} (practice only)", *_lines(payload)])
             success = self._send(messages, buttons)
             return success
@@ -211,6 +217,11 @@ class PaperTelegramControl:
             return f"approve_{order_type}", {"request_id": args[1]}
         if command in {"/reject", "/close"} and len(args) == 2:
             return command[1:], {"request_id": args[1]}
+        if command == "/close" and len(args) == 3 and args[2].lower() == "market":
+            return "close", {"request_id": args[1], "order_type": "MARKET"}
+        if command == "/close" and len(args) == 4 and args[2].lower() == "limit":
+            return "close", {"request_id": args[1], "order_type": "LIMIT",
+                             "limit_price": self._number(args[3])}
         if command == "/modify" and len(args) in {3, 4}:
             values = {"request_id": args[1], "limit_price": self._number(args[2])}
             if len(args) == 4:
@@ -222,7 +233,8 @@ class PaperTelegramControl:
         raise ValueError("Commands: /mode approval on|off, /pending, "
                          "/approve <id> [limit|market], "
                          "/modify <id> <limit_price> [stop_loss], /reject <id>, "
-                         "/portfolio, /orders, /positions, /close <id>, "
+                         "/portfolio, /orders, /positions, "
+                         "/close <id> [market|limit <limit_price>], "
                          "/limits <profit> <loss>, /trades [YYYY-MM-DD]")
 
     def handle_update(self, update, secret):
@@ -281,9 +293,15 @@ class PaperTelegramControl:
                     pending = snapshot.get("pending", snapshot.get("pending_signals", []))
                     entries = pending.values() if isinstance(pending, dict) else pending
                     for entry in entries:
-                        self.send_event({"type": "pending", "payload": entry})
-                    result = {"pending": pending}
-                    if not pending:
+                        kind = ("order_awaiting_approval"
+                                if entry.get("status") == "awaiting_approval" else "order_pending")
+                        self.send_event({"type": kind, "payload": entry})
+                    exits = snapshot.get("pending_exit_orders", [])
+                    result = {"pending": pending, "pending_exit_orders": exits}
+                    if exits:
+                        self._send(_chunks(["PAPER pending exit orders (automatic; no approval)",
+                                            *_lines(exits)]))
+                    if not pending and not exits:
                         self._send(["PAPER pending: None"])
                 elif action == "trades":
                     result = {"trades": snapshot.get("trades", snapshot.get(
@@ -291,7 +309,9 @@ class PaperTelegramControl:
                         "closed_positions": snapshot.get("closed_positions", [])}
                     self._send(format_portfolio(result))
                 elif action == "orders":
-                    result = {"orders": snapshot.get("orders", [])}
+                    result = {"orders": snapshot.get("orders", []),
+                              "exit_orders": snapshot.get(
+                                  "exit_orders", snapshot.get("pending_exit_orders", []))}
                     self._send(format_portfolio(result))
                 elif action == "positions":
                     result = {key: snapshot.get(key, [] if key == "positions" else {})
@@ -315,8 +335,9 @@ class PaperTelegramControl:
                 self._api("answerCallbackQuery", {"callback_query_id": callback["id"],
                                                  "text": "Paper action processed"})
             return {"ok": True, "result": result}, 200
-        except ValueError as exc:
-            self._send(_chunks([str(exc)]))
-            return {"ok": False, "error": str(exc)}, 400
+        except ValueError:
+            error = "Invalid paper command or request"
+            self._send([error])
+            return {"ok": False, "error": error}, 400
         except Exception:
             return {"ok": False, "error": "Paper control unavailable"}, 503

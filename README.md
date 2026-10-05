@@ -24,6 +24,7 @@ reports go to `trade_control`.
   in-memory account. Do not delete the database to restart the bot.
 - INR 500,000 is seeded once. Each position buys exactly **one metadata lot**,
   whose lot size is the number of units; premium and P&L multiply by units once.
+  Dhan master tick sizes are converted from paise to INR once at ingestion.
   Missing/invalid lot or tick metadata, capital, quotes, or session eligibility
   cause rejection, not a made-up fill.
 - Five open/reserved positions and twenty filled/reserved entries per IST day
@@ -44,9 +45,11 @@ reports go to `trade_control`.
 `PAPER_QUOTE_FRESHNESS_SECONDS=10` is the default maximum evidence age.
 Executable quotes use option-contract bid/ask where available; otherwise they
 explicitly use an **LTP-only simulation**, not actual broker fills. Request-start
-time conservatively bounds snapshot age; source last-trade time is checked when
-provided for LTP-only quotes. Cached quotes keep their original timestamps.
+time conservatively bounds snapshot age; LTP-only/partial-book quotes require
+a usable fresh source last-trade timestamp. Cached quotes keep their original timestamps.
 Missing, stale, nonpositive, nonfinite, or invalid evidence never fills.
+Partial books also require fresh LTP evidence, because the missing execution
+side would otherwise fall back to LTP.
 
 BUY LIMIT is fillable only at a fresh ask/LTP at or below its limit (SELL uses
 bid/LTP at or above). After five seconds an unfilled limit requires new quote
@@ -95,7 +98,8 @@ Do not run `getUpdates`/long polling or another webhook for this same bot.
 The separate `service_alerts` bot remains outbound-only.
 
 Run one application/quote-worker process per Dhan credential (`gunicorn --workers
-1` without preloading). SQLite admission/deduplication remains process-safe, but
+1` without preloading; `deployment/startup.sh` defaults to one worker).
+SQLite admission/deduplication remains process-safe, but
 in-process quote coordination does not throttle independent replicas. All
 controllers must point to the same database; a database file on separate replica
 filesystems is not a shared account.
@@ -110,12 +114,14 @@ Commands in the configured control chat:
 /modify <request-id> <limit-price> [stop-loss]
 /reject <request-id>
 /portfolio
-/close <position-id>
+/close <position-id> [market|limit <limit-price>]
 /limits <profit-INR> <loss-INR>
 /trades [YYYY-MM-DD]
 ```
 
-Risk, cutoff, stop and emergency exits never wait for approval. Reports include
+Risk, cutoff, stop and emergency exits never wait for approval. Pending exits
+are informational, not approval requests. Protection escalates a
+pending manual LIMIT exit to MARKET when necessary. Reports include
 account valuation, positions, capacity, milestones, exit reasons and the trade
 log. Interim equity-segment and final commodity summaries are persisted once per
 IST day, explicitly including unresolved exits. Orders/executions/audit retain

@@ -35,7 +35,7 @@ ROWS = [
     "NSE,D,400,FUTIDX,0,NIFTY-Oct2026-FUT,75,NIFTY OCT FUT,2026-10-27 14:30:00,-0.01000,XX,0.1,M,FUT,NA,",
     "MCX,M,500,FUTCOM,0,GOLD-04Dec2026-FUT,1,GOLD DEC FUT,2026-12-04 23:59:00,-0.01000,XX,1,M,FUT,NA,GOLD",
     "MCX,M,501,FUTCOM,0,GOLD-05Oct2026-FUT,1,GOLD OCT FUT,2026-10-05 23:59:00,-0.01000,XX,1,M,FUT,NA,GOLD",
-    "MCX,M,502,OPTFUT,0,GOLD-24Nov2026-72000-CE,1,GOLD 24 NOV 72000 CALL,2026-11-24 23:59:00,72000.00000,CE,1,M,OP,NA,GOLD",
+    "MCX,M,502,OPTFUT,0,GOLD-24Nov2026-72000-CE,1,GOLD 24 NOV 72000 CALL,2026-11-24 23:59:00,72000.00000,CE,1000,M,OP,NA,GOLD",
     "MCX,M,503,OPTFUT,0,GOLDM-24Nov2026-72000-CE,1,GOLDM,2026-11-24 23:59:00,72000.00000,CE,1,M,OP,NA,GOLDM",
 ]
 
@@ -70,9 +70,10 @@ class SecurityMasterFilterTests(unittest.TestCase):
         # Weekly 06-Oct is nearest (and not today) -> only that expiry is kept.
         self.assertEqual(date(2026, 10, 6), expiry)
         self.assertEqual([104], [c.security_id for c in contracts])
-        self.assertEqual(5.0, contracts[0].tick_size)
+        self.assertEqual(0.05, contracts[0].tick_size)
         self.assertEqual(4, index.contract_count)
         self.assertEqual([502], [c.security_id for c in index.option_chain("GOLD", "CE")[1]])
+        self.assertEqual(10.0, index.option_chain("GOLD", "CE")[1][0].tick_size)
         self.assertEqual(13, index.underlying("NIFTY").security_id)
         self.assertEqual("IDX_I", index.underlying("NIFTY").exchange_segment)
         self.assertEqual(2885, index.underlying("RELIANCE").security_id)

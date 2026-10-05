@@ -866,7 +866,8 @@ def risk_status():
 @app.route('/orders', methods=['GET'])
 def order_status():
     if paper_portfolio is not None:
-        orders = paper_portfolio.snapshot()["orders"]
+        snapshot = paper_portfolio.snapshot()
+        orders = snapshot["orders"] + snapshot.get("exit_orders", [])
         return jsonify({"status": "ok", "mode": "PRACTICE", "count": len(orders), "orders": orders}), 200
     if order_executor is None:
         return jsonify({"status": "unavailable", "orders": []}), 503
@@ -893,6 +894,7 @@ def positions_status():
         return jsonify({
             "status": "ok", "mode": "PRACTICE", "count": len(positions),
             "positions": positions, "account": snapshot["account"], "daily": snapshot["daily"],
+            "pending_exit_orders": snapshot.get("pending_exit_orders", []),
         }), 200
     if trading_db is None:
         return jsonify({"status": "unavailable", "positions": []}), 503
@@ -1167,7 +1169,7 @@ def create_app():
 # Initialize app for Gunicorn
 if os.getenv('FLASK_ENV') != 'development':
     # Production mode: Initialize for Gunicorn
-    initialize_app()
+    create_app()
     atexit.register(shutdown_handler)
 
 # ============================================================================

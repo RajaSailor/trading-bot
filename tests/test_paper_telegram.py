@@ -159,6 +159,9 @@ def test_forwarded_channel_callback_still_denied(control):
     ("/modify s1 100", "modify", {"request_id": "s1", "limit_price": 100}),
     ("/reject s1", "reject", {"request_id": "s1"}),
     ("/close p1", "close", {"request_id": "p1"}),
+    ("/close p1 market", "close", {"request_id": "p1", "order_type": "MARKET"}),
+    ("/close p1 limit 110", "close", {"request_id": "p1", "order_type": "LIMIT",
+                                    "limit_price": 110}),
     ("/limits 500 200", "limits", {"profit_limit": 500, "loss_limit": 200}),
 ])
 def test_commands(control, text, action, kwargs):
@@ -211,7 +214,10 @@ def test_approval_toggle_preserves_disabled_portfolio(control):
 @pytest.mark.parametrize("text", ["/mode on", "/mode approval maybe",
                                  "/approve s1 live", "/modify s1 nan",
                                  "/modify s1 inf", "/modify s1 -1",
-                                 "/limits 10 0", "/close", "/unknown"])
+                                 "/limits 10 0", "/close", "/close p1 limit",
+                                 "/close p1 limit nan", "/close p1 limit 0",
+                                 "/close p1 limit -1", "/close p1 market 100",
+                                 "/close p1 invalid", "/unknown"])
 def test_bad_commands(control, text):
     assert control.handle_update(update(text), SECRET)[1] == 400
     control.engine.action.assert_not_called()
@@ -263,7 +269,7 @@ def test_stale_callback_engine_result(control):
 
 
 def test_pending_buttons_and_transport(control):
-    assert control.send_event({"type": "pending", "payload": {
+    assert control.send_event({"type": "order_awaiting_approval", "payload": {
         "id": "s1", "symbol": "<unsafe>", "reason": "a & b"}})
     call = control.telegram_handler._http_session.return_value.post.call_args
     assert call.args[0].endswith("/sendMessage")
@@ -333,6 +339,17 @@ def test_internal_failure_is_redacted(control):
     assert "sensitive" not in str(body)
 
 
+def test_value_error_details_are_never_returned_sent_or_logged(control, caplog):
+    sensitive = "private-token stack trace internal database path"
+    control.engine.record_update = Mock(side_effect=ValueError(sensitive))
+    body, status = control.handle_update(update(), SECRET)
+    assert status == 400
+    assert body == {"ok": False, "error": "Invalid paper command or request"}
+    payload = control.telegram_handler._http_session.return_value.post.call_args.kwargs["json"]
+    assert payload["text"] == "Invalid paper command or request"
+    assert sensitive not in caplog.text
+
+
 def test_partial_event_failure_returns_false_for_outbox_retry(control):
     response = Mock(status_code=200)
     response.json.return_value = {"ok": True}
@@ -359,6 +376,67 @@ def test_engine_event_and_trade_snapshot_schema(control):
     assert "position-last" in payload["text"]
     assert "P&amp;L points" in payload["text"]
     assert "P&amp;L INR" in payload["text"]
+
+
+def test_pending_exit_orders_are_information_only(control):
+    control.engine.snapshot.return_value = {
+        "pending": [], "pending_exit_orders": [
+            {"id": "exit1", "position_id": "p1", "order_type": "LIMIT",
+             "limit_price": 110, "status": "pending"}]}
+    body, status = control.handle_update(update("/pending"), SECRET)
+    assert status == 200
+    assert body["result"]["pending_exit_orders"][0]["id"] == "exit1"
+    payload = control.telegram_handler._http_session.return_value.post.call_args.kwargs["json"]
+    assert "exit1" in payload["text"]
+    assert "no approval" in payload["text"]
+    assert "reply_markup" not in payload
+    control.engine.action.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["exit_order_pending", "exit_pending", "pending"])
+def test_exit_pending_event_never_has_approval_buttons(control, kind):
+    assert control.send_event({"type": kind, "id": "exit1", "side": "SELL"})
+    payload = control.telegram_handler._http_session.return_value.post.call_args.kwargs["json"]
+    assert "reply_markup" not in payload
+
+
+def test_auto_entry_pending_event_never_requests_approval(control):
+    assert control.send_event({"type": "order_pending", "id": "entry1",
+                               "side": "BUY", "approval_required": False,
+                               "status": "pending"})
+    payload = control.telegram_handler._http_session.return_value.post.call_args.kwargs["json"]
+    assert "reply_markup" not in payload
+
+
+def test_explicit_approval_event_for_sell_never_has_approval_buttons(control):
+    assert control.send_event({"type": "approval_request", "id": "exit1", "side": "SELL"})
+    payload = control.telegram_handler._http_session.return_value.post.call_args.kwargs["json"]
+    assert "reply_markup" not in payload
+
+
+def test_pending_command_only_buttons_for_awaiting_entry(control):
+    control.engine.snapshot.return_value = {"pending": [
+        {"id": "entry1", "status": "awaiting_approval", "side": "BUY"},
+        {"id": "entry2", "status": "pending", "side": "BUY", "approval_required": False},
+    ], "pending_exit_orders": [{"id": "exit1", "side": "SELL", "status": "pending"}]}
+    assert control.handle_update(update("/pending"), SECRET)[1] == 200
+    posts = control.telegram_handler._http_session.return_value.post.call_args_list
+    with_buttons = [call.kwargs["json"] for call in posts if "reply_markup" in call.kwargs["json"]]
+    assert len(with_buttons) == 1
+    assert with_buttons[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == (
+        "paper:entry1:approve_limit")
+
+
+def test_orders_report_includes_entries_and_exits(control):
+    control.engine.snapshot.return_value = {
+        "orders": [{"id": "entry1"}], "exit_orders": [{"id": "exit1"}]}
+    body, status = control.handle_update(update("/orders"), SECRET)
+    assert status == 200
+    assert body["result"] == {
+        "orders": [{"id": "entry1"}], "exit_orders": [{"id": "exit1"}]}
+    payload = control.telegram_handler._http_session.return_value.post.call_args.kwargs["json"]
+    assert "entry1" in payload["text"]
+    assert "exit1" in payload["text"]
 
 
 def test_optional_delivery_measurement_hook(control):
@@ -431,8 +509,8 @@ def test_real_engine_notify_assigned_after_init_and_approval_callback(control):
         assert status == 200
         assert len(today["result"]["trades"]) == 1
         prior, status = webhook.handle_update(update("/trades 2026-10-04", 4), SECRET)
-        assert status == 400
-        assert "no recorded trading day" in prior["error"]
+        assert status == 200
+        assert prior["result"]["trades"] == []
         now += 86400
         engine.tick({})
         archived, status = webhook.handle_update(update("/trades 2026-10-05", 5), SECRET)

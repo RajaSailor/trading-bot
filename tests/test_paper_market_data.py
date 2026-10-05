@@ -30,6 +30,7 @@ def feed(monkeypatch):
 
 
 def response(raw, status=200, headers=None):
+    raw = {"last_trade_time": "05/10/2026 10:30:00", **raw}
     return Mock(status_code=status, headers=headers or {},
                 json=Mock(return_value={"data": {"NSE_FNO": {"42": raw}}}))
 
@@ -80,6 +81,16 @@ def test_source_timestamp_accepts_exchange_datetime_format(feed):
     assert quote["timestamp"] == clock[0] - 1
 
 
+@pytest.mark.parametrize("trade_time", [
+    "05/10/2026 10:29:00", "05/10/2026 10:31:00", "31/02/2026 10:29:59",
+    "5/10/2026 10:29:59", "10:29:59",
+])
+def test_provider_datetime_rejects_stale_future_invalid_and_time_only(feed, trade_time):
+    manager, post, clock = feed
+    post.return_value = response({"last_price": 100, "last_trade_time": trade_time})
+    assert manager.fetch_quotes({"NSE_FNO": [42]}) == {}
+
+
 def test_depth_discards_empty_quantity_and_crossed_book(feed):
     manager, post, clock = feed
     post.return_value = response({"last_price": 100, "depth": {
@@ -92,6 +103,38 @@ def test_depth_discards_empty_quantity_and_crossed_book(feed):
         "buy": [{"price": 102}], "sell": [{"price": 101}],
     }})
     assert manager.fetch_quotes({"NSE_FNO": [42]}) == {}
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_one_sided_book_cannot_refresh_stale_fallback_ltp(feed, side):
+    manager, post, clock = feed
+    post.return_value = response({"last_price": 100, "last_trade_time": clock[0] - 60,
+                                 "depth": {side: [{"price": 99 if side == "buy" else 101}]}})
+    assert manager.fetch_quotes({"NSE_FNO": [42]}) == {}
+
+
+def test_two_sided_book_is_current_independent_of_old_last_trade(feed):
+    manager, post, clock = feed
+    post.return_value = response({"last_price": 100, "last_trade_time": clock[0] - 60,
+                                 "depth": {"buy": [{"price": 99}], "sell": [{"price": 101}]}})
+    quote = manager.fetch_quotes({"NSE_FNO": [42]})[("NSE_FNO", 42)]
+    assert quote["timestamp"] == clock[0]
+    assert quote["model"] == "depth"
+
+
+@pytest.mark.parametrize("depth", [{}, {"buy": [{"price": 99}]}, {"sell": [{"price": 101}]}])
+def test_fallback_ltp_requires_source_timestamp(feed, depth):
+    manager, post, clock = feed
+    assert market._parse_market_quote({"last_price": 100, "depth": depth}, clock[0]) is None
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_partial_depth_preserves_source_ltp_age(feed, side):
+    manager, post, clock = feed
+    post.return_value = response({"last_price": 100, "last_trade_time": clock[0] - 3,
+                                 "depth": {side: [{"price": 99 if side == "buy" else 101}]}})
+    quote = manager.fetch_quotes({"NSE_FNO": [42]})[("NSE_FNO", 42)]
+    assert quote["timestamp"] == clock[0] - 3
 
 
 @pytest.mark.parametrize("age", [1, 4])
@@ -187,7 +230,9 @@ def test_invalid_ids_do_not_make_a_request(feed):
     post.assert_not_called()
 
 
-@pytest.mark.parametrize("tick,expected", [("0.05", .05), ("1", 1), ("", None), ("0", None), ("nan", None)])
+@pytest.mark.parametrize("tick,expected", [
+    ("5", .05), ("100", 1), ("1000", 10), ("", None), ("0", None), ("nan", None),
+])
 def test_tick_size_is_actual_metadata_without_default(tick, expected):
     universe = UniverseSpec([UniverseEntry("NIFTY", "NIFTY", "NSE", KIND_INDEX)])
     row = {"SEM_EXM_EXCH_ID": "NSE", "SEM_SMST_SECURITY_ID": "42",

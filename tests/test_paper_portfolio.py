@@ -1,5 +1,6 @@
+import json
 import multiprocessing
-from datetime import datetime
+from datetime import datetime, time as market_time
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -113,6 +114,23 @@ def test_signal_age_bounds_approval_window_and_idempotency_precedes_signal_id(en
         3, timestamp=timestamp), quote(clock))["reason"] == "stale_signal"
 
 
+def test_signal_timings_include_queue_delay_and_keep_request_timings_distinct(engine):
+    portfolio, clock, _ = engine
+    timestamp = datetime.fromtimestamp(clock() - 10, IST).isoformat()
+    request = portfolio.submit(signal(timestamp=timestamp), quote(clock, 101))
+    assert request["signal_to_submit_seconds"] == 10
+    clock.advance(2)
+    approved = portfolio.action("approve_limit", request["id"])
+    assert approved["signal_to_approval_seconds"] == 12
+    assert approved["request_to_approval_seconds"] == 2
+    clock.advance(5)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 101)})
+    position = portfolio.snapshot()["positions"][0]
+    assert position["signal_to_fill_seconds"] == 17
+    assert position["request_to_fill_seconds"] == 7
+    assert position["order_to_fill_seconds"] == 5
+
+
 def test_short_entry_is_rejected(engine):
     portfolio, clock, _ = engine
     assert portfolio.submit(signal(side="SELL"), quote(clock))["status"] == "rejected"
@@ -154,6 +172,8 @@ def test_limit_ask_evidence_then_five_second_fallback(engine):
     assert result["quantity"] == 50
     assert result["quote_source"] == "ASK"
     assert result["fill_model"] == "adverse_1pct"
+    assert result["approval_to_order_seconds"] >= 0
+    assert result["order_to_fill_seconds"] == 5
 
 
 def test_limit_evidence_takes_priority_over_elapsed_fallback(engine):
@@ -165,6 +185,43 @@ def test_limit_evidence_takes_priority_over_elapsed_fallback(engine):
     position = portfolio.snapshot()["positions"][0]
     assert position["entry_price"] == 99
     assert position["fill_model"] == "limit"
+
+
+def test_limit_fallback_requires_quote_evidence_after_five_second_wait(engine):
+    portfolio, clock, _ = engine
+    original = quote(clock, 101)
+    request = portfolio.submit(signal(metadata={"stop_loss": 95}), original)
+    portfolio.action("approve_limit", request["id"])
+    clock.advance(6)
+    # The initial quote is still within the ten-second freshness limit, but
+    # cannot serve as new evidence for an adverse fallback after the wait.
+    portfolio.tick({("NSE_FNO", 1): original})
+    assert not portfolio.snapshot()["positions"]
+    assert portfolio.snapshot()["pending"][0]["status"] == "pending"
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 101)})
+    position = portfolio.snapshot()["positions"][0]
+    assert position["entry_price"] == 102.05
+    assert position["risk_points"] == 7.05
+    assert position["target_1"] == 109.1 and position["target_2"] == 116.15
+
+
+def test_market_slippage_recomputes_targets_from_actual_fill_and_stop(engine):
+    portfolio, clock, events = engine
+    request = portfolio.submit(signal(metadata={"stop_loss": 95}), quote(clock))
+    assert request["target_1"] == 105 and request["target_2"] == 110
+    result = portfolio.action("approve_market", request["id"])
+    assert result["fill_price"] == 101
+    assert result["risk_points"] == 6
+    assert result["risk_inr"] == 300
+    assert result["target_1"] == 107 and result["target_2"] == 113
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 105)})
+    assert not portfolio.snapshot()["positions"][0]["t1_reached"]
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 107)})
+    assert portfolio.snapshot()["positions"][0]["stop_loss"] == 101
+    assert sum(event["type"] == "target_1" for event in events) == 1
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 113)})
+    assert not portfolio.snapshot()["positions"]
+    assert portfolio.snapshot()["closed_positions"][0]["exit_reason"] == "target_2"
 
 
 @pytest.mark.parametrize("change", [
@@ -197,6 +254,175 @@ def test_market_rounding_bid_exit_and_disclosed_ltp(engine):
     assert snapshot["closed_positions"][0]["exit_reason"] == "manual_close"
 
 
+def test_sell_limit_uses_bid_side_evidence_and_persists_filled_order(engine):
+    portfolio, clock, _ = engine
+    entry = open_position(engine)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 104, bid=101, ask=105)})
+    result = portfolio.action("close", entry["id"], order_type="LIMIT", limit_price=102)
+    assert result["status"] == "open"
+    snapshot = portfolio.snapshot()
+    exit_order = snapshot["pending_exit_orders"][0]
+    assert exit_order["side"] == "SELL" and exit_order["order_type"] == "LIMIT"
+    assert exit_order["limit_price"] == 102 and exit_order["evidence"] == 101
+    assert exit_order["quote_source"] == "BID" and not exit_order["approval_required"]
+    assert snapshot["positions"][0]["exit_order_id"] == exit_order["id"]
+    assert snapshot["account"]["cash"] == 495000
+    assert snapshot["account"]["available_slots"] == 4
+    assert not any(execution["side"] == "SELL" for execution in snapshot["executions"])
+    clock.advance(2)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 105, bid=102.02, ask=106)})
+    snapshot = portfolio.snapshot()
+    assert snapshot["pending_exit_orders"] == [] and snapshot["positions"] == []
+    assert snapshot["exit_orders"][0]["id"] == exit_order["id"]
+    assert snapshot["exit_orders"][0]["status"] == "filled"
+    assert snapshot["exit_orders"][0]["fill_price"] == 102
+    assert snapshot["executions"][-1]["fill_model"] == "limit"
+    assert snapshot["executions"][-1]["exit_order_id"] == exit_order["id"]
+    assert snapshot["account"]["cash"] == 500100
+
+
+def test_sell_limit_discloses_ltp_when_no_bid_and_never_applies_adverse_on_evidence(engine):
+    portfolio, clock, _ = engine
+    entry = open_position(engine)
+    portfolio.action("close", entry["id"], order_type="LIMIT", limit_price=100)
+    snapshot = portfolio.snapshot()
+    assert snapshot["exit_orders"][0]["quote_source"] == "LTP"
+    assert snapshot["exit_orders"][0]["fill_model"] == "limit"
+    assert snapshot["executions"][-1]["price"] == 100
+    assert snapshot["account"]["cash"] == 500000
+
+
+def test_sell_limit_fallback_waits_for_new_quote_after_five_seconds(engine):
+    portfolio, clock, _ = engine
+    entry = open_position(engine)
+    old_quote = quote(clock)
+    portfolio.action("close", entry["id"], order_type="LIMIT", limit_price=105)
+    exit_id = portfolio.snapshot()["pending_exit_orders"][0]["id"]
+    clock.advance(6)
+    portfolio.tick({("NSE_FNO", 1): old_quote})
+    assert portfolio.snapshot()["pending_exit_orders"][0]["id"] == exit_id
+    assert len(portfolio.snapshot()["positions"]) == 1
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 101)})
+    snapshot = portfolio.snapshot()
+    assert not snapshot["positions"]
+    assert snapshot["exit_orders"][0]["id"] == exit_id
+    assert snapshot["exit_orders"][0]["fill_price"] == 99.95
+    assert snapshot["exit_orders"][0]["fill_model"] == "adverse_1pct"
+    assert snapshot["exit_orders"][0]["quote_timestamp"] == clock()
+    portfolio.tick({("NSE_FNO", 1): quote(clock)})
+    portfolio.action("close", entry["id"])
+    assert sum(e["side"] == "SELL" for e in portfolio.snapshot()["executions"]) == 1
+
+
+def test_sell_order_outage_restart_preserves_trigger_and_pending_position(engine):
+    portfolio, clock, _ = engine
+    entry = open_position(engine)
+    clock.advance(11)
+    portfolio.action("close", entry["id"], order_type="LIMIT", limit_price=105)
+    pending = portfolio.snapshot()["pending_exit_orders"][0]
+    assert pending["quote"] is None and pending["trigger_time"] == clock()
+    reopened = PaperPortfolio(portfolio.db_path, clock=clock)
+    clock.advance(5)
+    reopened.tick({})
+    snapshot = reopened.snapshot()
+    assert snapshot["pending_exit_orders"][0]["created_at"] == pending["created_at"]
+    assert snapshot["account"]["cash"] == 495000 and len(snapshot["positions"]) == 1
+    reopened.tick({("NSE_FNO", 1): quote(clock, 109, bid=108, ask=110)})
+    snapshot = reopened.snapshot()
+    assert snapshot["exit_orders"][0]["id"] == pending["id"]
+    assert snapshot["exit_orders"][0]["fill_price"] == 108
+    assert snapshot["exit_orders"][0]["fill_model"] == "limit"
+    assert snapshot["account"]["available_slots"] == 5
+
+
+def test_protective_sell_market_order_waits_through_calendar_outage_restart(engine):
+    portfolio, clock, _ = engine
+    open_position(engine)
+    portfolio.calendar = lambda exchange, now: False
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 89)})
+    pending = portfolio.snapshot()["pending_exit_orders"][0]
+    assert pending["order_type"] == "MARKET" and pending["reason"] == "initial_stop"
+    reopened = PaperPortfolio(portfolio.db_path, clock=clock, calendar=lambda exchange, now: False)
+    reopened.tick({})
+    assert reopened.snapshot()["pending_exit_orders"][0]["id"] == pending["id"]
+    assert reopened.snapshot()["account"]["cash"] == 495000
+    reopened.calendar = lambda exchange, now: True
+    clock.advance(1)
+    reopened.tick({("NSE_FNO", 1): quote(clock, 91)})
+    snapshot = reopened.snapshot()
+    assert snapshot["exit_orders"][0]["status"] == "filled"
+    assert snapshot["exit_orders"][0]["fill_model"] == "adverse_1pct"
+    assert snapshot["exit_orders"][0]["fill_price"] == 90.05
+    assert snapshot["closed_positions"][0]["exit_reason"] == "initial_stop"
+
+
+@pytest.mark.parametrize("trigger,reason", [
+    ("risk", "daily_loss_limit"), ("cutoff", "time_cutoff"), ("stop", "initial_stop"),
+    ("target", "target_2"),
+])
+def test_protection_escalates_existing_sell_limit_without_duplicate_order(engine, trigger, reason):
+    portfolio, clock, _ = engine
+    entry = open_position(engine)
+    portfolio.action("close", entry["id"], order_type="LIMIT", limit_price=105)
+    exit_id = portfolio.snapshot()["pending_exit_orders"][0]["id"]
+    if trigger == "risk":
+        portfolio.action("limits", loss_limit=100)
+        price = 97
+    elif trigger == "cutoff":
+        clock.now = datetime(2026, 10, 5, 15, 25, tzinfo=IST).timestamp()
+        price = 100
+    elif trigger == "target":
+        price = 120
+    else:
+        price = 89
+    portfolio.tick({("NSE_FNO", 1): quote(clock, price)})
+    snapshot = portfolio.snapshot()
+    assert len(snapshot["exit_orders"]) == 1
+    assert snapshot["exit_orders"][0]["id"] == exit_id
+    assert snapshot["exit_orders"][0]["order_type"] == "MARKET"
+    assert snapshot["exit_orders"][0]["status"] == "filled"
+    assert snapshot["closed_positions"][0]["exit_reason"] == reason
+    assert sum(e["side"] == "SELL" for e in snapshot["executions"]) == 1
+    assert snapshot["daily"]["filled"] == 1
+    assert snapshot["account"]["remaining_daily_entries"] == 19
+    audit = next(json.loads(row["data"]) for row in snapshot["audit"]
+                 if row["action"] == "exit_escalated")
+    assert audit["old"] == {"order_type": "LIMIT", "limit_price": 105, "reason": "manual_close"}
+    assert audit["new"] == {"order_type": "MARKET", "limit_price": None, "reason": reason}
+    assert audit["outcome"] == "escalated"
+
+
+def test_pending_manual_market_exit_reprioritizes_stop_reason_in_same_order(engine):
+    portfolio, clock, _ = engine
+    entry = open_position(engine)
+    clock.advance(11)
+    portfolio.action("close", entry["id"])
+    exit_id = portfolio.snapshot()["pending_exit_orders"][0]["id"]
+    clock.advance(1)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 89)})
+    snapshot = portfolio.snapshot()
+    assert len(snapshot["exit_orders"]) == 1
+    assert snapshot["exit_orders"][0]["id"] == exit_id
+    assert snapshot["exit_orders"][0]["reason"] == "initial_stop"
+    assert snapshot["closed_positions"][0]["exit_reason"] == "initial_stop"
+    audit = next(json.loads(row["data"]) for row in snapshot["audit"]
+                 if row["action"] == "exit_escalated")
+    assert audit["old"]["order_type"] == audit["new"]["order_type"] == "MARKET"
+    assert audit["old"]["reason"] == "manual_close" and audit["new"]["reason"] == "initial_stop"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"order_type": "OTHER"}, {"order_type": "LIMIT"}, {"order_type": "LIMIT", "limit_price": 0},
+])
+def test_invalid_manual_exit_order_does_not_change_position(engine, kwargs):
+    portfolio, _, _ = engine
+    entry = open_position(engine)
+    assert portfolio.action("close", entry["id"], **kwargs)["status"] == "rejected"
+    snapshot = portfolio.snapshot()
+    assert not snapshot["exit_orders"]
+    assert snapshot["positions"][0]["exit_reason"] is None
+
+
 def test_t1_once_keeps_one_lot_t2_closes(engine):
     portfolio, clock, events = engine
     order = open_position(engine)
@@ -208,6 +434,8 @@ def test_t1_once_keeps_one_lot_t2_closes(engine):
     assert sum(e["type"] == "target_1" for e in events) == 1
     portfolio.tick({("NSE_FNO", 1): quote(clock, 120)})
     assert portfolio.snapshot()["closed_positions"][0]["exit_reason"] == "target_2"
+    assert portfolio.snapshot()["counts"]["target_1"] == 1
+    assert portfolio.snapshot()["counts"]["target_2"] == 1
     assert portfolio.action("close", order["id"])["reason"] == "position_not_found"
 
 
@@ -220,6 +448,7 @@ def test_distinct_stop_reasons(engine, prices, reason):
     for price in prices:
         portfolio.tick({("NSE_FNO", 1): quote(clock, price)})
     assert portfolio.snapshot()["closed_positions"][0]["exit_reason"] == reason
+    assert portfolio.snapshot()["counts"][reason] == 1
 
 
 def test_trailing_completed_same_timeframe_no_future_and_breached_low(engine):
@@ -235,6 +464,65 @@ def test_trailing_completed_same_timeframe_no_future_and_breached_low(engine):
     portfolio.tick({("NSE_FNO", 1): quote(clock, 103)}, {
         key: {"timestamp": start + 300, "low": 104}})
     assert portfolio.snapshot()["closed_positions"][0]["exit_reason"] == "trailing_stop"
+    assert portfolio.snapshot()["closed_positions"][0]["stop_loss"] == 102
+
+
+def test_existing_stop_precedes_completed_candle_breach(engine):
+    portfolio, clock, _ = engine
+    open_position(engine)
+    start = clock()
+    clock.advance(300)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 89)}, {
+        ("NSE_FNO", 1): {"timestamp": start, "low": 100}})
+    closed = portfolio.snapshot()["closed_positions"][0]
+    assert closed["exit_reason"] == "initial_stop" and closed["stop_loss"] == 90
+
+
+def test_capital_valuation_unrealized_realized_and_reason_counts(engine):
+    portfolio, clock, _ = engine
+    request = open_position(engine)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 105)})
+    snapshot = portfolio.snapshot()
+    assert snapshot["account"]["premium_committed"] == 5000
+    assert snapshot["account"]["marked_position_value"] == 5250
+    assert snapshot["account"]["unrealized"] == 250
+    assert snapshot["account"]["unrealized_daily"] == 250
+    assert snapshot["positions"][0]["unrealized_pnl"] == 250
+    portfolio.action("close", request["id"])
+    snapshot = portfolio.snapshot()
+    assert snapshot["account"]["premium_committed"] == 0
+    assert snapshot["account"]["marked_position_value"] == 0
+    assert snapshot["account"]["realized_daily"] == pytest.approx(197.5)
+    assert snapshot["daily"]["realized_daily"] == pytest.approx(197.5)
+    assert snapshot["counts"]["manual_close"] == 1
+    assert snapshot["counts"]["closed"] == 1
+
+
+def test_explicit_capacity_one_lot_intent_and_summary_accounting(engine):
+    portfolio, clock, events = engine
+    request = portfolio.submit(signal(), quote(clock))
+    assert request["lots"] == 1
+    assert request["risk_points"] == 10 and request["risk_inr"] == 500
+    account = portfolio.snapshot()["account"]
+    assert account["max_open_positions"] == 5 and account["max_daily_entries"] == 20
+    assert account["available_slots"] == 4 and account["remaining_daily_entries"] == 19
+    portfolio.action("approve_limit", request["id"])
+    pending = portfolio.submit(signal(2), quote(clock))
+    portfolio.action("modify", pending["id"], limit_price=102, stop_loss=91)
+    modified = portfolio.snapshot()["pending"][0]
+    assert modified["lots"] == 1 and modified["risk_points"] == 11
+    assert modified["risk_inr"] == 550
+    snapshot = portfolio.snapshot()
+    assert snapshot["account"]["available_slots"] == 3
+    assert snapshot["account"]["remaining_daily_entries"] == 18
+    assert snapshot["daily"]["remaining_daily_entries"] == 18
+    clock.now = datetime(2026, 10, 5, 15, 25, tzinfo=IST).timestamp()
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 105)})
+    interim = next(event for event in events if event["type"] == "day_summary_interim")
+    assert interim["initial_capital"] == 500000
+    assert interim["premium_committed"] == 0 and interim["marked_position_value"] == 0
+    assert interim["realized_daily"] == pytest.approx(197.5)
+    assert interim["unrealized_daily"] == 0 and interim["unrealized"] == 0
 
 
 def test_candle_stop_persists_without_quote_until_fresh_exit(engine):
@@ -243,7 +531,8 @@ def test_candle_stop_persists_without_quote_until_fresh_exit(engine):
     start = clock()
     clock.advance(300)
     portfolio.tick({}, {("NSE_FNO", 1, "5min"): {"timestamp": start, "low": 103}})
-    assert portfolio.snapshot()["positions"][0]["stop_loss"] == 103
+    assert portfolio.snapshot()["positions"][0]["stop_loss"] == 90
+    assert portfolio.snapshot()["positions"][0]["pending_trailing_low"] == 103
     portfolio.tick({("NSE_FNO", 1): quote(clock, 102)})
     assert portfolio.snapshot()["executions"][-1]["reason"] == "trailing_stop"
 
@@ -259,7 +548,41 @@ def test_market_data_candle_end_alias_rejects_future_candles(engine):
     clock.advance(1)
     portfolio.tick({}, {("NSE_FNO", 1, "5min"): {
         "timestamp": start, "end": clock(), "low": 105}})
-    assert portfolio.snapshot()["positions"][0]["stop_loss"] == 105
+    assert portfolio.snapshot()["positions"][0]["pending_trailing_low"] == 105
+
+
+def test_scanner_hyphenated_timeframe_and_instrument_metadata(engine):
+    portfolio, clock, _ = engine
+    open_position(engine, metadata={"timeframe": "10-min", "instrument_type": "OPTSTK"})
+    contract = portfolio.contracts()[0]
+    assert contract["timeframe"] == "10-min" and contract["instrument_type"] == "OPTSTK"
+    start = clock()
+    clock.advance(600)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 104)}, {
+        ("NSE_FNO", 1): {"timestamp": start, "end": clock(), "low": 105}})
+    assert portfolio.snapshot()["closed_positions"][0]["exit_reason"] == "trailing_stop"
+    with pytest.raises(ValueError):
+        portfolio._timeframe_seconds("-10-min")
+
+
+def test_previous_completed_candle_before_entry_can_tighten_stop(engine):
+    portfolio, clock, _ = engine
+    open_position(engine)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 104)}, {
+        ("NSE_FNO", 1): {"timestamp": clock() - 600, "end_timestamp": clock() - 300, "low": 102}})
+    position = portfolio.snapshot()["positions"][0]
+    assert position["stop_loss"] == 102 and position["stop_kind"] == "trailing_stop"
+
+
+def test_candle_starting_before_entry_and_finishing_after_is_not_skipped(engine):
+    portfolio, clock, _ = engine
+    clock.advance(30)
+    open_position(engine)
+    start = clock() - 30
+    clock.advance(270)
+    portfolio.tick({("NSE_FNO", 1): quote(clock, 104)}, {
+        ("NSE_FNO", 1): {"timestamp": start, "end_timestamp": clock(), "low": 102}})
+    assert portfolio.snapshot()["positions"][0]["stop_loss"] == 102
 
 
 def test_gap_to_t2_reports_t1_milestone_first(engine):
@@ -284,6 +607,8 @@ def test_risk_latch_cancels_entries_and_cannot_be_cleared(engine, limit, price, 
     snapshot = portfolio.snapshot()
     assert snapshot["daily"]["risk_latched"]
     assert snapshot["daily"]["risk_reason"] == reason
+    assert snapshot["closed_positions"][0]["exit_reason"] == reason
+    assert snapshot["counts"]["risk"] == 1
     assert next(o for o in snapshot["orders"] if o["id"] == pending["id"])["status"] == "cancelled"
     assert not snapshot["positions"]
     portfolio.action("limits", profit_limit=999999, loss_limit=999999)
@@ -299,14 +624,98 @@ def test_protective_exit_waits_for_real_quote_and_cutoff_summaries(engine):
     assert snapshot["positions"][0]["exit_reason"] == "time_cutoff"
     assert snapshot["account"]["cash"] == 495000
     assert sum(e["type"] == "day_summary_interim" for e in events) == 1
+    interim = next(e for e in events if e["type"] == "day_summary_interim")
+    assert interim["valuation_status"] == "marked_unresolved"
+    assert len(interim["unresolved_exits"]) == 1
+    assert len(interim["pending_exit_orders"]) == 1
+    assert interim["pending_exit_orders"][0]["side"] == "SELL"
+    assert not any(e["type"] == "day_summary_final" for e in events)
     portfolio.tick({})
     assert sum(e["type"] == "day_summary_interim" for e in events) == 1
     portfolio.tick({("NSE_FNO", 1): quote(clock, 101)})
     assert not portfolio.snapshot()["positions"]
+    clock.now = datetime(2026, 10, 5, 23, tzinfo=IST).timestamp()
+    portfolio.tick({})
     assert sum(e["type"] == "day_summary_final" for e in events) == 1
     final = next(e for e in events if e["type"] == "day_summary_final")
     assert len(final["trade_log"]) == 2
-    assert final["unresolved_exits"] == []
+    assert final["valuation_status"] == "settled"
+    assert portfolio.snapshot()["closed_positions"][0]["exit_reason"] == "time_cutoff"
+
+
+def test_equity_interim_before_commodity_final_even_when_exit_unresolved(engine):
+    portfolio, clock, events = engine
+    open_position(engine)
+    commodity = {"category": "commodity_options", "exchange_segment": "MCX_COMM"}
+    request = portfolio.submit(signal(2, metadata=commodity), quote(clock))
+    portfolio.action("approve_limit", request["id"])
+    clock.now = datetime(2026, 10, 5, 15, 25, tzinfo=IST).timestamp()
+    portfolio.tick({("NSE_FNO", 1): quote(clock)})
+    interim = [event for event in events if event["type"] == "day_summary_interim"]
+    assert len(interim) == 1 and len(interim[0]["remaining_positions"]) == 1
+    assert interim[0]["unresolved_exits"] == []
+    assert not any(event["type"] == "day_summary_final" for event in events)
+    clock.now = datetime(2026, 10, 5, 23, tzinfo=IST).timestamp()
+    portfolio.tick({})
+    final = [event for event in events if event["type"] == "day_summary_final"]
+    assert len(final) == 1 and len(final[0]["unresolved_exits"]) == 1
+    assert final[0]["valuation_status"] == "marked_unresolved"
+    portfolio.tick({("MCX_COMM", 2): quote(clock)})
+    portfolio.tick({})
+    assert sum(event["type"] == "day_summary_interim" for event in events) == 1
+    assert sum(event["type"] == "day_summary_final" for event in events) == 1
+
+
+def test_final_waits_for_eligible_commodity_session_even_before_first_commodity_trade(engine):
+    portfolio, clock, events = engine
+    open_position(engine)
+    clock.now = datetime(2026, 10, 5, 15, 25, tzinfo=IST).timestamp()
+    portfolio.tick({("NSE_FNO", 1): quote(clock)})
+    assert sum(event["type"] == "day_summary_interim" for event in events) == 1
+    assert not any(event["type"] == "day_summary_final" for event in events)
+    clock.now = datetime(2026, 10, 5, 17, tzinfo=IST).timestamp()
+    commodity = {"category": "commodity_options", "exchange_segment": "MCX_COMM"}
+    request = portfolio.submit(signal(2, metadata=commodity), quote(clock))
+    assert portfolio.action("approve_limit", request["id"])["status"] == "filled"
+    clock.now = datetime(2026, 10, 5, 23, tzinfo=IST).timestamp()
+    portfolio.tick({("MCX_COMM", 2): quote(clock)})
+    portfolio.tick({})
+    finals = [event for event in events if event["type"] == "day_summary_final"]
+    assert len(finals) == 1
+    commodity_log = [entry for entry in finals[0]["trade_log"] if entry["security_id"] == 2]
+    assert [entry["side"] for entry in commodity_log] == ["BUY", "SELL"]
+
+
+def test_closed_commodity_calendar_permits_final_at_equity_cutoff(tmp_path):
+    class EquityOnlyCalendar:
+        @staticmethod
+        def session_windows(exchange, day):
+            return () if exchange == "MCX" else ((market_time(9, 15), market_time(15, 30)),)
+
+        def is_exchange_open(self, exchange, now):
+            return any(start <= now.time().replace(tzinfo=None) <= end
+                       for start, end in self.session_windows(exchange, now.date()))
+    clock = Clock()
+    events = []
+    portfolio = PaperPortfolio(
+        tmp_path / "calendar.db", clock=clock, calendar=EquityOnlyCalendar(), notify=events.append)
+    request = portfolio.submit(signal(), quote(clock))
+    portfolio.action("approve_limit", request["id"])
+    clock.now = datetime(2026, 10, 5, 15, 25, tzinfo=IST).timestamp()
+    portfolio.tick({("NSE_FNO", 1): quote(clock)})
+    assert sum(event["type"] == "day_summary_final" for event in events) == 1
+
+
+def test_no_trade_day_final_also_waits_for_last_eligible_segment(engine):
+    portfolio, clock, events = engine
+    clock.now = datetime(2026, 10, 5, 15, 25, tzinfo=IST).timestamp()
+    portfolio.tick({})
+    assert sum(event["type"] == "day_summary_interim" for event in events) == 1
+    assert not any(event["type"] == "day_summary_final" for event in events)
+    clock.now = datetime(2026, 10, 5, 23, tzinfo=IST).timestamp()
+    portfolio.tick({})
+    final = next(event for event in events if event["type"] == "day_summary_final")
+    assert final["trade_log"] == []
 
 
 def test_calendar_commodity_cutoff_and_missed_old_cutoff(engine):
@@ -475,6 +884,17 @@ def test_manual_delivery_worker_never_blocks_portfolio_transactions(engine):
     assert len(events) == 1
 
 
+def test_delivery_telemetry_cannot_flush_outbox_recursively(engine):
+    portfolio, clock, events = engine
+    portfolio.auto_deliver = False
+    portfolio.submit(signal(), quote(clock))
+    portfolio.auto_deliver = True
+    portfolio.record_delivery("external-event", 1, True)
+    assert events == []
+    portfolio.deliver_notifications()
+    assert len(events) == 1
+
+
 def test_real_control_schema_actions_delivery_metrics_and_false_retry(engine, monkeypatch):
     from paper_telegram import PaperTelegramControl
     portfolio, clock, _ = engine
@@ -554,6 +974,8 @@ def test_reports_default_today_with_explicit_historical_day_and_timings(engine):
     assert position["protection_latency_seconds"] == 4
     assert position["submit_duration_seconds"] >= 0
     assert position["approval_duration_seconds"] >= 0
+    assert position["approval_to_order_seconds"] >= 0
+    assert position["order_to_fill_seconds"] == 0
     assert position["fill_duration_seconds"] >= 0
     assert position["exit_fill_duration_seconds"] >= 0
     previous_day = snapshot["daily"]["day"]
@@ -563,13 +985,64 @@ def test_reports_default_today_with_explicit_historical_day_and_timings(engine):
     history = portfolio.snapshot(day=previous_day)
     assert len(history["orders"]) == 1 and len(history["executions"]) == 2
     assert len(history["closed_positions"]) == 1
+    empty_history = portfolio.snapshot(day="2026-10-04")
+    assert empty_history["executions"] == [] and empty_history["orders"] == []
+    assert not empty_history["daily"]["recorded"]
     with pytest.raises(ValueError):
         portfolio.snapshot(day="bad")
+
+
+@pytest.mark.parametrize("action,kwargs", [
+    ("approve_limit", {}), ("approve_market", {}), ("reject", {}),
+    ("modify", {"limit_price": 102, "stop_loss": 91}),
+    ("mode", {"enabled": False}), ("limits", {"profit_limit": 20000, "loss_limit": 9000}),
+    ("close", {}),
+])
+def test_action_audits_atomically_include_old_new_and_actual_result(engine, action, kwargs):
+    portfolio, clock, _ = engine
+    request = portfolio.submit(signal(), quote(clock))
+    if action == "close":
+        portfolio.action("approve_limit", request["id"])
+    result = portfolio.action(action, request_id=request["id"], actor=42, **kwargs)
+    record = [row for row in portfolio.snapshot()["audit"]
+              if row["action"] == action and row["actor"] == "42"][-1]
+    data = json.loads(record["data"])
+    assert record["timestamp"] == clock()
+    assert data["requested"] == kwargs and data["result"] == result
+    assert data["outcome"] == result["status"] and data["reason"]
+    assert data["old"] != data["new"]
+    if action == "modify":
+        assert data["old"]["order"]["limit_price"] == 100
+        assert data["new"]["order"]["limit_price"] == 102
+    if action == "limits":
+        assert data["old"]["account"]["profit_limit"] == 30000
+        assert data["new"]["account"]["profit_limit"] == 20000
+    immutable = record["data"]
+    portfolio.action("limits", profit_limit=25000)
+    assert next(row for row in portfolio.snapshot()["audit"]
+                if row["id"] == record["id"])["data"] == immutable
+
+
+def test_rejected_modification_audit_contains_unchanged_state_and_failure(engine):
+    portfolio, clock, _ = engine
+    request = portfolio.submit(signal(), quote(clock))
+    result = portfolio.action("modify", request["id"], actor=9, stop_loss=110)
+    record = next(row for row in portfolio.snapshot()["audit"]
+                  if row["action"] == "modify" and row["actor"] == "9")
+    data = json.loads(record["data"])
+    assert data["old"] == data["new"]
+    assert data["result"] == result and data["outcome"] == "rejected"
+    assert data["reason"] == "stop_loss must be below entry"
 
 
 def _concurrent_submit(path, now, identifier, queue):
     portfolio = PaperPortfolio(path, clock=lambda: now)
     queue.put(portfolio.submit(signal(identifier), {"price": 100, "timestamp": now})["status"])
+
+
+def _concurrent_close(path, now, position_id, queue):
+    portfolio = PaperPortfolio(path, clock=lambda: now)
+    queue.put(portfolio.action("close", position_id)["status"])
 
 
 def test_cross_process_slot_reservation_is_atomic(tmp_path):
@@ -607,3 +1080,23 @@ def test_cross_process_signal_idempotence(tmp_path):
         assert worker.exitcode == 0
     assert all(queue.get(timeout=2) == "awaiting_approval" for _ in workers)
     assert len(PaperPortfolio(path, clock=clock).snapshot()["pending"]) == 1
+
+
+def test_cross_process_sell_fill_cash_update_is_atomic_and_idempotent(engine):
+    portfolio, clock, _ = engine
+    entry = open_position(engine)
+    context = multiprocessing.get_context("fork")
+    queue = context.Queue()
+    workers = [context.Process(
+        target=_concurrent_close, args=(portfolio.db_path, clock(), entry["id"], queue))
+        for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=15)
+        assert worker.exitcode == 0
+    assert sorted(queue.get(timeout=2) for _ in workers) == ["closed", "rejected"]
+    snapshot = portfolio.snapshot()
+    assert len(snapshot["exit_orders"]) == 1 and snapshot["exit_orders"][0]["status"] == "filled"
+    assert sum(e["side"] == "SELL" for e in snapshot["executions"]) == 1
+    assert snapshot["account"]["cash"] == 499950
