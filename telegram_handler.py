@@ -86,9 +86,19 @@ def format_option_breakout_alert(
     icon = "🚀" if compact or option_type == "CE" else "📉"
     category = str(alert.get("category") or alert.get("route_category") or "")
     category_label = _CATEGORY_LABELS.get(category, category.replace("_", " ").upper() or "OPTIONS")
-    target = alert.get("target")
-    if target is None and alert.get("targets"):
-        target = alert["targets"][0]
+    target_1 = alert.get("target_1")
+    target_2 = alert.get("target_2")
+    try:
+        entry = float(alert["entry"])
+        stop_loss = float(alert["stop_loss"])
+        risk = entry - stop_loss
+        target_1 = round(entry + risk, 2)
+        target_2 = round(entry + 2 * risk, 2)
+    except (KeyError, TypeError, ValueError):
+        if target_2 is None:
+            target_2 = alert.get("target")
+            if target_2 is None and alert.get("targets"):
+                target_2 = alert["targets"][0]
     reference_ist = alert.get("reference_time_ist") or format_ist_timestamp(alert.get("reference_timestamp"))
     breakout_ist = alert.get("breakout_time_ist") or format_ist_timestamp(
         alert.get("breakout_timestamp"), with_seconds=not compact
@@ -105,7 +115,8 @@ def format_option_breakout_alert(
             f"Entry: {esc(_fmt_price(alert.get('entry')))}",
             f"Stop Loss: {esc(_fmt_price(alert.get('stop_loss')))}",
             f"Risk: {esc(_fmt_price(alert.get('risk_points')))} points",
-            f"Target (2R): {esc(_fmt_price(target))}",
+            f"Target 1 (1R): {esc(_fmt_price(target_1))}",
+            f"Target 2 (2R): {esc(_fmt_price(target_2))}",
             "",
             f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(alert.get('premium_ltp') or alert.get('breakout_price')))}",
         ]
@@ -121,7 +132,8 @@ def format_option_breakout_alert(
             f"Entry: {esc(_fmt_price(alert.get('entry')))} (red candle high)",
             f"Stop Loss: {esc(_fmt_price(alert.get('stop_loss')))} (red low {esc(_fmt_price(alert.get('reference_low')))} − 5%)",
             f"Risk: {esc(_fmt_price(alert.get('risk_points')))} points",
-            f"Target (2R): {esc(_fmt_price(target))}",
+            f"Target 1 (1R): {esc(_fmt_price(target_1))}",
+            f"Target 2 (2R): {esc(_fmt_price(target_2))}",
             "",
             f"🔴 Reference RED candle: {esc(reference_ist)}",
             f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(alert.get('premium_ltp') or alert.get('breakout_price')))} ({esc(trigger)})",

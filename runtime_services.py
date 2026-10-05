@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 import os
 import threading
@@ -65,6 +66,8 @@ class SignalNotifier:
         self.practice_mode = practice_mode
         self.delivery_attempts = 0
         self.delivery_failures = 0
+        self._paper_option_trades: dict[str, dict] = {}
+        self._paper_trades_lock = threading.RLock()
 
     def status(self) -> dict:
         return {
@@ -123,6 +126,8 @@ class SignalNotifier:
         return "\n".join(lines)
 
     def notify_order(self, signal: dict, order: Order, practice_mode: bool) -> None:
+        if practice_mode and order.status.value == "FILLED":
+            return
         state = "practice" if practice_mode else "live"
         message = (
             f"📈 Order {order.status.value}\n"
@@ -134,6 +139,103 @@ class SignalNotifier:
             f"Time: {order.updated_at}"
         )
         self._send(TRADE_CONTROL_CHANNEL, message)
+
+    def notify_paper_trade_opened(self, signal: dict, order: Order) -> bool:
+        metadata = signal.get("metadata") or {}
+        if not metadata.get("premium_strategy") or order.status.value != "FILLED":
+            return False
+
+        try:
+            security_id = int(metadata["security_id"])
+            quantity = max(1, int(order.filled_quantity or order.quantity))
+            lot_size = max(1, int(metadata.get("lot_size") or 1))
+            entry = float(order.price)
+            stop_loss = float(metadata.get("stop_loss", signal.get("stop_loss")))
+        except (KeyError, TypeError, ValueError):
+            return False
+        option_symbol = metadata.get("option_symbol")
+        exchange_segment = metadata.get("exchange_segment")
+        if not option_symbol or not exchange_segment or entry <= stop_loss:
+            return False
+
+        risk = entry - stop_loss
+        trade = {
+            "trade_id": order.order_id,
+            "symbol": metadata.get("underlying") or signal.get("symbol", ""),
+            "option_symbol": option_symbol,
+            "security_id": security_id,
+            "exchange_segment": exchange_segment,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "target_1": round(entry + risk, 2),
+            "target_2": round(entry + 2 * risk, 2),
+            "quantity": quantity,
+            "lot_size": lot_size,
+            "entry_time": order.updated_at or now_local_iso(),
+        }
+        with self._paper_trades_lock:
+            if trade["trade_id"] in self._paper_option_trades:
+                return False
+            self._paper_option_trades[trade["trade_id"]] = trade
+
+        message = (
+            "🧪 PAPER TRADE OPENED\n"
+            f"Symbol: {html.escape(str(trade['symbol']))}\n"
+            f"Option: {html.escape(str(option_symbol))}\n"
+            f"Entry Premium: ₹{entry:.2f}\n"
+            f"Stop Loss: ₹{stop_loss:.2f}\n"
+            f"Target 1 (1R): ₹{trade['target_1']:.2f}\n"
+            f"Target 2 (2R): ₹{trade['target_2']:.2f}\n"
+            f"Qty/Lots: {quantity} lot(s) × {lot_size} units\n"
+            f"Time: {trade['entry_time']}"
+        )
+        return self._send(TRADE_CONTROL_CHANNEL, message)
+
+    def paper_option_contracts(self) -> list[dict]:
+        with self._paper_trades_lock:
+            return [
+                {
+                    "security_id": trade["security_id"],
+                    "exchange_segment": trade["exchange_segment"],
+                }
+                for trade in self._paper_option_trades.values()
+            ]
+
+    def update_paper_trades(self, prices: dict, exit_time: str | None = None) -> int:
+        exit_time = exit_time or now_local_iso()
+        closed = []
+        with self._paper_trades_lock:
+            for trade_id, trade in list(self._paper_option_trades.items()):
+                price = prices.get((trade["exchange_segment"], trade["security_id"]))
+                if price is None:
+                    continue
+                exit_price = float(price)
+                if exit_price <= trade["stop_loss"]:
+                    reason = "STOP LOSS"
+                elif exit_price >= trade["target_2"]:
+                    reason = "TARGET2"
+                elif exit_price >= trade["target_1"]:
+                    reason = "TARGET1"
+                else:
+                    continue
+                closed.append((self._paper_option_trades.pop(trade_id), exit_price, reason))
+
+        for trade, exit_price, reason in closed:
+            points = exit_price - trade["entry"]
+            rupees = points * trade["quantity"] * trade["lot_size"]
+            message = (
+                "🧪 PAPER TRADE CLOSED\n"
+                f"Symbol: {html.escape(str(trade['symbol']))}\n"
+                f"Option: {html.escape(str(trade['option_symbol']))}\n"
+                f"Entry: ₹{trade['entry']:.2f}\n"
+                f"Exit: ₹{exit_price:.2f}\n"
+                f"Reason: {reason}\n"
+                f"P&L: {points:+.2f} points | ₹{rupees:+,.2f}\n"
+                f"Entry Time: {trade['entry_time']}\n"
+                f"Exit Time: {exit_time}"
+            )
+            self._send(TRADE_CONTROL_CHANNEL, message)
+        return len(closed)
 
     def notify_position_update(self, signal: dict, quantity: int, average_price: float) -> None:
         message = (
@@ -347,7 +449,10 @@ class QueueConsumerWorker:
             quantity_after, average_price = self._update_position_snapshot(signal, order)
             self.trading_db.save_metric("queue_size", float(self.queue_processor.queue_size()))
             self.notifier.notify_position_update(signal, quantity_after, average_price)
-        self.notifier.notify_order(signal, order, practice_mode=not live_allowed)
+        paper_mode = not live_allowed
+        self.notifier.notify_order(signal, order, practice_mode=paper_mode)
+        if paper_mode:
+            self.notifier.notify_paper_trade_opened(signal, order)
 
     def _update_position_snapshot(self, signal: dict, order: Order) -> tuple[int, float]:
         existing = self.trading_db.fetch_latest_position(order.symbol) if self.trading_db is not None else None
@@ -398,9 +503,15 @@ class MarketScannerWorker:
     security master is released; the Flask health endpoint keeps running.
     """
 
-    def __init__(self, signal_acceptor: Callable[[dict, bool], bool], runtime_config: dict) -> None:
+    def __init__(
+        self,
+        signal_acceptor: Callable[[dict, bool], bool],
+        runtime_config: dict,
+        paper_trade_notifier: SignalNotifier | None = None,
+    ) -> None:
         self.signal_acceptor = signal_acceptor
         self.runtime_config = runtime_config
+        self.paper_trade_notifier = paper_trade_notifier
         self.enabled = bool(runtime_config.get("scanner_enabled"))
         self.idle_seconds = _env_seconds("SCANNER_IDLE_SECONDS", 300.0, 5.0)
         self.live_poll_seconds = _env_seconds("LIVE_TRIGGER_POLL_SECONDS", 1.0, 1.0)
@@ -555,6 +666,7 @@ class MarketScannerWorker:
             _NullTelegramHandler(),
             _NullPositionManager(),
             signal_callback=self._enqueue_signal,
+            paper_trade_notifier=self.paper_trade_notifier,
         )
 
     def _enqueue_signal(self, payload: dict) -> bool:
