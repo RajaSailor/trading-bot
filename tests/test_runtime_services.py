@@ -279,7 +279,7 @@ class SignalNotifierRoutingTests(unittest.TestCase):
                     "Stop Loss: ₹90.00",
                     "Target 1 (1R): ₹110.00",
                     "Target 2 (2R): ₹120.00",
-                    "Qty/Lots: 2 lot(s) × 50 units",
+                    "Qty/Lots: 100 units (2 lot(s) × 50)",
                     "Time: 2026-10-05T10:00:00+05:30",
                 ):
                     self.assertIn(field, opened)

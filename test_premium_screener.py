@@ -142,7 +142,7 @@ class PremiumScreenerTests(unittest.TestCase):
 
         self.assertEqual([], telegram.sent)
 
-    def test_run_once_throttles_ten_minute_stock_spot_scans(self):
+    def test_run_once_scans_option_segments_without_stock_spot_signals(self):
         screener = PremiumScreener(_FakeDataManager(), _FakeTelegramHandler(), _FakePositionManager())
         calls = []
         screener._scan_instruments = lambda instruments, interval, now=None: calls.append(("options", interval, len(instruments))) or 0

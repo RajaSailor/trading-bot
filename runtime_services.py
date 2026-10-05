@@ -186,7 +186,7 @@ class SignalNotifier:
             f"Stop Loss: ₹{stop_loss:.2f}\n"
             f"Target 1 (1R): ₹{trade['target_1']:.2f}\n"
             f"Target 2 (2R): ₹{trade['target_2']:.2f}\n"
-            f"Qty/Lots: {quantity} lot(s) × {lot_size} units\n"
+            f"Qty/Lots: {quantity * lot_size} units ({quantity} lot(s) × {lot_size})\n"
             f"Time: {trade['entry_time']}"
         )
         return self._send(TRADE_CONTROL_CHANNEL, message)
