@@ -12,7 +12,7 @@ from atm_options_fetcher import ATMOptionsFetcher
 from exchange_calendar import MCX, exchange_for_instrument, open_exchanges
 from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
-from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
+from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_CANDLE, TRIGGER_LIVE, PremiumStrategyEngine
 from telegram_handler import SCREENER_CATEGORIES, format_ist_timestamp
 
 
@@ -58,6 +58,7 @@ class PremiumScreener:
         live_signal_detector: LiveSignalDetector | None = None,
         signal_callback=None,
         paper_trade_notifier=None,
+        clock=None,
     ) -> None:
         self.data_manager = data_manager
         self.telegram_handler = telegram_handler
@@ -69,10 +70,12 @@ class PremiumScreener:
         self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.signal_callback = signal_callback
         self.paper_trade_notifier = paper_trade_notifier
+        self.clock = clock or (lambda: datetime.now(IST))
         self.refresh_retry_seconds = _env_float("SCANNER_REFRESH_RETRY_SECONDS", REFRESH_RETRY_SECONDS)
         self._lock = threading.RLock()
         self._processed_signal_keys: set[str] = set()
         self._processed_signal_order: list[str] = []
+        self._detections: Dict[str, dict] = {}
         # security_id -> monitored contract state (contract, instrument, reference)
         self._monitored: Dict[int, dict] = {}
         # underlying symbol -> {"bucket": int, "retry_at": float}
@@ -328,10 +331,26 @@ class PremiumScreener:
         now: datetime | None = None,
         require_armed: bool = False,
     ) -> int:
+        now = self._as_ist(self.clock())
         instrument = state["instrument"]
         contract = state["contract"]
         signal_key = self._signal_key(instrument.category, {**signal, "option_symbol": contract["option_symbol"]})
         with self._lock:
+            detection = self._detections.get(signal_key)
+            if detection is None:
+                if not self._fresh_evidence(signal, now):
+                    logger.debug("Historical/incomplete premium evidence skipped: %s", signal_key)
+                    return 0
+                detection = {
+                    "detected_at": now.isoformat(),
+                    "breakout_timestamp": signal.get("breakout_timestamp"),
+                }
+                self._detections[signal_key] = detection
+                if len(self._detections) > 2000:
+                    self._detections.pop(next(iter(self._detections)))
+            signal.update(detection)
+            if (now - datetime.fromisoformat(signal["detected_at"])).total_seconds() >= 60:
+                return 0
             reference = state.get("reference")
             was_armed = bool(reference.get("armed")) if reference is not None else False
             if require_armed and not was_armed:
@@ -382,7 +401,7 @@ class PremiumScreener:
         return 0
 
     def _enrich_signal(self, signal: dict, instrument, contract: dict) -> None:
-        now_ist = datetime.now(IST)
+        now_ist = datetime.fromisoformat(signal["detected_at"]) if signal.get("detected_at") else datetime.now(IST)
         signal.update(
             {
                 "symbol": instrument.symbol,
@@ -410,20 +429,19 @@ class PremiumScreener:
         )
 
     def _deliver(self, instrument, signal: dict, contract: dict) -> bool:
+        if self.signal_callback is not None:
+            return bool(self.signal_callback(
+                self._build_queue_payload(
+                    instrument=instrument,
+                    signal=signal,
+                    route_category=instrument.category,
+                    strategy_name="premium_screener",
+                    option_data=contract,
+                )
+            ))
         if self.trade_control_handler and self.trade_control_bot:
             if self.trade_control_bot.create_and_send_request(signal, contract):
                 return True
-
-        if self.signal_callback and self.signal_callback(
-            self._build_queue_payload(
-                instrument=instrument,
-                signal=signal,
-                route_category=instrument.category,
-                strategy_name="premium_screener",
-                option_data=contract,
-            )
-        ):
-            return True
 
         accepted = self.position_manager.add_position(
             symbol=instrument.symbol,
@@ -446,6 +464,24 @@ class PremiumScreener:
         return False
 
     # ================================================================ helpers
+    @staticmethod
+    def _fresh_evidence(signal: dict, now: datetime) -> bool:
+        try:
+            value = signal["breakout_timestamp"]
+            try:
+                epoch = float(value)
+                evidence = datetime.fromtimestamp(epoch / 1000 if epoch > 1e11 else epoch, IST)
+            except (TypeError, ValueError):
+                evidence = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if evidence.tzinfo is None:
+                    return False
+            age = (now - evidence).total_seconds()
+            if signal.get("trigger") == TRIGGER_CANDLE:
+                return bool(signal.get("breakout_is_latest")) and BUCKET_SECONDS <= age <= BUCKET_SECONDS + 60
+            return signal.get("trigger") == TRIGGER_LIVE and 0 <= age <= 60
+        except (KeyError, ValueError, TypeError, OverflowError, OSError):
+            return False
+
     @staticmethod
     def _display_timeframe(interval: str) -> str:
         return f"{interval.replace('min', '')}-MINUTE BREAKOUT"
@@ -471,14 +507,14 @@ class PremiumScreener:
         target = signal.get("target", (signal.get("targets") or [signal.get("entry")])[0])
         payload = {
             "symbol": instrument.symbol,
-            # Queue contract: BUY = buy call premium, SELL = buy put premium (legacy).
-            "action": "BUY" if signal.get("signal") == "CALL" else "SELL",
+            "action": signal.get("action", signal.get("side", "BUY")),
             "entry_price": signal.get("entry"),
             "target_price": target,
             "stop_loss": signal.get("stop_loss"),
             "quantity": 1,
             "strategy": strategy_name,
-            "timestamp": signal.get("breakout_timestamp") or datetime.now(IST).isoformat(),
+            "timestamp": signal.get("detected_at"),
+            "detected_at": signal.get("detected_at"),
             "category": route_category,
             "reference_timestamp": signal.get("reference_timestamp"),
             "breakout_timestamp": signal.get("breakout_timestamp"),
@@ -486,7 +522,9 @@ class PremiumScreener:
                 "source": "scanner",
                 "route_category": route_category,
                 "signal": signal.get("signal"),
-                "timeframe": signal.get("timeframe"),
+                "timeframe": INTERVAL,
+                "display_timeframe": signal.get("timeframe"),
+                "detected_at": signal.get("detected_at"),
                 "reference_timestamp": signal.get("reference_timestamp"),
                 "breakout_timestamp": signal.get("breakout_timestamp"),
                 "reference_time_ist": signal.get("reference_time_ist"),

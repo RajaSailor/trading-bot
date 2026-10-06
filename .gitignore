@@ -10,6 +10,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-*/
+.*-venv/
 .paper-test-data/
 .coverage
 coverage.xml

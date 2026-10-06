@@ -109,6 +109,7 @@ class SignalNotifier:
                 "entry": metadata.get("entry", signal.get("entry_price")),
                 "stop_loss": metadata.get("stop_loss", signal.get("stop_loss")),
                 "target": metadata.get("target", signal.get("target_price")),
+                "timeframe": metadata.get("display_timeframe") or metadata.get("timeframe"),
             }
             return format_option_breakout_alert(alert, practice_mode=self.practice_mode, compact=compact)
         lines = [
@@ -316,6 +317,9 @@ class QueueConsumerWorker:
         self._processed = 0
         self._last_signal_id: str | None = None
         self._last_processed_at: str | None = None
+        self._outcomes: dict[str, int] = {}
+        self._last_outcome: str | None = None
+        self._last_reason: str | None = None
 
     def start(self, poll_seconds: float = 0.5) -> bool:
         if self._thread and self._thread.is_alive():
@@ -339,8 +343,12 @@ class QueueConsumerWorker:
         return {
             "running": bool(self._thread and self._thread.is_alive()),
             "processed_signals": self._processed,
+            "queue_size": self.queue_processor.queue_size(),
             "last_signal_id": self._last_signal_id,
             "last_processed_at": self._last_processed_at,
+            "outcomes": dict(self._outcomes),
+            "last_outcome": self._last_outcome,
+            "last_reason": self._last_reason,
         }
 
     def run_forever(self, poll_seconds: float = 0.5) -> None:
@@ -355,12 +363,19 @@ class QueueConsumerWorker:
             return False
         start = monotonic()
         try:
-            self._execute_signal(signal)
+            result = self._execute_signal(signal)
             self.queue_processor.mark_processed(signal.get("signal_id"))
             self._processed += 1
             self._last_signal_id = signal.get("signal_id")
             self._last_processed_at = now_local_iso()
-            if self.metrics_collector is not None:
+            if self.paper_portfolio is not None and isinstance(result, dict):
+                outcome = result.get("status", "unknown")
+                self._outcomes[outcome] = self._outcomes.get(outcome, 0) + 1
+                self._last_outcome = outcome
+                self._last_reason = result.get("reason")
+                if outcome == "rejected" and self.metrics_collector is not None:
+                    self.metrics_collector.record_error("paper_submission", result.get("reason") or "rejected")
+            elif self.metrics_collector is not None:
                 self.metrics_collector.record_order_execution((monotonic() - start) * 1000.0)
             return True
         except Exception as exc:
@@ -379,7 +394,7 @@ class QueueConsumerWorker:
             logger.error("Queue consumer failed for %s: %s", signal.get("signal_id"), exc.__class__.__name__)
             return True
 
-    def _execute_signal(self, signal: dict) -> None:
+    def _execute_signal(self, signal: dict):
         if self.paper_portfolio is not None:
             metadata = signal.get("metadata") or {}
             quote = None
@@ -391,11 +406,13 @@ class QueueConsumerWorker:
                 except (TypeError, ValueError):
                     security_id = None
                 if segment and security_id:
-                    quote = self.quote_provider.fetch_quotes({segment: [security_id]}).get(
-                        (segment, security_id)
-                    )
-            self.paper_portfolio.submit(signal, quote=quote)
-            return
+                    try:
+                        quote = self.quote_provider.fetch_quotes({segment: [security_id]}).get(
+                            (segment, security_id)
+                        )
+                    except Exception as exc:
+                        logger.warning("Paper submission quote unavailable: %s", exc.__class__.__name__)
+            return self.paper_portfolio.submit(signal, quote=quote)
         order_id = f"sig-{signal.get('signal_id', 'unknown')}"
         quantity = int(signal.get("quantity") or 1)
         price = float(signal.get("entry_price", signal.get("price", 0.0)) or 0.0)

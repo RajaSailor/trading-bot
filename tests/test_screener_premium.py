@@ -57,9 +57,11 @@ class _Base(unittest.TestCase):
         self.data_manager.resolve_underlying.return_value = None
         self.data_manager.fetch_ltp.return_value = {}
         self.alerts = []
+        self.clock_now = MONDAY_MORNING
         self.screener = PremiumScreener(
             self.data_manager, MagicMock(), MagicMock(),
             signal_callback=lambda payload: self.alerts.append(payload) or True,
+            clock=lambda: self.clock_now,
         )
 
 
@@ -117,6 +119,7 @@ class SessionGatingTests(_Base):
 
 class BreakoutFlowTests(_Base):
     def _prime(self, candles_by_id, now=MONDAY_MORNING):
+        self.clock_now = now
         contracts = [_contract(101, "CE", "ITM+1", 24400), _contract(102, "CE", "ATM", 24450),
                      _contract(201, "PE", "ATM", 24450)]
         self.screener.fetcher.get_spot_price = MagicMock(return_value=24460.0)
@@ -166,7 +169,8 @@ class BreakoutFlowTests(_Base):
             "risk_points": 18.9,
             "target": 149.8,
             "targets": [149.8],
-            "timeframe": "10-MINUTE BREAKOUT",
+            "timeframe": "10min",
+            "display_timeframe": "10-MINUTE BREAKOUT",
             "trigger": "live_ltp",
             "premium_ltp": 112.4,
             "premium_strategy": True,
@@ -197,9 +201,27 @@ class BreakoutFlowTests(_Base):
         self._prime({201: candles})
         self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 201): 56}
         self.assertEqual(1, self.screener.live_check_once(MONDAY_MORNING))
-        self.assertEqual("SELL", self.alerts[0]["action"])
+        self.assertEqual("BUY", self.alerts[0]["action"])
         self.assertEqual("BUY PUT", self.alerts[0]["metadata"]["action_text"])
         self.assertEqual("PE", self.alerts[0]["metadata"]["option_type"])
+
+    def test_delivery_retry_preserves_original_detection_and_evidence(self):
+        self._prime({201: [_candle(0, 50, 55, 45, 48)]})
+        payloads = []
+        self.screener.signal_callback = lambda payload: payloads.append(payload) or len(payloads) > 1
+        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 201): 56}
+        self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
+        self.screener.position_manager.add_position.assert_not_called()
+        later = MONDAY_MORNING.replace(second=20)
+        self.clock_now = later
+        self.assertEqual(1, self.screener.live_check_once(later))
+        self.assertEqual(payloads[0]["timestamp"], payloads[1]["timestamp"])
+        self.assertEqual(payloads[0]["breakout_timestamp"], payloads[1]["breakout_timestamp"])
+
+    def test_startup_does_not_replay_old_latest_completed_breakout(self):
+        candles = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 113, 97, 112)]
+        self.assertEqual(0, self._prime({102: candles}))
+        self.assertEqual([], self.alerts)
 
     def test_candle_breakout_alerts_only_when_latest_completed_candle_broke_out(self):
         stale = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 115, 97, 114), _candle(20, 114, 116, 110, 115)]

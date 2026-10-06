@@ -228,6 +228,10 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
     if signal_queue_processor is None:
         return None, ("Signal queue processor not initialized", 503)
 
+    if paper_portfolio is not None and "metadata" in payload and not isinstance(payload["metadata"], dict):
+        paper_portfolio.submit(payload)
+        return None, ("Invalid signal metadata", 400)
+
     signal = signal_queue_processor.parse_webhook_signal(payload)
     if signal is None:
         return None, ("Invalid signal payload", 400)
@@ -237,7 +241,6 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
     signal["stop_loss"] = payload.get("stop_loss")
     signal["quantity"] = payload.get("quantity")
     signal["category"] = payload.get("category") or signal.get("category")
-    signal["metadata"].update(payload.get("metadata", {}))
 
     accepted, reason = True, "OK"
     entry_price = 0.0
@@ -306,6 +309,7 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
 
     return {
         "status": "accepted",
+        "portfolio_status": "queued" if paper_portfolio is not None else None,
         "signal": signal,
         "queue_size": signal_queue_processor.queue_size(),
         "proposed_quantity": quantity if signal.get("action") in {"BUY", "SELL"} else 0,
@@ -646,14 +650,20 @@ def paper_telegram_webhook():
 def health_check():
     """Health check endpoint"""
     try:
+        revision = os.getenv("RENDER_GIT_COMMIT") or os.getenv("GITHUB_SHA") or ""
         return jsonify({
             "status": "healthy",
             "timestamp": now_local_iso(),
             "service": "dhan-trading-bot",
             "version": "1.0.0",
+            "revision": revision if len(revision) == 40 and all(
+                ch in "0123456789abcdefABCDEF" for ch in revision) else None,
             "dhan_connected": dhan_integration is not None,
             "telegram_connected": dhan_bridge is not None,
             "telegram_routing": signal_notifier.status() if signal_notifier is not None else {},
+            "paper_telegram": paper_telegram_control.readiness_status() if paper_telegram_control is not None else {},
+            "paper_outbox": paper_portfolio.notification_status() if paper_portfolio is not None else {},
+            "paper_submissions": paper_portfolio.submission_status() if paper_portfolio is not None else {},
             "workers": {
                 "queue_consumer": queue_consumer_worker.status() if queue_consumer_worker is not None else {"running": False},
                 "market_scanner": market_scanner_worker.status() if market_scanner_worker is not None else {"running": False},

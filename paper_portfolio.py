@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import secrets
 import sqlite3
 import time
@@ -41,6 +42,8 @@ def _number(value):
 
 
 def _epoch(value):
+    if isinstance(value, bool):
+        raise ValueError("invalid timestamp")
     if isinstance(value, str):
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
@@ -87,6 +90,8 @@ class PaperPortfolio:
                     id TEXT PRIMARY KEY, signal_key TEXT UNIQUE NOT NULL,
                     status TEXT NOT NULL, day TEXT NOT NULL, reserve REAL NOT NULL,
                     data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_rejections (
+                    signal_key TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS paper_positions (
                     id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS paper_executions (
@@ -210,21 +215,40 @@ class PaperPortfolio:
                    (event_id, now, json.dumps(event)))
         self._audit(db, kind, data, data.get("actor"))
 
-    def _deliver(self):
+    def _deliver(self, batch_size=50):
         if self.notify is None or self._delivering:
             return
+        if type(batch_size) is not int or not 1 <= batch_size <= 100:
+            raise ValueError("batch_size must be between 1 and 100")
         self._delivering = True
         try:
             with self._connection() as db:
                 events = db.execute(
-                    "SELECT id,data FROM paper_outbox WHERE delivered=0 ORDER BY rowid").fetchall()
+                    """SELECT id,data FROM paper_outbox WHERE delivered=0
+                    ORDER BY COALESCE((SELECT MAX(id) FROM paper_deliveries
+                        WHERE event_id=paper_outbox.id),0), rowid LIMIT ?""",
+                    (batch_size,)).fetchall()
             for row in events:
+                started = time.monotonic()
+                with self._connection() as db:
+                    previous = db.execute(
+                        "SELECT COALESCE(MAX(id),0) FROM paper_deliveries WHERE event_id=?",
+                        (row["id"],)).fetchone()[0]
+                reason = "delivery_failed"
                 try:
                     result = self.notify(json.loads(row["data"]))
-                    if result is False:
-                        return
                 except Exception:
-                    return
+                    result = False
+                    reason = "notifier_error"
+                if result is False:
+                    with self._connection() as db:
+                        recorded = db.execute(
+                            "SELECT 1 FROM paper_deliveries WHERE event_id=? AND id>? LIMIT 1",
+                            (row["id"], previous)).fetchone()
+                    if not recorded:
+                        self.record_delivery(row["id"], (time.monotonic() - started) * 1000,
+                                             False, reason_code=reason)
+                    continue
                 with self._connection() as db:
                     db.execute("UPDATE paper_outbox SET delivered=1 WHERE id=?", (row["id"],))
         finally:
@@ -575,47 +599,133 @@ class PaperPortfolio:
     def submit(self, signal, quote=None):
         started = time.monotonic()
         now = self.clock()
+        key = hashlib.sha256(
+            json.dumps(signal, sort_keys=True, default=str).encode()).hexdigest()
+        data = {}
+        if isinstance(signal, dict):
+            metadata = signal.get("metadata", {})
+            data = dict(signal)
+            if isinstance(metadata, dict):
+                data.update(metadata)
+            key = str(data.get("idempotency_key") or data.get("signal_id") or data.get("id") or key)
+        with self._connection() as db:
+            existing = self._submission(db, key)
+        if existing:
+            if self.auto_deliver:
+                self._deliver()
+            return existing
         invalid_reason = "invalid_signal"
         try:
-            data = {**signal, **(signal.get("metadata") or {})}
-            key = str(data.get("idempotency_key") or data.get("signal_id") or data.get("id") or hashlib.sha256(
-                json.dumps(signal, sort_keys=True, default=str).encode()).hexdigest())
-            with self._connection() as db:
-                existing = db.execute("SELECT data FROM paper_orders WHERE signal_key=?", (key,)).fetchone()
-            if existing:
-                if self.auto_deliver:
-                    self._deliver()
-                return json.loads(existing["data"])
+            if not data:
+                raise ValueError("invalid signal mapping")
+            invalid_reason = "invalid_metadata"
+            if not isinstance(metadata, dict):
+                raise ValueError("invalid metadata mapping")
+            invalid_reason = "missing_lot_size" if data.get("lot_size") is None else "invalid_lot_size"
             lot = data["lot_size"]
             if isinstance(lot, bool) or not isinstance(lot, (int, float)) or (
                 not math.isfinite(float(lot)) or lot <= 0 or not float(lot).is_integer()
             ):
                 raise ValueError("lot_size must be a positive integer")
             lot = int(lot)
+            invalid_reason = "missing_security_id" if data.get("security_id") is None else "invalid_security_id"
             security = data["security_id"]
             if isinstance(security, bool) or int(security) <= 0 or str(int(security)) != str(security):
                 raise ValueError("security_id must be a positive integer")
+            invalid_reason = "missing_tick_size" if data.get("tick_size") is None else "invalid_tick_size"
+            tick = _number(data["tick_size"])
+            invalid_reason = "invalid_price"
             entry = _number(data.get("entry_price", data.get("entry", data.get("price"))))
             stop = _number(data["stop_loss"])
-            tick = _number(data["tick_size"])
             if stop >= entry:
                 raise ValueError("stop_loss must be below premium entry")
             for required in ("exchange_segment", "option_symbol", "timeframe", "category"):
-                if not str(data.get(required, "")).strip():
+                invalid_reason = "missing_" + required
+                if data.get(required) is None or not str(data[required]).strip():
                     raise ValueError("missing " + required)
+            invalid_reason = "invalid_exchange_segment"
             if not str(data["exchange_segment"]).upper().startswith(("NSE", "BSE", "MCX")):
                 raise ValueError("unsupported exchange_segment")
-            self._timeframe_seconds(data["timeframe"])
-            signal_timestamp = _epoch(data["timestamp"]) if data.get("timestamp") is not None else now
+            invalid_reason = "invalid_timeframe"
+            timeframe_seconds = self._timeframe_seconds(data["timeframe"])
+            invalid_reason = "invalid_side"
+            for source in (signal, metadata):
+                for field in ("side", "action"):
+                    if field in source and str(source[field]).upper() != "BUY":
+                        raise ValueError("only BUY entries are supported")
+            scanner_premium = data.get("source") == "scanner" and data.get("premium_strategy")
+            invalid_reason = "invalid_intent"
+            if scanner_premium:
+                option_type = data.get("option_type")
+                intent = {"CE": "CALL", "PE": "PUT"}.get(option_type)
+                if intent is None or data.get("signal") != intent or (
+                    data.get("action_text") is not None and data["action_text"] != "BUY " + intent
+                ):
+                    raise ValueError("inconsistent option intent")
+                symbol_side = re.search(r"(CE|PE)$", str(data["option_symbol"]).upper())
+                if symbol_side and symbol_side[1] != option_type:
+                    raise ValueError("inconsistent option contract")
+                if timeframe_seconds != 600:
+                    invalid_reason = "invalid_timeframe"
+                    raise ValueError("premium timeframe must be ten minutes")
+            invalid_reason = "invalid_timestamp"
+            raw_detected = data.get("detected_at")
+            if raw_detected is None:
+                if scanner_premium:
+                    raise ValueError("missing detection time")
+                raw_detected = data.get("timestamp")
+                if raw_detected is None:
+                    raw_detected = now
+            signal_timestamp = _epoch(raw_detected)
             if signal_timestamp > now:
                 raise ValueError("future signal")
-            if now - signal_timestamp >= self.approval_expiry_seconds:
+            queue_received_at = _epoch(data["queue_received_at"]) if "queue_received_at" in data else now
+            if not signal_timestamp <= queue_received_at <= now:
+                raise ValueError("invalid queue receipt time")
+            expires_at = signal_timestamp + self.approval_expiry_seconds
+            invalid_reason = "invalid_expiry"
+            for field in ("approval_deadline", "expires_at"):
+                if field in data:
+                    deadline = _epoch(data[field])
+                    if not signal_timestamp < deadline <= signal_timestamp + self.approval_expiry_seconds:
+                        raise ValueError("expiry outside detection window")
+                    expires_at = min(expires_at, deadline)
+            if now >= expires_at:
                 invalid_reason = "stale_signal"
                 raise ValueError("stale_signal")
-            if str(data.get("side", data.get("action", "BUY"))).upper() in {"SELL", "SHORT"}:
-                raise ValueError("only long option BUY entries are supported")
+            invalid_reason = "invalid_timestamp"
+            evidence = {}
+            for field in ("reference_timestamp", "breakout_timestamp"):
+                if data.get(field) is not None:
+                    evidence[field] = _epoch(data[field])
+                    if evidence[field] > signal_timestamp:
+                        raise ValueError("future candle evidence")
+            if scanner_premium:
+                if len(evidence) != 2 or evidence["reference_timestamp"] >= evidence["breakout_timestamp"]:
+                    raise ValueError("missing or unordered candle evidence")
+                invalid_reason = "invalid_trigger"
+                age = signal_timestamp - evidence["breakout_timestamp"]
+                trigger = data.get("trigger")
+                if trigger not in ("candle_high", "live_ltp"):
+                    raise ValueError("unknown trigger")
+                invalid_reason = "stale_signal"
+                if (trigger == "candle_high" and not 600 <= age <= 660) or (
+                    trigger == "live_ltp" and not 0 <= age <= 60
+                ):
+                    raise ValueError("stale breakout evidence")
+            invalid_reason = "invalid_price"
             order = {k: data[k] for k in (
                 "security_id", "exchange_segment", "option_symbol", "timeframe", "category")}
+            invalid_reason = "invalid_contract"
+            for field in ("option_type", "strike", "expiry", "underlying", "display_timeframe"):
+                value = data.get(field)
+                if value is not None:
+                    if not isinstance(value, (str, int, float)) or isinstance(value, bool) or (
+                        isinstance(value, float) and not math.isfinite(value)
+                    ):
+                        raise ValueError("invalid option contract metadata")
+                    order[field] = value
+            invalid_reason = "invalid_price"
             order["instrument_type"] = data.get("instrument_type") or (
                 "OPTFUT" if self._exchange(order) == "MCX" else
                 "OPTSTK" if "stock" in order["category"] else "OPTIDX")
@@ -626,20 +736,61 @@ class PaperPortfolio:
                          target_2=_number(data.get("target_2", data.get(
                              "target", data.get("target_price", entry + 2 * (entry - stop))))),
                          created_at=now, updated_at=now, signal_timestamp=signal_timestamp,
+                         detected_at=signal_timestamp, queue_received_at=queue_received_at,
+                         reference_timestamp=evidence.get("reference_timestamp"),
+                         breakout_timestamp=evidence.get("breakout_timestamp"),
                          signal_to_submit_seconds=now - signal_timestamp,
-                         expires_at=signal_timestamp + self.approval_expiry_seconds,
+                         expires_at=expires_at,
                          day=datetime.fromtimestamp(now, IST).date().isoformat(),
                          order_type="LIMIT", side="BUY", reason=None)
             intent_risk = Decimal(str(order["limit_price"])) - Decimal(str(stop))
             order.update(risk_points=float(intent_risk), risk_inr=float(intent_risk * lot))
         except (KeyError, ValueError, TypeError, ArithmeticError):
             with self._transaction("submit") as db:
-                self._audit(db, "invalid_signal", {"reason": invalid_reason})
-            return {"status": "rejected", "id": None, "reason": invalid_reason}
+                existing = self._submission(db, key)
+                if existing:
+                    return existing
+                rejection = {"status": "rejected", "id": None, "signal_key": key,
+                             "reason": invalid_reason, "queue_received_at": now}
+                for field in ("detected_at", "reference_timestamp", "breakout_timestamp",
+                              "approval_deadline", "queue_received_at"):
+                    raw = data.get(field)
+                    if field == "detected_at" and raw is None and not (
+                        data.get("source") == "scanner" and data.get("premium_strategy")
+                    ):
+                        raw = data.get("timestamp", now)
+                    try:
+                        timestamp = _epoch(raw)
+                    except (ValueError, TypeError, ArithmeticError):
+                        continue
+                    if field == "queue_received_at" and not (
+                        rejection.get("detected_at", timestamp) <= timestamp <= now
+                    ):
+                        continue
+                    rejection[field] = timestamp
+                if "detected_at" in rejection:
+                    expiry = rejection["detected_at"] + self.approval_expiry_seconds
+                    for field in ("approval_deadline", "expires_at"):
+                        try:
+                            deadline = _epoch(data[field])
+                        except (KeyError, ValueError, TypeError, ArithmeticError):
+                            continue
+                        if rejection["detected_at"] < deadline <= expiry:
+                            expiry = deadline
+                    rejection["expires_at"] = expiry
+                for field in ("security_id", "exchange_segment", "option_symbol", "instrument_type",
+                              "option_type", "strike", "expiry", "underlying"):
+                    value = data.get(field)
+                    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                        if not isinstance(value, float) or math.isfinite(value):
+                            rejection[field] = value
+                db.execute("INSERT INTO paper_rejections VALUES(?,?)", (key, json.dumps(rejection)))
+                self._event(db, "order_rejected", rejection, now)
+                return rejection
         with self._transaction("submit") as db:
-            existing = db.execute("SELECT data FROM paper_orders WHERE signal_key=?", (key,)).fetchone()
+            existing = self._submission(db, key)
             if existing:
-                return json.loads(existing["data"])
+                return existing
             daily = self._day(db, now)
             if quote is not None:
                 self._store_quote(db, self._contract(order), quote)
@@ -675,6 +826,37 @@ class PaperPortfolio:
                 self._save_order(db, order)
                 self._fill_entry(db, order, now)
             return dict(order)
+
+    @staticmethod
+    def _submission(db, key):
+        for table in ("paper_orders", "paper_rejections"):
+            row = db.execute(f"SELECT data FROM {table} WHERE signal_key=?", (key,)).fetchone()
+            if row:
+                return json.loads(row["data"])
+        return None
+
+    def submission_status(self):
+        """Read submission counts and safe account switches without delivering events."""
+        with self._connection() as db:
+            account = self._account(db)
+            counts = {row["status"]: row["count"] for row in db.execute(
+                "SELECT status, COUNT(*) AS count FROM paper_orders GROUP BY status")}
+            reasons = {}
+            for table, predicate in (("paper_orders", " WHERE status='rejected'"),
+                                     ("paper_rejections", "")):
+                for row in db.execute(f"SELECT data FROM {table}" + predicate):
+                    reason = json.loads(row["data"]).get("reason")
+                    if reason:
+                        reasons[reason] = reasons.get(reason, 0) + 1
+            return {
+                "enabled": bool(account["enabled"]),
+                "approval_required": bool(account["approval_required"]),
+                "awaiting_approval": counts.get("awaiting_approval", 0),
+                "pending": counts.get("pending", 0),
+                "rejected": counts.get("rejected", 0) + db.execute(
+                    "SELECT COUNT(*) FROM paper_rejections").fetchone()[0],
+                "rejection_reasons": reasons,
+            }
 
     def action(self, action, request_id=None, actor=None, **kwargs):
         started = time.monotonic()
@@ -1025,13 +1207,14 @@ class PaperPortfolio:
 
     @staticmethod
     def _timeframe_seconds(timeframe):
-        text = str(timeframe).lower().replace(" ", "")
-        for suffix in ("min", "m", "hour", "h"):
-            text = text.replace("-" + suffix, suffix)
-        for suffix, multiplier in (("min", 60), ("m", 60), ("hour", 3600), ("h", 3600)):
-            if text.endswith(suffix):
-                return _number(text[:-len(suffix)]) * multiplier
-        return _number(text) * 60
+        text = str(timeframe).lower().strip()
+        match = re.fullmatch(r"([1-9][0-9]*)\s*-?\s*(min|m|minute|minutes|hour|h|hours)?", text)
+        if match is None:
+            raise ValueError("unrecognized timeframe")
+        minutes = int(match[1]) * (60 if match[2] in ("hour", "h", "hours") else 1)
+        if minutes not in (1, 3, 5, 10, 15, 30, 60, 120, 240):
+            raise ValueError("unsupported timeframe")
+        return minutes * 60
 
     def _trail(self, db, position, candles, now, quote=None):
         if not position.get("trailing_enabled", True):
@@ -1204,21 +1387,69 @@ class PaperPortfolio:
             result = db.execute("INSERT OR IGNORE INTO paper_updates VALUES(?)", (str(update_id),))
             return result.rowcount == 1
 
-    def record_delivery(self, event_id, duration_ms, success):
+    def record_delivery(self, event_id, duration_ms, success, reason_code=None,
+                        http_status=None, api_error_code=None):
         """Record an adapter's actual delivery latency, including failed attempts."""
         duration = float(duration_ms)
         if not math.isfinite(duration) or duration < 0 or not isinstance(success, bool):
             raise ValueError("duration_ms must be finite/nonnegative and success boolean")
+        safe_reasons = {
+            "delivered", "delivery_failed", "notifier_error", "transport_error",
+            "http_error", "api_error", "invalid_response", "event_format_error",
+            "token_missing", "chat_missing", "chat_route_mismatch", "routing_unavailable",
+        }
+        reason = reason_code if isinstance(reason_code, str) and reason_code in safe_reasons else (
+            "delivered" if success else "delivery_failed")
+        diagnostic = {
+            "event_id": str(event_id), "duration_ms": duration, "success": success,
+            "reason_code": reason,
+            "http_status": http_status if type(http_status) is int else None,
+            "api_error_code": api_error_code if type(api_error_code) is int else None,
+        }
         with self._transaction("record_delivery", deliver=False) as db:
             db.execute("""INSERT INTO paper_deliveries
                 (event_id,timestamp,duration_ms,success) VALUES(?,?,?,?)""",
                        (str(event_id), self.clock(), duration, success))
-            self._audit(db, "notification_delivery", {
-                "event_id": str(event_id), "duration_ms": duration, "success": success})
+            self._audit(db, "notification_delivery", diagnostic)
 
-    def deliver_notifications(self):
+    def deliver_notifications(self, batch_size=50):
         """Flush the outbox explicitly when ``auto_deliver`` is disabled."""
-        self._deliver()
+        self._deliver(batch_size=batch_size)
+
+    def notification_status(self):
+        """Read retry backlog and safe delivery diagnostics without triggering sends."""
+        with self._connection() as db:
+            backlog = db.execute("""SELECT COUNT(*) AS pending, MIN(timestamp) AS oldest
+                FROM paper_outbox WHERE delivered=0""").fetchone()
+            delivered = db.execute(
+                "SELECT COUNT(*) FROM paper_outbox WHERE delivered=1").fetchone()[0]
+            attempts = db.execute("""SELECT COUNT(*) AS attempts,
+                COALESCE(SUM(success=0),0) AS failed FROM paper_deliveries""").fetchone()
+            latest = db.execute(
+                "SELECT * FROM paper_deliveries ORDER BY id DESC LIMIT 1").fetchone()
+            failure = db.execute(
+                "SELECT * FROM paper_deliveries WHERE success=0 ORDER BY id DESC LIMIT 1").fetchone()
+            def diagnostic(row):
+                if row is None:
+                    return None
+                result = dict(row)
+                audit = db.execute("""SELECT data FROM paper_audit
+                    WHERE action='notification_delivery' AND json_extract(data,'$.event_id')=?
+                    AND json_extract(data,'$.success')=? ORDER BY id DESC LIMIT 1""",
+                    (row["event_id"], row["success"])).fetchone()
+                if audit:
+                    data = json.loads(audit["data"])
+                    for key in ("reason_code", "http_status", "api_error_code"):
+                        result[key] = data.get(key)
+                return result
+            return {
+                "notifier_configured": self.notify is not None,
+                "pending": backlog["pending"], "delivered": delivered,
+                "oldest_pending_age_seconds": (
+                    max(0, self.clock() - backlog["oldest"]) if backlog["oldest"] is not None else None),
+                "attempts": attempts["attempts"], "failed_attempts": attempts["failed"],
+                "latest_delivery": diagnostic(latest), "latest_failure": diagnostic(failure),
+            }
 
     def contracts(self):
         snapshot = self.snapshot()

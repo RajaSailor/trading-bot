@@ -281,7 +281,7 @@ class SignalQueueProcessor:
             return None
         timestamp = payload.get("timestamp") or now_local_iso()
         signal_id = payload.get("signal_id") or payload.get("idempotency_key") or self._signal_id_for_payload(payload)
-        return {
+        signal = {
             "signal_id": signal_id,
             "symbol": symbol,
             "action": action,
@@ -290,6 +290,11 @@ class SignalQueueProcessor:
             "category": payload.get("category"),
             "metadata": deepcopy(payload.get("metadata", {})),
         }
+        for field in ("detected_at", "approval_deadline", "expires_at", "reference_timestamp", "breakout_timestamp"):
+            if field in payload:
+                signal[field] = deepcopy(payload[field])
+        signal["queue_received_at"] = now_local_iso()
+        return signal
 
     def validate_signal(self, signal: Dict) -> bool:
         if not signal:
