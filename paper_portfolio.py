@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import secrets
 import sqlite3
 import time
 import uuid
@@ -116,6 +117,13 @@ class PaperPortfolio:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
                     timestamp REAL NOT NULL, duration_ms REAL NOT NULL,
                     success INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_position_controls (
+                    id TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_control_messages (
+                    position_id TEXT NOT NULL, chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL, sent_at REAL NOT NULL,
+                    disabled_at REAL,
+                    PRIMARY KEY(position_id,chat_id,message_id));
             """)
         with self._transaction("initialize") as db:
             self._day(db, self.clock())
@@ -200,7 +208,7 @@ class PaperPortfolio:
                  "timestamp": datetime.fromtimestamp(now, IST).isoformat(), **data}
         db.execute("INSERT INTO paper_outbox(id,timestamp,data) VALUES(?,?,?)",
                    (event_id, now, json.dumps(event)))
-        self._audit(db, kind, data)
+        self._audit(db, kind, data, data.get("actor"))
 
     def _deliver(self):
         if self.notify is None or self._delivering:
@@ -301,10 +309,262 @@ class PaperPortfolio:
                    (order["status"], order["reserved_cash"], json.dumps(order), order["id"]))
 
     def _save_position(self, db, position):
+        row = db.execute("SELECT data FROM paper_positions WHERE id=?",
+                         (position["id"],)).fetchone()
+        previous = json.loads(row["data"]) if row else {}
+        fields = ("stop_loss", "stop_kind", "target_1", "target_2", "t1_reached",
+                  "exit_reason", "status", "force_market_exit", "custom_target_1",
+                  "custom_target_2", "stop_source")
+        changed = any(previous.get(key) != position.get(key) for key in fields)
+        changed |= previous.get("trailing_enabled", True) != position.get("trailing_enabled", True)
+        position["control_version"] = int(previous.get("control_version", 0)) + int(changed)
         if position.get("exit_reason"):
             position.setdefault("exit_requested_at", self.clock())
         db.execute("UPDATE paper_positions SET status=?,data=? WHERE id=?",
                    (position["status"], json.dumps(position), position["id"]))
+
+    def remember_control_message(self, position_id, chat_id, message_id):
+        with self._transaction("remember_control_message", deliver=False) as db:
+            db.execute("INSERT OR IGNORE INTO paper_control_messages VALUES(?,?,?,?,NULL)",
+                       (str(position_id), int(chat_id), int(message_id), self.clock()))
+
+    def control_messages(self, position_id):
+        with self._connection() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM paper_control_messages WHERE position_id=? AND disabled_at IS NULL",
+                (str(position_id),))]
+
+    def disable_control_messages(self, position_id):
+        with self._transaction("disable_control_messages", deliver=False) as db:
+            db.execute("UPDATE paper_control_messages SET disabled_at=? WHERE position_id=?",
+                       (self.clock(), str(position_id)))
+
+    def audit_control_attempt(self, actor, data):
+        with self._transaction("audit_control_attempt", deliver=False) as db:
+            self._audit(db, "position_control", {
+                key: data.get(key) for key in ("action", "position_id", "old", "new", "outcome")
+            }, actor)
+
+    @staticmethod
+    def _control_position(db, identifier):
+        row = db.execute("SELECT data FROM paper_positions WHERE id=?", (identifier,)).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def _control_price(self, position, action, value):
+        if action == "trailing":
+            if not isinstance(value, bool):
+                return None, "trailing_must_be_boolean"
+            return value, None
+        if action == "exit_market":
+            return None, None
+        try:
+            price = _number(value)
+            units = Decimal(str(price)) / Decimal(str(position["tick_size"]))
+        except (TypeError, ValueError, ArithmeticError):
+            return None, "invalid_price"
+        if units != units.to_integral_value():
+            return None, "price_not_tick_aligned"
+        if action == "sl":
+            if price < position["stop_loss"]:
+                return None, "sl_cannot_loosen"
+            if price >= position["mark_price"]:
+                return None, "sl_must_be_below_mark"
+        if action in ("target_1", "target_2"):
+            if action == "target_1" and position["t1_reached"]:
+                return None, "target_1_already_reached"
+            t1 = price if action == "target_1" else position["target_1"]
+            t2 = price if action == "target_2" else position["target_2"]
+            if not position["entry_price"] < t1 < t2:
+                return None, "targets_must_be_ordered"
+            if price <= position["mark_price"]:
+                return None, "target_must_be_above_mark"
+        return price, None
+
+    def _sync_protection(self, db, now):
+        day = self._day(db, now)
+        for position in self._positions(db):
+            quote = self._quote(db, position, now)
+            if quote is not None:
+                position.update(mark_price=float(quote["price"]), mark_timestamp=quote["timestamp"])
+                self._save_position(db, position)
+        self._risk(db, now)
+        for position in self._positions(db):
+            self._protect_position(db, position, day, now, {}, self._quote(db, position, now))
+            if position.get("exit_reason"):
+                self._exit(db, position, now)
+
+    def position_control(self, position_id, action, actor, chat_id,
+                         version=None, value=None, token=None):
+        """Persist a bounded, actor/chat-bound preview; revalidate atomically on confirmation."""
+        now, workflow, position = self.clock(), None, None
+        starts = {"sl", "target_1", "target_2", "trailing", "exit_market", "exit_limit"}
+        continuations = {"input", "digit", "preview", "confirm", "cancel"}
+        actor, action = str(actor), str(action)
+        with self._transaction("position_control") as db:
+            def result(reason=None):
+                response = {"ok": reason is None, "position": position,
+                            "action": workflow["action"] if workflow else action,
+                            "stage": workflow["stage"] if workflow else None,
+                            "value": workflow["value"] if workflow else value,
+                            "old": workflow["old"] if workflow else None,
+                            "expires_at": workflow["expires_at"] if workflow else None,
+                            "input": workflow["input"] if workflow else ""}
+                if workflow:
+                    response["token"] = workflow["token"]
+                if reason:
+                    response["reason"] = reason
+                old, new = response["old"], response["value"]
+                if position and not workflow:
+                    field = "stop_loss" if action == "sl" else (
+                        "trailing_enabled" if action == "trailing" else action)
+                    old = position.get(field, True if action == "trailing" else None)
+                if reason:
+                    candidate = value if value is not None else (
+                        workflow["input"] if workflow and action == "preview" else new)
+                    try:
+                        new = candidate if isinstance(candidate, bool) else _number(candidate)
+                    except (ValueError, TypeError, ArithmeticError):
+                        new = None
+                self._audit(db, "position_control", {
+                    "action": response["action"], "position_id": position_id,
+                    "old": old, "new": new,
+                    "outcome": reason or response["stage"] or "refreshed"}, actor)
+                return response
+
+            try:
+                chat_id = int(chat_id) if chat_id is not None else None
+            except (TypeError, ValueError, OverflowError):
+                return result("invalid_chat")
+            if token is not None:
+                row = db.execute("SELECT data FROM paper_position_controls WHERE id=?",
+                                 (str(token),)).fetchone()
+                if row is None:
+                    return result("workflow_not_found")
+                workflow = json.loads(row["data"])
+                position = self._control_position(db, workflow["position_id"])
+                if workflow["actor"] != actor:
+                    return result("actor_mismatch")
+                if workflow["chat_id"] != chat_id:
+                    return result("chat_mismatch")
+                if position_id is not None and str(position_id) != workflow["position_id"]:
+                    return result("position_mismatch")
+                position_id = workflow["position_id"]
+                if action not in continuations:
+                    return result("action_mismatch")
+                if workflow["stage"] not in ("input", "confirm"):
+                    return result("workflow_consumed")
+                if action == "cancel" and now >= workflow["expires_at"]:
+                    return result("workflow_expired")
+            elif action not in starts | {"refresh"}:
+                return result("invalid_action")
+            else:
+                position_id = str(position_id)
+                position = self._control_position(db, position_id)
+            if position is None:
+                return result("position_not_found")
+            if action == "cancel":
+                workflow["stage"] = "cancelled"
+            else:
+                self._sync_protection(db, now)
+                position = self._control_position(db, position_id)
+                if workflow and now >= workflow["expires_at"]:
+                    return result("workflow_expired")
+                if action == "refresh":
+                    if position["status"] != "open":
+                        return result("position_closed")
+                    return result()
+                if position["status"] != "open" or position.get("exit_reason"):
+                    return result("position_exiting")
+                try:
+                    current = int(position.get("control_version", 0))
+                    if ((version is not None and int(version) != current) or
+                            (workflow and workflow["version"] != current)):
+                        return result("version_mismatch")
+                except (ValueError, TypeError, OverflowError):
+                    return result("invalid_version")
+                if not self._account(db)["enabled"]:
+                    return result("practice_disabled")
+                if not self._open(position, now):
+                    return result("exchange_closed")
+                if self._quote(db, position, now) is None:
+                    return result("no_fresh_quote")
+                control = workflow["action"] if workflow else action
+                if control == "target_1" and position["t1_reached"]:
+                    return result("target_1_already_reached")
+                if workflow is None:
+                    field = "stop_loss" if action == "sl" else action
+                    old = position.get(field)
+                    if action == "trailing":
+                        old = position.get("trailing_enabled", True)
+                        if value is None:
+                            value = not old
+                    workflow = dict(token=secrets.token_hex(8), position_id=position_id,
+                                    action=action, actor=actor, chat_id=chat_id, version=current,
+                                    stage="input", value=None, old=old, input="", expires_at=now + 300)
+                if action == "digit":
+                    if workflow["stage"] != "input":
+                        return result("workflow_not_input")
+                    if value == "back":
+                        workflow["input"] = workflow["input"][:-1]
+                    elif isinstance(value, str) and len(value) == 1 and value in "0123456789.":
+                        if len(workflow["input"]) >= 16:
+                            return result("input_too_long")
+                        if value == "." and "." in workflow["input"]:
+                            return result("invalid_digit")
+                        workflow["input"] += value
+                    else:
+                        return result("invalid_digit")
+                elif action == "confirm":
+                    if workflow["stage"] != "confirm":
+                        return result("workflow_not_confirm")
+                    checked, reason = self._control_price(position, control, workflow["value"])
+                    if reason:
+                        return result(reason)
+                    if control in ("exit_market", "exit_limit"):
+                        position["exit_reason"] = "manual_close"
+                        self._save_position(db, position)
+                        self._request_exit_order(db, position, now,
+                                                 "LIMIT" if control == "exit_limit" else "MARKET", checked)
+                        self._exit(db, position, now)
+                    elif control == "trailing":
+                        position["trailing_enabled"] = checked
+                        if checked:
+                            position.pop("pending_trailing_low", None)
+                        self._save_position(db, position)
+                    else:
+                        position["stop_loss" if control == "sl" else control] = checked
+                        if control == "sl":
+                            position["stop_kind"] = ("trailing_stop" if checked > position["entry_price"]
+                                                     else "breakeven_stop" if checked == position["entry_price"]
+                                                     else position["stop_kind"])
+                            position["stop_source"] = "manual"
+                        else:
+                            position[f"custom_{control}"] = True
+                        self._save_position(db, position)
+                    workflow["stage"] = "committed"
+                    if control not in ("exit_market", "exit_limit"):
+                        kind = ("sl_updated" if control == "sl" else
+                                "trailing_updated" if control == "trailing" else "target_updated")
+                        self._event(db, kind, {
+                            **position, "action": control, "actor": actor,
+                            "old": workflow["old"], "new": checked, "outcome": "committed"}, now)
+                elif action in ("input", "preview") or value is not None or control == "exit_market":
+                    if workflow["stage"] != "input":
+                        return result("workflow_not_input")
+                    supplied = workflow["input"] if value is None else value
+                    checked, reason = self._control_price(position, control, supplied)
+                    if reason:
+                        return result(reason)
+                    if control not in ("trailing", "exit_market"):
+                        if len(str(supplied)) > 16:
+                            return result("input_too_long")
+                        workflow["input"] = str(supplied)
+                    workflow["value"] = checked
+                    workflow["stage"] = "confirm"
+            db.execute("INSERT INTO paper_position_controls VALUES(?,?) "
+                       "ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+                       (workflow["token"], json.dumps(workflow)))
+            return result()
 
     def _finish_order(self, db, order, status, reason, now):
         order.update(status=status, reason=reason, reserved_cash=0,
@@ -315,6 +575,7 @@ class PaperPortfolio:
     def submit(self, signal, quote=None):
         started = time.monotonic()
         now = self.clock()
+        invalid_reason = "invalid_signal"
         try:
             data = {**signal, **(signal.get("metadata") or {})}
             key = str(data.get("idempotency_key") or data.get("signal_id") or data.get("id") or hashlib.sha256(
@@ -349,6 +610,7 @@ class PaperPortfolio:
             if signal_timestamp > now:
                 raise ValueError("future signal")
             if now - signal_timestamp >= self.approval_expiry_seconds:
+                invalid_reason = "stale_signal"
                 raise ValueError("stale_signal")
             if str(data.get("side", data.get("action", "BUY"))).upper() in {"SELL", "SHORT"}:
                 raise ValueError("only long option BUY entries are supported")
@@ -370,10 +632,10 @@ class PaperPortfolio:
                          order_type="LIMIT", side="BUY", reason=None)
             intent_risk = Decimal(str(order["limit_price"])) - Decimal(str(stop))
             order.update(risk_points=float(intent_risk), risk_inr=float(intent_risk * lot))
-        except (KeyError, ValueError, TypeError, OverflowError) as exc:
+        except (KeyError, ValueError, TypeError, ArithmeticError):
             with self._transaction("submit") as db:
-                self._audit(db, "invalid_signal", {"reason": str(exc)})
-            return {"status": "rejected", "id": None, "reason": str(exc)}
+                self._audit(db, "invalid_signal", {"reason": invalid_reason})
+            return {"status": "rejected", "id": None, "reason": invalid_reason}
         with self._transaction("submit") as db:
             existing = db.execute("SELECT data FROM paper_orders WHERE signal_key=?", (key,)).fetchone()
             if existing:
@@ -477,8 +739,8 @@ class PaperPortfolio:
                 if order_type == "LIMIT":
                     limit_price = _round_tick(
                         _number(kwargs.get("limit_price")), position["tick_size"], "BUY")
-            except (TypeError, ValueError) as exc:
-                return {"status": "rejected", "reason": str(exc), "id": request_id}
+            except (TypeError, ValueError, ArithmeticError):
+                return {"status": "rejected", "reason": "invalid_exit_order", "id": request_id}
             position["exit_reason"] = position.get("exit_reason") or "manual_close"
             self._save_position(db, position)
             exit_order = self._request_exit_order(db, position, now, order_type, limit_price)
@@ -506,13 +768,14 @@ class PaperPortfolio:
                                     order["tick_size"], "BUY")
                 stop = _number(kwargs.get("stop_loss", order["stop_loss"]))
                 if stop >= limit:
-                    raise ValueError("stop_loss must be below entry")
+                    return {"status": "rejected", "id": request_id,
+                            "reason": "stop_loss must be below entry"}
                 reserve = _round_tick(limit * 1.01, order["tick_size"], "BUY") * order["quantity"]
                 other = sum(o["reserved_cash"] for o in self._orders(db, True) if o["id"] != request_id)
                 if reserve + other > account["cash"]:
-                    raise ValueError("insufficient_cash")
-            except (ValueError, TypeError) as exc:
-                return {"status": "rejected", "id": request_id, "reason": str(exc)}
+                    return {"status": "rejected", "id": request_id, "reason": "insufficient_cash"}
+            except (ValueError, TypeError, ArithmeticError):
+                return {"status": "rejected", "id": request_id, "reason": "invalid_modification"}
             risk = Decimal(str(limit)) - Decimal(str(stop))
             order.update(limit_price=limit, stop_loss=stop, initial_stop_loss=stop,
                          risk_points=float(risk), risk_inr=float(risk * order["quantity"]),
@@ -586,6 +849,7 @@ class PaperPortfolio:
                     "mark_price": float(quote["price"]), "opened_at": now,
                     "day_opening_price": price, "valuation_day": order["day"],
                     "t1_reached": False, "stop_kind": "initial_stop",
+                    "control_version": 0, "trailing_enabled": True,
                     "last_candle_end": 0, "exit_reason": None}
         db.execute("INSERT INTO paper_positions VALUES(?,?,?)",
                    (position["id"], "open", json.dumps(position)))
@@ -770,6 +1034,8 @@ class PaperPortfolio:
         return _number(text) * 60
 
     def _trail(self, db, position, candles, now, quote=None):
+        if not position.get("trailing_enabled", True):
+            return
         key = (*self._contract(position), position["timeframe"])
         values = candles.get(key, candles.get(self._contract(position), []))
         if isinstance(values, dict):
@@ -806,10 +1072,35 @@ class PaperPortfolio:
             position.pop("pending_trailing_low", None)
             if float(quote["price"]) <= low:
                 position.update(exit_reason="trailing_stop", exit_trigger_price=low, force_market_exit=True)
-                self._event(db, "trailing_breach", {"id": position["id"], "reference_low": low}, now)
+                self._save_position(db, position)
+                self._event(db, "trailing_breach", {**position, "reference_low": low}, now)
             else:
-                position.update(stop_loss=low, stop_kind="trailing_stop")
-                self._event(db, "stop_tightened", {"id": position["id"], "stop_loss": low}, now)
+                position.update(stop_loss=low, stop_kind="trailing_stop", stop_source="completed_candle")
+                self._save_position(db, position)
+                self._event(db, "stop_tightened", position, now)
+
+    def _protect_position(self, db, position, day, now, candles, quote):
+        if position["day"] != day["day"] or self._cutoff(position, now):
+            if position.get("exit_reason") not in ("daily_profit_limit", "daily_loss_limit"):
+                position["exit_reason"] = "time_cutoff"
+            position["force_market_exit"] = True
+        if position.get("exit_reason") in (None, "manual_close") and quote is not None:
+            price = float(quote["price"])
+            if price <= position["stop_loss"]:
+                position.update(exit_reason=position["stop_kind"], force_market_exit=True)
+            elif price >= position["target_1"] and not position["t1_reached"]:
+                position.update(t1_reached=True, t1_reached_at=now,
+                                stop_loss=max(position["stop_loss"], position["entry_price"]))
+                if position["stop_loss"] == position["entry_price"]:
+                    position["stop_kind"] = "breakeven_stop"
+                    position["stop_source"] = "target_1"
+                self._save_position(db, position)
+                self._event(db, "target_1", position, now)
+            if position.get("exit_reason") in (None, "manual_close") and price >= position["target_2"]:
+                position.update(exit_reason="target_2", force_market_exit=True)
+        if position.get("exit_reason") in (None, "manual_close"):
+            self._trail(db, position, candles, now, quote)
+        self._save_position(db, position)
 
     def tick(self, quotes, candles=None):
         now = self.clock()
@@ -826,26 +1117,7 @@ class PaperPortfolio:
             self._risk(db, now)
             for position in self._positions(db):
                 quote = self._quote(db, position, now)
-                if position["day"] != day["day"] or self._cutoff(position, now):
-                    if position.get("exit_reason") not in ("daily_profit_limit", "daily_loss_limit"):
-                        position["exit_reason"] = "time_cutoff"
-                    position["force_market_exit"] = True
-                if position.get("exit_reason") in (None, "manual_close") and quote is not None:
-                    price = float(quote["price"])
-                    if price <= position["stop_loss"]:
-                        position.update(exit_reason=position["stop_kind"], force_market_exit=True)
-                    elif price >= position["target_1"] and not position["t1_reached"]:
-                        position.update(t1_reached=True, t1_reached_at=now,
-                                        stop_loss=max(position["stop_loss"], position["entry_price"]))
-                        if position["stop_loss"] == position["entry_price"]:
-                            position["stop_kind"] = "breakeven_stop"
-                        self._event(db, "target_1", {"id": position["id"], "quantity": position["quantity"],
-                                                   "stop_loss": position["stop_loss"]}, now)
-                    if position.get("exit_reason") in (None, "manual_close") and price >= position["target_2"]:
-                        position.update(exit_reason="target_2", force_market_exit=True)
-                if position.get("exit_reason") in (None, "manual_close"):
-                    self._trail(db, position, candles or {}, now, quote)
-                self._save_position(db, position)
+                self._protect_position(db, position, day, now, candles or {}, quote)
             for position in self._positions(db):
                 if position.get("exit_reason"):
                     self._exit(db, position, now)
