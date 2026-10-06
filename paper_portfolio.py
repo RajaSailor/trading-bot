@@ -603,10 +603,11 @@ class PaperPortfolio:
             json.dumps(signal, sort_keys=True, default=str).encode()).hexdigest()
         data = {}
         if isinstance(signal, dict):
-            metadata = signal.get("metadata") or {}
+            metadata = signal.get("metadata", {})
+            data = dict(signal)
             if isinstance(metadata, dict):
-                data = {**signal, **metadata}
-                key = str(data.get("idempotency_key") or data.get("signal_id") or data.get("id") or key)
+                data.update(metadata)
+            key = str(data.get("idempotency_key") or data.get("signal_id") or data.get("id") or key)
         with self._connection() as db:
             existing = self._submission(db, key)
         if existing:
@@ -617,6 +618,9 @@ class PaperPortfolio:
         try:
             if not data:
                 raise ValueError("invalid signal mapping")
+            invalid_reason = "invalid_metadata"
+            if not isinstance(metadata, dict):
+                raise ValueError("invalid metadata mapping")
             invalid_reason = "missing_lot_size" if data.get("lot_size") is None else "invalid_lot_size"
             lot = data["lot_size"]
             if isinstance(lot, bool) or not isinstance(lot, (int, float)) or (
