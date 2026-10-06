@@ -290,7 +290,7 @@ class SignalQueueProcessor:
             "category": payload.get("category"),
             "metadata": deepcopy(payload.get("metadata", {})),
         }
-        for field in ("detected_at", "approval_deadline", "reference_timestamp", "breakout_timestamp"):
+        for field in ("detected_at", "approval_deadline", "expires_at", "reference_timestamp", "breakout_timestamp"):
             if field in payload:
                 signal[field] = deepcopy(payload[field])
         signal["queue_received_at"] = now_local_iso()

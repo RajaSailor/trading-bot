@@ -268,3 +268,20 @@ def test_malformed_metadata_at_main_boundary_emits_durable_rejection(pipeline, m
     receipts = [m for m in sent_messages(p) if "#REJECTED" in m["text"]]
     assert len(receipts) == 1
     assert "malformed-key" in receipts[0]["text"] and "invalid_metadata" in receipts[0]["text"]
+
+
+@pytest.mark.parametrize("deadline_field", ["expires_at", "approval_deadline"])
+def test_main_queue_preserves_shorter_original_deadline(pipeline, monkeypatch, deadline_field):
+    p = pipeline
+    assert scan(p) == 2
+    payload = dict(p.queue._queue[0])
+    payload[deadline_field] = p.clock.now + 20
+    p.queue = SignalQueueProcessor()
+    p.worker.queue_processor = p.queue
+    monkeypatch.setattr(p.main, "signal_queue_processor", p.queue)
+    assert p.main._queue_signal_from_payload(payload, False)[1] is None
+    assert p.queue._queue[0][deadline_field] == p.clock.now + 20
+    p.clock.now += 25
+    assert p.worker.process_one()
+    assert p.worker.status()["last_reason"] == "stale_signal"
+    assert not p.portfolio.snapshot()["positions"]

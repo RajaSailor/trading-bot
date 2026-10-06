@@ -143,7 +143,7 @@ cutoffs and unresolved-exit blocks still apply.
    contract and a fixed reason, not a fabricated trade/fill ID. Re-submit of the
    same key does not create another business rejection or approval. Examples:
    `missing_lot_size`, `missing_tick_size`, `missing_security_id`,
-   `invalid_intent`, `invalid_side`, `invalid_timeframe`, `invalid_timestamp`,
+   `invalid_metadata`, `invalid_intent`, `invalid_side`, `invalid_timeframe`, `invalid_timestamp`,
    `invalid_expiry`, `stale_signal`, `no_price`, plus existing cash/risk/cutoff
    reasons. Correct upstream metadata/quote availability for **new** signals;
    rejected or expired evidence must not be made fresh.
