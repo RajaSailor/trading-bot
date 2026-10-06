@@ -871,10 +871,22 @@ to select real listed strikes; strategy indicators are never calculated from spo
 - The live quote feed provides timestamped LTP, not forming OHLCV/volume. Live
   close-based checks therefore use a provisional candle built from observed
   fresh LTP ticks; it is a snapshot, not a repeated appended bar. Live VWAP uses
-  only completed real-volume evidence, and the alert shows both indicator
-  evidence time and VWAP as-of time. This is a disclosed approximation, not
-  inferred live cumulative volume. The service alert includes the five values
-  and pass marks, e.g. `VWAP ✓ | RSI14 ✓ | EMA9 ✓ | MACD ✓ | PSAR ✓`.
+  only completed real-volume evidence, and the alert shows the indicator-bar,
+  fresh-LTP, and VWAP as-of times. This is a disclosed approximation, not
+  inferred live cumulative volume. The service alert includes each value and
+  pass mark:
+
+  ```text
+  🧭 PREMIUM CONFIRMATIONS
+  ✓ VWAP: 120.50 / 110.25
+  ✓ RSI14: 61.30 / 58.10
+  ✓ EMA9: 120.50 / 118.40
+  ✓ MACD: 2.50 / 1.80
+  ✓ PSAR: 115.20 / 120.50
+  Evidence: Live provisional close; VWAP uses completed volume
+  Fresh option LTP as of 05-Oct-2026 10:35:03 IST
+  VWAP volume as of 05-Oct-2026 10:25:00 IST
+  ```
 - Filters narrow signal eligibility; they are **not a guarantee of accuracy or
   profit**. Keep practice mode enabled and evaluate with paper trading/backtests.
   See [`docs/SCANNER_RUNBOOK.md`](docs/SCANNER_RUNBOOK.md) for detailed session,

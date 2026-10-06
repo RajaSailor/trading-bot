@@ -221,6 +221,11 @@ class BreakoutFlowTests(_Base):
         self.assertNotIn(102, [call.args[0]["security_id"] for call in
                                self.screener.fetcher.fetch_option_candles.call_args_list])
         self.assertEqual("ITM+1", self.screener._monitored[101]["contract"]["strike_band"])
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 109, "timestamp": MONDAY_MORNING.timestamp()}
+        }
+        self.screener.live_check_once(MONDAY_MORNING)
+        self.assertEqual({"NSE_FNO": [101]}, self.data_manager.fetch_quotes.call_args.args[0])
 
     def test_stale_live_quote_cannot_trigger(self):
         self._prime({101: [_candle(0, 100, 110, 95, 98)]})

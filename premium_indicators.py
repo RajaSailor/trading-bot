@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
@@ -21,6 +21,13 @@ MACD_SLOW = 26
 MACD_SIGNAL = 9
 PSAR_STEP = 0.02
 PSAR_MAXIMUM = 0.2
+REQUIRED_CONFIRMATIONS = (
+    "above_vwap",
+    "rsi14_above_30_and_rising",
+    "above_ema9",
+    "macd_above_signal",
+    "psar_below_premium",
+)
 
 
 class IndicatorDataError(ValueError):
@@ -222,12 +229,21 @@ def calculate_confirmations(
     exchange = exchange_for_instrument(instrument)
     session_day = now.date()
     windows = _exchange_session(exchange, session_day)
-    session_starts = [datetime.combine(session_day, start, IST).timestamp() for start, _ in windows]
+    session_ranges = [
+        (
+            datetime.combine(session_day, start, IST).timestamp(),
+            datetime.combine(session_day, end, IST).timestamp(),
+        )
+        for start, end in windows
+    ]
+    session_starts = [start for start, _ in session_ranges]
     session_start = min(session_starts) if session_starts else None
     session_bars = [
         candle for candle in closed
         if session_start is not None
-        and session_start <= candle["_timestamp_epoch"] <= now.timestamp()
+        and any(
+            start <= candle["_timestamp_epoch"] <= end for start, end in session_ranges
+        )
         and datetime.fromtimestamp(candle["_timestamp_epoch"], IST).date() == session_day
     ]
     volume_total = sum(candle["volume"] for candle in session_bars)
@@ -245,8 +261,32 @@ def calculate_confirmations(
     evidence_mode = "completed"
     if provisional_candle is not None:
         provisional = dict(provisional_candle)
+        try:
+            provisional_timestamp = _epoch(provisional["timestamp"])
+            provisional_values = {
+                key: float(provisional[key]) for key in ("open", "high", "low", "close")
+            }
+        except (KeyError, TypeError, ValueError, OverflowError, OSError) as exc:
+            raise IndicatorDataError("invalid_provisional_candle") from exc
+        if (
+            provisional_timestamp > now.timestamp()
+            or not all(math.isfinite(value) for value in provisional_values.values())
+            or min(provisional_values.values()) <= 0
+            or provisional_values["high"] < max(provisional_values.values())
+            or provisional_values["low"] > min(provisional_values.values())
+        ):
+            raise IndicatorDataError("invalid_provisional_candle")
+        provisional.update(provisional_values)
         provisional["volume"] = 0.0
-        provisional["_timestamp_epoch"] = _epoch(provisional["timestamp"])
+        provisional["_timestamp_epoch"] = provisional_timestamp
+        if provisional.get("observed_at") is not None:
+            try:
+                observed_at = _epoch(provisional["observed_at"])
+            except (TypeError, ValueError, OverflowError, OSError) as exc:
+                raise IndicatorDataError("invalid_provisional_candle") from exc
+            if observed_at > now.timestamp():
+                raise IndicatorDataError("invalid_provisional_candle")
+            provisional["observed_at"] = observed_at
         price_bars.append(provisional)
         evidence_mode = "live_provisional_ltp"
     closes = [candle["close"] for candle in price_bars]
@@ -268,7 +308,7 @@ def calculate_confirmations(
         "macd_signal9": macd_signal[current_index],
         "psar_0_02_0_2": sar_values[current_index],
     }
-    if any(value is None or not math.isfinite(float(value)) for value in values.values()):
+    if any(value is None for value in values.values()):
         raise IndicatorDataError("indicator_warmup")
     if not all(math.isfinite(float(value)) for value in values.values()):
         raise IndicatorDataError("invalid_indicator")
@@ -283,5 +323,10 @@ def calculate_confirmations(
         ).isoformat(timespec="seconds"),
         "session_date": session_day.isoformat(),
         "vwap_volume": round(volume_total, 6),
+        "live_quote_as_of": (
+            datetime.fromtimestamp(price_bars[-1]["observed_at"], IST).isoformat(timespec="seconds")
+            if evidence_mode == "live_provisional_ltp" and price_bars[-1].get("observed_at") is not None
+            else None
+        ),
         "ready": all(passed.values()),
     }

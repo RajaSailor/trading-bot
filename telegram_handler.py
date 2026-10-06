@@ -170,6 +170,10 @@ def format_option_breakout_alert(
         lines.append(
             f"Evidence: {esc(mode)} | indicators {esc(format_ist_timestamp(confirmations.get('indicator_as_of'), True))}"
         )
+        if live and confirmations.get("live_quote_as_of"):
+            lines.append(
+                f"Fresh option LTP as of {esc(format_ist_timestamp(confirmations.get('live_quote_as_of'), True))}"
+            )
         lines.append(f"VWAP volume as of {esc(format_ist_timestamp(confirmations.get('vwap_as_of'), True))}")
     if practice_mode:
         lines.append("🧪 PRACTICE MODE: alert only, no live order placed")

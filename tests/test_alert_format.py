@@ -218,6 +218,7 @@ class AlertFormatTests(unittest.TestCase):
             "evidence_mode": "live_provisional_ltp",
             "indicator_as_of": "2026-10-05T10:35:00+05:30",
             "vwap_as_of": "2026-10-05T10:25:00+05:30",
+            "live_quote_as_of": "2026-10-05T10:35:03+05:30",
         }
         message = SignalNotifier(_Handler()).format_strategy_signal(
             _queue_signal(indicator_confirmations=confirmations)
@@ -228,6 +229,7 @@ class AlertFormatTests(unittest.TestCase):
         self.assertIn("Live provisional close; VWAP uses completed volume", message)
         self.assertIn("05-Oct-2026 10:35:00 IST", message)
         self.assertIn("05-Oct-2026 10:25:00 IST", message)
+        self.assertIn("Fresh option LTP as of 05-Oct-2026 10:35:03 IST", message)
 
     def test_screener_payload_feeds_formatter(self):
         from types import SimpleNamespace

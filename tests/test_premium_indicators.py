@@ -102,6 +102,7 @@ def test_live_snapshot_is_pure_and_keeps_vwap_on_real_completed_volume():
     provisional = {
         "timestamp": datetime(2026, 10, 5, 10, 25, tzinfo=IST).timestamp(),
         "open": 112, "high": 114, "low": 111, "close": 113,
+        "observed_at": datetime(2026, 10, 5, 10, 31, tzinfo=IST).timestamp(),
     }
     first = calculate_confirmations(candles, NOW, INSTRUMENT, provisional)
     second = calculate_confirmations(candles, NOW, INSTRUMENT, provisional)
@@ -110,7 +111,23 @@ def test_live_snapshot_is_pure_and_keeps_vwap_on_real_completed_volume():
     assert first["values"]["premium"] == 113
     assert first["values"]["rsi14"] > first["values"]["rsi14_previous"]
     assert first["vwap_volume"] == 700
+    assert first["live_quote_as_of"] == "2026-10-05T10:31:00+05:30"
     assert len(candles) == 45
+
+
+def test_invalid_or_future_provisional_live_candle_fails_closed():
+    candles = passing_candles()
+    provisional = {
+        "timestamp": datetime(2026, 10, 5, 10, 25, tzinfo=IST).timestamp(),
+        "open": 112, "high": 114, "low": 111, "close": float("nan"),
+        "observed_at": NOW.timestamp(),
+    }
+    with pytest.raises(IndicatorDataError, match="invalid_provisional_candle"):
+        calculate_confirmations(candles, NOW, INSTRUMENT, provisional)
+    provisional["close"] = 113
+    provisional["timestamp"] = (NOW + timedelta(seconds=1)).timestamp()
+    with pytest.raises(IndicatorDataError, match="invalid_provisional_candle"):
+        calculate_confirmations(candles, NOW, INSTRUMENT, provisional)
 
 
 @pytest.mark.parametrize(
