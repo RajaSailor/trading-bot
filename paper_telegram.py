@@ -140,7 +140,22 @@ def format_event(kind, payload, timestamp=None):
         tags += (" #STOP #PROTECTION #SL_UPDATE" if reason == "trailing_stop"
                  and payload.get("stop_source") == "manual" else " " + reason_tags[reason])
     if kind in headings or kind == "exit_filled":
-        lines = position_lines(payload)
+        if kind == "order_rejected" and not payload.get("id"):
+            lines = [f"Signal key: {payload.get('signal_key', '—')}",
+                     "No paper order or position was created."]
+            for label, keys in (
+                ("Contract", ("option_symbol", "symbol")),
+                ("Exchange", ("exchange_segment",)),
+                ("Security ID", ("security_id",)),
+                ("Expiry", ("expiry",)), ("Strike", ("strike",)),
+                ("Option", ("option_type",)),
+            ):
+                value = next((payload[key] for key in keys
+                              if payload.get(key) is not None), None)
+                if value is not None:
+                    lines.append(f"{label}: {value}")
+        else:
+            lines = position_lines(payload)
         if kind in {"entry_filled", "exit_filled"}:
             entry = Decimal(str(payload.get("entry_price", 0)))
             exit_price = Decimal(str(payload.get("exit_price", entry)))
@@ -208,22 +223,100 @@ class PaperTelegramControl:
         self.webhook_secret = (os.getenv("PAPER_TELEGRAM_WEBHOOK_SECRET", "")
                                if webhook_secret is None else webhook_secret)
         self.last_delivery = None
+        self.last_api_status = None
 
-    def _api(self, method, payload):
+    def readiness_status(self):
+        """Report configuration presence without returning credentials or IDs."""
+        token_configured, route_matches = False, False
+        route_available = True
         try:
             token, routed_chat = self.telegram_handler._get_bot_for_category("trade_control")
-            if not token or not self.chat_id or int(routed_chat) != self.chat_id:
+            token_configured = isinstance(token, str) and bool(token.strip())
+            route_matches = bool(self.chat_id) and int(routed_chat) == self.chat_id
+        except Exception:
+            route_available = False
+        secret_configured = isinstance(self.webhook_secret, str) and len(self.webhook_secret) >= 32
+        outbound_reasons = []
+        if not route_available:
+            outbound_reasons.append("routing_unavailable")
+        if not token_configured:
+            outbound_reasons.append("token_missing")
+        if not self.chat_id:
+            outbound_reasons.append("chat_missing")
+        elif route_available and not route_matches:
+            outbound_reasons.append("chat_route_mismatch")
+        inbound_reasons = []
+        if self.chat_id is None:
+            inbound_reasons.append("chat_missing")
+        if not self.allowed_user_ids:
+            inbound_reasons.append("allowlist_missing")
+        if not secret_configured:
+            inbound_reasons.append("webhook_secret_missing_or_invalid")
+        return {
+            "outbound_ready": not outbound_reasons,
+            "inbound_ready": not inbound_reasons,
+            "token_configured": token_configured,
+            "chat_configured": bool(self.chat_id),
+            "chat_route_matches": route_matches,
+            "allowlist_configured": bool(self.allowed_user_ids),
+            "webhook_secret_configured": secret_configured,
+            "outbound_reasons": outbound_reasons,
+            "inbound_reasons": inbound_reasons,
+            "last_api_status": (
+                dict(self.last_api_status) if self.last_api_status is not None else None),
+            "last_delivery": (
+                {key: self.last_delivery.get(key) for key in (
+                    "duration_ms", "success", "reason_code", "http_status", "api_error_code")}
+                if self.last_delivery is not None else None),
+        }
+
+    def _api(self, method, payload):
+        self.last_api_status = {"reason_code": "routing_unavailable",
+                                "http_status": None, "api_error_code": None}
+        try:
+            token, routed_chat = self.telegram_handler._get_bot_for_category("trade_control")
+            if not isinstance(token, str) or not token.strip():
+                self.last_api_status["reason_code"] = "token_missing"
                 return False
+            if not self.chat_id:
+                self.last_api_status["reason_code"] = "chat_missing"
+                return False
+            if int(routed_chat) != self.chat_id:
+                self.last_api_status["reason_code"] = "chat_route_mismatch"
+                return False
+            self.last_api_status["reason_code"] = "transport_error"
             session_factory = getattr(self.telegram_handler, "_http_session", None)
             transport = session_factory() if callable(session_factory) else requests
             response = transport.post(
                 f"https://api.telegram.org/bot{token}/{method}",
                 json=payload, timeout=10,
             )
-            if response.status_code != 200:
+            status = response.status_code
+            self.last_api_status["http_status"] = status if type(status) is int else None
+            if status != 200:
+                self.last_api_status["reason_code"] = "http_error"
+                try:
+                    body = response.json()
+                    code = body.get("error_code") if isinstance(body, dict) else None
+                    self.last_api_status["api_error_code"] = code if type(code) is int else None
+                except Exception:
+                    pass
                 return False
-            body = response.json()
-            return (body.get("result") or True) if body.get("ok") is True else False
+            try:
+                body = response.json()
+            except Exception:
+                self.last_api_status["reason_code"] = "invalid_response"
+                return False
+            if not isinstance(body, dict):
+                self.last_api_status["reason_code"] = "invalid_response"
+                return False
+            if body.get("ok") is not True:
+                self.last_api_status["reason_code"] = "api_error"
+                code = body.get("error_code")
+                self.last_api_status["api_error_code"] = code if type(code) is int else None
+                return False
+            self.last_api_status["reason_code"] = "delivered"
+            return body.get("result") or True
         except Exception:
             # Transport exceptions may contain the token-bearing URL; never log them.
             return False
@@ -356,6 +449,8 @@ class PaperTelegramControl:
         """
         started = time.monotonic()
         success = False
+        self.last_api_status = None
+        failure_status = None
         try:
             kind = str(event.get("type", event.get("kind", event.get("event", "event"))))
             payload = event.get("payload", event.get("data", event))
@@ -388,6 +483,8 @@ class PaperTelegramControl:
             success = self._send(messages, buttons, identifier if not needs_approval else None)
             return success
         except Exception:
+            failure_status = {"reason_code": "event_format_error",
+                              "http_status": None, "api_error_code": None}
             return False
         finally:
             self.last_delivery = {
@@ -395,6 +492,9 @@ class PaperTelegramControl:
                              if isinstance(event, dict) else None),
                 "duration_ms": (time.monotonic() - started) * 1000,
                 "success": success,
+                **(failure_status or self.last_api_status or {
+                    "reason_code": "delivered" if success else "delivery_failed",
+                    "http_status": None, "api_error_code": None}),
             }
             recorder = getattr(self.engine, "record_delivery", None)
             if callable(recorder) and self.last_delivery["event_id"] is not None:

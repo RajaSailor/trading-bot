@@ -479,6 +479,127 @@ def test_optional_delivery_hook_failure_does_not_mask_sent_message(control):
     assert control.send_event({"event_id": "e1", "type": "order_pending", "id": "s1"})
 
 
+class FakeResponse:
+    def __init__(self, status=200, body=None):
+        self.status_code = status
+        self.body = {"ok": True} if body is None else body
+
+    def json(self):
+        if isinstance(self.body, Exception):
+            raise self.body
+        return self.body
+
+
+class FakeTransport:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.posts = []
+
+    def post(self, url, **kwargs):
+        self.posts.append((url, kwargs))
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+@pytest.mark.parametrize("response,reason,http,code", [
+    (RuntimeError("private-token https://api.telegram.org/botprivate-token/private"),
+     "transport_error", None, None),
+    (FakeResponse(503, {"description": "private-token"}), "http_error", 503, None),
+    (FakeResponse(400, {"error_code": 400, "description": "private-token"}),
+     "http_error", 400, 400),
+    (FakeResponse(body={"ok": False, "error_code": 429,
+                        "description": "private-token arbitrary secret"}),
+     "api_error", 200, 429),
+    (FakeResponse(body={"ok": False, "error_code": "private-token"}),
+     "api_error", 200, None),
+    (FakeResponse(body=ValueError("private-token")), "invalid_response", 200, None),
+    (FakeResponse(body=["private-token"]), "invalid_response", 200, None),
+])
+def test_fake_http_failures_expose_only_safe_codes(control, response, reason, http, code, caplog):
+    transport = FakeTransport([response])
+    control.telegram_handler._http_session.return_value = transport
+    assert not control.send_event({"event_id": "e1", "type": "order_pending", "id": "s1"})
+    diagnostic = control.last_delivery
+    assert diagnostic["reason_code"] == reason
+    assert diagnostic["http_status"] == http
+    assert diagnostic["api_error_code"] == code
+    assert "private-token" not in str(diagnostic) + caplog.text
+    assert "https://" not in str(diagnostic)
+    assert transport.posts[0][1]["timeout"] == 10
+
+
+def test_readiness_distinguishes_outbound_and_inbound_configuration(control):
+    assert control.readiness_status()["outbound_ready"]
+    assert control.readiness_status()["inbound_ready"]
+    control.allowed_user_ids = set()
+    control.webhook_secret = ""
+    readiness = control.readiness_status()
+    assert readiness["outbound_ready"] and not readiness["inbound_ready"]
+    assert readiness["inbound_reasons"] == [
+        "allowlist_missing", "webhook_secret_missing_or_invalid"]
+    assert control.handle_update(update(), SECRET)[1] == 403
+    control.allowed_user_ids = {42}
+    control.webhook_secret = SECRET
+    control.telegram_handler._get_bot_for_category.return_value = ("", -100)
+    readiness = control.readiness_status()
+    assert readiness["inbound_ready"] and not readiness["outbound_ready"]
+    assert readiness["outbound_reasons"] == ["token_missing"]
+    assert SECRET not in str(readiness) and "-100" not in str(readiness)
+
+
+def test_missing_route_and_chat_are_diagnosed_without_secret_leaks(control):
+    control.chat_id = None
+    status = control.readiness_status()
+    assert "chat_missing" in status["outbound_reasons"]
+    assert "chat_missing" in status["inbound_reasons"]
+    control.chat_id = -100
+    control.telegram_handler._get_bot_for_category.side_effect = RuntimeError("private-token")
+    status = control.readiness_status()
+    assert "routing_unavailable" in status["outbound_reasons"]
+    assert not control.send_event({"type": "order_pending", "id": "s1"})
+    assert control.last_delivery["reason_code"] == "routing_unavailable"
+    assert "private-token" not in str(status) + str(control.last_delivery)
+
+
+def test_readiness_includes_actionable_delivery_failure_without_event_or_chat_ids(control):
+    assert control.readiness_status()["last_delivery"] is None
+    assert control.readiness_status()["last_api_status"] is None
+    control.telegram_handler._http_session.return_value = FakeTransport([
+        FakeResponse(403, {"error_code": 403, "description": "private-token secret-url"})])
+    assert not control.send_event({
+        "event_id": "private-correlation-id", "type": "order_pending", "id": "private-order-id"})
+    status = control.readiness_status()
+    assert status["outbound_ready"]
+    assert status["last_api_status"] == {
+        "reason_code": "http_error", "http_status": 403, "api_error_code": 403}
+    assert status["last_delivery"]["success"] is False
+    assert status["last_delivery"]["reason_code"] == "http_error"
+    assert status["last_delivery"]["duration_ms"] >= 0
+    assert "event_id" not in status["last_delivery"]
+    for private in ("private-token", "secret-url", "private-correlation-id", "private-order-id", "-100"):
+        assert private not in str(status)
+
+
+def test_unpersisted_rejection_has_exact_correlation_no_fake_position_or_buttons(control):
+    assert control.send_event({
+        "event_id": "e1", "type": "order_rejected", "id": None,
+        "signal_key": "NSE_FNO:123:5m:2026-10-05T10:00:00",
+        "option_symbol": "NIFTY <CE>", "security_id": 123,
+        "exchange_segment": "NSE_FNO", "reason": "invalid_stop",
+    })
+    payload = sent_messages(control)[-1]
+    assert "#PAPER #REJECTED" in payload["text"]
+    assert "Signal key: NSE_FNO:123:5m:2026-10-05T10:00:00" in payload["text"]
+    assert "Contract: NIFTY &lt;CE&gt;" in payload["text"]
+    assert "Reason: invalid_stop" in payload["text"]
+    assert "Position ID:" not in payload["text"]
+    assert "Effective SL:" not in payload["text"]
+    assert "Expiry:" not in payload["text"]
+    assert "reply_markup" not in payload
+
+
 def open_position(**changes):
     return {"id": "a" * 32, "status": "open", "option_symbol": "NIFTY <CE>",
             "security_id": 123, "exchange_segment": "NSE_FNO", "lots": 1,

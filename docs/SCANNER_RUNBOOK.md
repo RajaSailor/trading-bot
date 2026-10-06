@@ -45,8 +45,8 @@ Flask app, including `/health`, keeps running.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PRACTICE_MODE` | `true` | Alerts only, no real orders. Keep `true` for validation. |
-| `AUTO_TRADING_ENABLED` | `false` | Ignored while `PRACTICE_MODE=true`. |
+| `PRACTICE_MODE` | `true` | Persistent simulated portfolio, no real orders. Main enforces practice mode. |
+| `AUTO_TRADING_ENABLED` | `false` | Main disables live auto-trading regardless of this value. Keep `false`. |
 | `ENABLE_MARKET_SCANNER` | `false` | Set `true` to run the scanner (also needs `ACCESS_TOKEN`). |
 | `ACCESS_TOKEN` | – | Dhan access token (candles, LTP). |
 | `DHAN_CLIENT_ID` (or `API_KEY`) | – | Dhan client id, required by the LTP endpoint used for live triggers. |
@@ -79,8 +79,113 @@ Flask app, including `/health`, keeps running.
    against the red candle on the Dhan chart.
 4. Latency: `⏱️ Latency <stage> (n=..): p50/p95/p99` log lines report internal timings
    from price receipt to evaluate, queue and Telegram send start.
-5. Only after several sessions of correct alerts consider changing
-   `PRACTICE_MODE`.
+5. Verify the paper approval pipeline below. Do not enable live trading as a
+   workaround for missing approvals.
+
+## Persistent paper approval pipeline
+
+Service alerts describe a **strategy observation**, not an accepted entry or fill.
+The independent flow is scanner → queue → fresh shared contract quotes →
+persistent portfolio validation → durable outbox → trade-control Telegram receipt.
+Both BUY CALL (CE) and BUY PUT (PE) are **long BUY** option entries. Explicit
+SELL/SHORT/EXIT intents are never rewritten into BUY. Position exits use the
+existing authorized close/position controls.
+
+Execution metadata uses `10min`; `10-MINUTE BREAKOUT` is presentation only.
+Reference and breakout timestamps remain candle/trigger evidence. `detected_at`
+is the first actual evaluation time, `queue_received_at` is queue receipt, and
+`created_at` is portfolio submission. The approval deadline is at most 60 seconds
+after original detection by default—not 60 seconds after the candle's start or
+the worker's next retry. Submit, approval and simulated fill enforce it.
+`/pending`, duplicate requests, restart and retries do not extend it.
+
+Only latest completed-candle breakouts detected within 60 seconds of completion
+are eligible (10-minute candle start age 600–660 seconds). Live evidence must be
+at most 60 seconds old at detection. Startup does not replay older latest
+breakouts; previous-session RED references may still arm a **new live** crossing.
+Slow historical fetches can safely miss this window; do not increase freshness or
+substitute historical breakout prices for execution quotes to force approvals.
+Execution needs a fresh shared quote (default 10 seconds), exact listed security
+ID/segment, positive metadata lot size and INR tick size. One real metadata lot,
+max 5 occupied/reserved slots, max 20 daily entries, cash/risk limits, exchange
+cutoffs and unresolved-exit blocks still apply.
+
+### Deployment verification checklist (operator, not automatically performed)
+
+1. Compare Render's deployed Git SHA with the **merged fix commit**. `/health`
+   exposes `revision` from `RENDER_GIT_COMMIT` or `GITHUB_SHA` when available;
+   `version: 1.0.0` alone does not identify deployed code. An absent revision
+   requires checking the deployment dashboard, not assuming the fix is live.
+2. Keep practice mode ON and auto/live trading OFF. Verify persistent
+   `TRADING_DB_PATH` storage and a single shared quote process. Do not delete the
+   database to clear pending requests: accounting, deadlines, rejection dedup and
+   control/update idempotency are stored there.
+3. Inspect `/health`:
+   - `workers.queue_consumer.queue_size`, `outcomes`, `last_outcome`, `last_reason`;
+     `processed_signals` means consumed business requests, **not fills**.
+     Queue acceptance means queued, not portfolio approval.
+   - `paper_submissions`: account `enabled`, `approval_required`, durable
+     submission counts and rejection reasons. Both account switches should be
+     true for an enabled approval-gated portfolio.
+   - `workers.paper_portfolio.running` and `delivery_running`: protection and
+     outbound delivery run independently.
+   - `paper_outbox`: notifier configured, pending backlog, oldest age, failed
+     attempts and latest sanitized failure. Health reads do not send or freshen
+     requests.
+4. During market hours, an eligible CE **and** PE observation should produce
+   `#PAPER #APPROVAL`, exact contract/one-lot units, and **Approve Limit / Approve
+   Market / Modify / Reject** buttons in trade_control, with no position or
+   simulated execution beforehand. Verify `/orders` and `/positions`, then an
+   authorized approval with fresh quotes should produce only a PAPER fill.
+   Limit approval may remain pending until a fresh executable quote reaches
+   its limit; approval is not a fill guarantee.
+5. Rejected requests produce `#PAPER #REJECTED`, original signal key, known exact
+   contract and a fixed reason, not a fabricated trade/fill ID. Re-submit of the
+   same key does not create another business rejection or approval. Examples:
+   `missing_lot_size`, `missing_tick_size`, `missing_security_id`,
+   `invalid_intent`, `invalid_side`, `invalid_timeframe`, `invalid_timestamp`,
+   `invalid_expiry`, `stale_signal`, `no_price`, plus existing cash/risk/cutoff
+   reasons. Correct upstream metadata/quote availability for **new** signals;
+   rejected or expired evidence must not be made fresh.
+6. Delivery is at-least-once: failed events remain durable and are retried in
+   bounded, fair batches, without blocking subsequent receipts. A transport
+   timeout after Telegram accepted a send can produce a duplicate receipt;
+   persisted request/update/callback idempotency prevents duplicate execution.
+   A late-delivered keyboard cannot revive an expired request. Database failures
+   are worker failures/retries, not silently recorded as business rejections.
+
+### Outbound Telegram versus inbound controls
+
+- `/health.paper_telegram.outbound_ready` checks local token/chat routing
+  configuration only, **not** Telegram permission or network reachability.
+  Verify trade-control bot membership/post permission in the intended chat.
+  `last_api_status`/outbox diagnostics report safe reason codes and numeric
+  HTTP/API errors: 401 suggests invalid outbound bot credentials, 403 bot/chat
+  permissions, 429 rate limiting; `transport_error` indicates network/timeout.
+  No token-bearing URL or Telegram error description is exposed.
+- Inbound callbacks separately require `PAPER_TELEGRAM_ALLOWED_USER_IDS`
+  (positive numeric IDs), explicit `CHANNEL_TRADE_CONTROL_ID`, and
+  `PAPER_TELEGRAM_WEBHOOK_SECRET` (at least 32 characters). Missing configuration
+  is diagnosed and remains deny-default. `inbound_ready` is configuration
+  readiness, not proof that Telegram has registered or can reach the webhook.
+  Operators must separately verify their existing webhook points to
+  `/telegram/paper` with the matching secret header. This fix does **not**
+  register/change webhooks, request pasted credentials, or change live flags.
+- A successfully delivered approval receipt includes its keyboard even if
+  inbound webhook/allowlist configuration is absent. Webhook configuration
+  affects clicks reaching authorized callbacks, not keyboard creation.
+- If trade_control is a **Telegram channel**, use its inline callback buttons:
+  callbacks carry the clicking numeric user identity and the configured channel
+  chat. Channel-post slash commands are **not supported** by the current
+  message-only identity validation. `/portfolio`, `/pending`, `/positions`,
+  `/orders` and authorized configuration commands work in a configured
+  trade-control **group** with an allowlisted human sender, not anonymous
+  channel posts. Do not weaken actor/chat/secret checks to enable channel posts.
+
+Code/fake-data tests do not validate Render's deployed SHA, persistent disk,
+Telegram membership, webhook registration, or live market-data availability.
+Complete this checklist after an operator-controlled merge/deployment; this
+change does not merge or deploy itself.
 
 ## Known limitations
 
