@@ -4,15 +4,23 @@ import logging
 import os
 import threading
 import time
+from collections import Counter
 from datetime import datetime, time as dt_time, timezone
+import math
 from typing import Dict, Iterable, List, Optional
 from zoneinfo import ZoneInfo
 
-from atm_options_fetcher import ATMOptionsFetcher
+from atm_options_fetcher import ATMOptionsFetcher, BAND_ITM_PLUS_1
 from exchange_calendar import MCX, exchange_for_instrument, open_exchanges
 from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_CANDLE, TRIGGER_LIVE, PremiumStrategyEngine
+from premium_indicators import (
+    REQUIRED_CONFIRMATIONS,
+    IndicatorDataError,
+    calculate_confirmations,
+    completed_candles,
+)
 from telegram_handler import SCREENER_CATEGORIES, format_ist_timestamp
 
 
@@ -30,6 +38,7 @@ BUCKET_SECONDS = 600
 CANDLE_SETTLE_SECONDS = 5
 # Retry a failed instrument refresh sooner than the next 10-minute boundary.
 REFRESH_RETRY_SECONDS = 120
+LIVE_QUOTE_MAX_AGE_SECONDS = 10
 
 
 def _env_float(name: str, default: float) -> float:
@@ -40,7 +49,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 class PremiumScreener:
-    """Monitor listed ITM+1 / ATM / OTM+1 CE and PE premiums for RED-high breakouts.
+    """Monitor listed ITM+1 CE and PE premiums for RED-high breakouts.
 
     * Candles (10-minute, incl. previous session) are refreshed once per
       completed 10-minute bucket per underlying, only while its exchange is open.
@@ -78,6 +87,8 @@ class PremiumScreener:
         self._detections: Dict[str, dict] = {}
         # security_id -> monitored contract state (contract, instrument, reference)
         self._monitored: Dict[int, dict] = {}
+        self._live_bars: Dict[int, dict] = {}
+        self._indicator_counts: Counter = Counter()
         # underlying symbol -> {"bucket": int, "retry_at": float}
         self._refresh_state: Dict[str, dict] = {}
         universe = self.data_manager.get_instruments()
@@ -129,6 +140,7 @@ class PremiumScreener:
             try:
                 alerts += self._refresh_instrument(instrument, interval, now, spots.get(instrument.symbol))
             except Exception as exc:
+                self._drop_monitored_instrument(instrument)
                 logger.error("❌ Premium screener failed for %s: %s", instrument.symbol, exc, exc_info=True)
                 self._schedule_retry(instrument, now)
         return alerts
@@ -157,14 +169,22 @@ class PremiumScreener:
         if spot is None:
             spot = self.fetcher.get_spot_price(instrument, interval)
         if spot is None:
+            self._drop_monitored_instrument(instrument)
             logger.warning("❌ [%s] No underlying price; retry later", instrument.symbol)
             self._schedule_retry(instrument, now)
             return 0
 
         contracts = []
         for side in ("CE", "PE"):
-            contracts.extend(self.fetcher.resolve_strike_band(instrument, spot, side, now=now))
+            contracts.extend(
+                contract
+                for contract in self.fetcher.resolve_strike_band(
+                    instrument, spot, side, now=now, bands=(BAND_ITM_PLUS_1,)
+                )
+                if contract.get("strike_band") == BAND_ITM_PLUS_1
+            )
         if not contracts:
+            self._drop_monitored_instrument(instrument)
             self._schedule_retry(instrument, now)
             return 0
 
@@ -175,6 +195,7 @@ class PremiumScreener:
                 if state["instrument"].symbol == instrument.symbol and sid not in keep_ids
             ]:
                 self._monitored.pop(security_id, None)
+                self._live_bars.pop(security_id, None)
 
         alerts = 0
         fetched = 0
@@ -182,22 +203,52 @@ class PremiumScreener:
         for contract in contracts:
             candles = self.fetcher.fetch_option_candles(contract, interval, now)
             if not candles:
+                with self._lock:
+                    self._monitored.pop(int(contract["security_id"]), None)
+                    self._live_bars.pop(int(contract["security_id"]), None)
                 logger.debug("[%s] No candles for %s", instrument.symbol, contract["option_symbol"])
                 continue
             receive_mark = now_mark()
             fetched += 1
-            reference = self.engine.find_reference(candles)
-            contract["premium_ltp"] = round(float(candles[-1]["close"]), 2)
-            state = {"contract": contract, "instrument": instrument, "reference": self._slim(reference)}
+            try:
+                usable_candles = completed_candles(candles, now)
+            except IndicatorDataError as exc:
+                self._count_indicator_reason(exc.reason)
+                with self._lock:
+                    self._monitored.pop(int(contract["security_id"]), None)
+                    self._live_bars.pop(int(contract["security_id"]), None)
+                logger.debug("Premium data rejected for %s: %s", contract["option_symbol"], exc.reason)
+                continue
+            if not usable_candles:
+                self._count_indicator_reason("insufficient_history")
+                with self._lock:
+                    self._monitored.pop(int(contract["security_id"]), None)
+                    self._live_bars.pop(int(contract["security_id"]), None)
+                continue
+            reference = self.engine.find_reference(usable_candles)
+            contract["premium_ltp"] = round(float(usable_candles[-1]["close"]), 2)
+            state = {
+                "contract": contract,
+                "instrument": instrument,
+                "reference": self._slim(reference),
+                "candles": usable_candles,
+            }
             signal = self.engine.evaluate_candles(
-                instrument.symbol, candles, contract["option_type"], instrument.category
+                instrument.symbol, usable_candles, contract["option_type"], instrument.category
             )
+            confirmation = self._calculate_confirmation(usable_candles, instrument, now)
+            if signal and signal.get("breakout_is_latest"):
+                if confirmation and confirmation["ready"]:
+                    signal["indicator_confirmations"] = confirmation
+                else:
+                    state["reference"] = self._armed_reference(reference)
+                    self._count_indicator_reason("filter_failed")
             with self._lock:
                 self._monitored[int(contract["security_id"])] = state
-            armed += bool(reference and reference["armed"])
-            del candles
+            armed += bool(state["reference"] and state["reference"].get("armed"))
             if signal and signal.get("breakout_is_latest"):
-                alerts += self._emit(state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now)
+                if confirmation and confirmation["ready"]:
+                    alerts += self._emit(state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now)
 
         if fetched:
             self._refresh_state[instrument.symbol] = {"bucket": bucket, "retry_at": None}
@@ -220,6 +271,15 @@ class PremiumScreener:
             "retry_at": time.time() + self.refresh_retry_seconds,
         }
 
+    def _drop_monitored_instrument(self, instrument) -> None:
+        with self._lock:
+            for security_id in [
+                sid for sid, state in self._monitored.items()
+                if state["instrument"].symbol == instrument.symbol
+            ]:
+                self._monitored.pop(security_id, None)
+                self._live_bars.pop(security_id, None)
+
     @staticmethod
     def _slim(reference: Optional[dict]) -> Optional[dict]:
         if reference is None:
@@ -236,6 +296,7 @@ class PremiumScreener:
                 if exchange_for_instrument(state["instrument"]) not in open_now
             ]:
                 self._monitored.pop(security_id, None)
+                self._live_bars.pop(security_id, None)
         by_symbol = {i.symbol: i for i in self.option_instruments()}
         for symbol in list(self._refresh_state):
             instrument = by_symbol.get(symbol)
@@ -251,7 +312,7 @@ class PremiumScreener:
             ]
 
     def live_check_once(self, now: datetime | None = None) -> int:
-        """Poll batched LTPs for armed contracts and trigger on RED-high crosses."""
+        """Poll fresh batched quotes for armed entries and existing paper positions."""
         now = self._as_ist(now)
         open_now = open_exchanges(now)
         paper_contracts = []
@@ -283,16 +344,45 @@ class PremiumScreener:
             if security_id not in requested_ids.setdefault(segment, set()):
                 request.setdefault(segment, []).append(security_id)
                 requested_ids[segment].add(security_id)
-        prices = self.data_manager.fetch_ltp(request) or {}
+        try:
+            quotes = self.data_manager.fetch_quotes(request) or {}
+        except Exception as exc:
+            logger.warning("Scanner quotes unavailable: %s", exc.__class__.__name__)
+            quotes = {}
         receive_mark = now_mark()
-        if not prices:
+        if not quotes:
             return 0
+        if now is None:
+            now = self._as_ist(self.clock())
 
         alerts = 0
+        prices = {}
+        for key, quote in quotes.items():
+            if isinstance(quote, dict):
+                price = self._finite_positive(quote.get("price"))
+                quote_time = self._quote_epoch(quote.get("timestamp"))
+                if price is not None and quote_time is not None:
+                    prices[key] = price
         timestamp = now.isoformat(timespec="seconds")
         for state in armed:
             contract = state["contract"]
-            price = prices.get((contract["exchange_segment"], int(contract["security_id"])))
+            key = (contract["exchange_segment"], int(contract["security_id"]))
+            price = prices.get(key)
+            quote_time = self._quote_epoch((quotes.get(key) or {}).get("timestamp")) if isinstance(quotes.get(key), dict) else None
+            if (
+                price is None or quote_time is None
+                or quote_time > now.timestamp()
+                or now.timestamp() - quote_time > LIVE_QUOTE_MAX_AGE_SECONDS
+            ):
+                self._count_indicator_reason("stale_quote")
+                continue
+            with self._lock:
+                if self._monitored.get(int(contract["security_id"])) is not state:
+                    continue
+            provisional = self._observe_live_price(state, price, quote_time)
+            if provisional is None:
+                self._count_indicator_reason("out_of_order_quote")
+                continue
             signal = self.engine.evaluate_live_price(
                 state["instrument"].symbol,
                 state["reference"],
@@ -303,6 +393,13 @@ class PremiumScreener:
             )
             if signal is None:
                 continue
+            confirmation = self._calculate_confirmation(
+                state["candles"], state["instrument"], now, provisional_candle=provisional
+            )
+            if confirmation is None or not confirmation["ready"]:
+                self._count_indicator_reason("filter_failed")
+                continue
+            signal["indicator_confirmations"] = confirmation
             contract["premium_ltp"] = round(float(price), 2)
             alerts += self._emit(
                 state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now, require_armed=True
@@ -312,6 +409,82 @@ class PremiumScreener:
             if callable(update_trades):
                 update_trades(prices, exit_time=now.isoformat(timespec="seconds"))
         return alerts
+
+    def _calculate_confirmation(self, candles, instrument, now, provisional_candle=None):
+        try:
+            return calculate_confirmations(candles, now, instrument, provisional_candle)
+        except IndicatorDataError as exc:
+            self._count_indicator_reason(exc.reason)
+            return None
+
+    def _count_indicator_reason(self, reason: str) -> None:
+        with self._lock:
+            self._indicator_counts[reason] += 1
+
+    @staticmethod
+    def _armed_reference(reference: Optional[dict]) -> Optional[dict]:
+        armed = PremiumScreener._slim(reference)
+        if armed is not None:
+            armed["armed"] = True
+            armed["breakout_index"] = None
+        return armed
+
+    def _observe_live_price(self, state: dict, price: float, observed_at: float) -> Optional[dict]:
+        instrument = state["instrument"]
+        observed_dt = datetime.fromtimestamp(observed_at, IST)
+        bucket, _ = self._bucket(instrument, observed_dt)
+        offset = 0 if exchange_for_instrument(instrument) == MCX else 300
+        bucket_start = bucket * BUCKET_SECONDS + offset
+        security_id = int(state["contract"]["security_id"])
+        with self._lock:
+            candle = self._live_bars.get(security_id)
+            if candle is None or candle["bucket"] != bucket:
+                if candle is not None and bucket < candle["bucket"]:
+                    return None
+                candle = {
+                    "bucket": bucket,
+                    "timestamp": bucket_start,
+                    "observed_at": observed_at,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                }
+                self._live_bars[security_id] = candle
+            else:
+                if observed_at < candle["observed_at"]:
+                    return None
+                candle["observed_at"] = observed_at
+                candle["high"] = max(candle["high"], price)
+                candle["low"] = min(candle["low"], price)
+                candle["close"] = price
+            return {
+                key: candle[key] for key in ("timestamp", "open", "high", "low", "close", "observed_at")
+            }
+
+    @staticmethod
+    def _finite_positive(value):
+        try:
+            result = float(value)
+            return result if math.isfinite(result) and result > 0 else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _quote_epoch(value):
+        if isinstance(value, datetime):
+            return value.timestamp() if value.tzinfo is not None else None
+        try:
+            result = float(value)
+            if not math.isfinite(result):
+                return None
+            return result / 1000 if result > 1e11 else result
+        except (TypeError, ValueError, OverflowError):
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                return parsed.timestamp() if parsed.tzinfo is not None else None
+            except (TypeError, ValueError, OverflowError, OSError):
+                return None
 
     @staticmethod
     def _contract_exchange(contract: dict) -> str:
@@ -334,8 +507,21 @@ class PremiumScreener:
         now = self._as_ist(self.clock())
         instrument = state["instrument"]
         contract = state["contract"]
+        confirmation = signal.get("indicator_confirmations")
+        if (
+            contract.get("strike_band") != BAND_ITM_PLUS_1
+            or not isinstance(confirmation, dict)
+            or not confirmation.get("ready")
+            or not all(
+                confirmation.get("passed", {}).get(name) is True for name in REQUIRED_CONFIRMATIONS
+            )
+        ):
+            self._count_indicator_reason("entry_gate_rejected")
+            return 0
         signal_key = self._signal_key(instrument.category, {**signal, "option_symbol": contract["option_symbol"]})
         with self._lock:
+            if self._monitored.get(int(contract["security_id"])) is not state:
+                return 0
             detection = self._detections.get(signal_key)
             if detection is None:
                 if not self._fresh_evidence(signal, now):
@@ -421,6 +607,7 @@ class PremiumScreener:
                 "instrument_type": contract.get("instrument_type"),
                 "spot_ltp": contract.get("spot_ltp"),
                 "premium_ltp": contract.get("premium_ltp"),
+                "indicator_confirmations": signal.get("indicator_confirmations"),
                 "reference_time_ist": format_ist_timestamp(signal.get("reference_timestamp")),
                 "breakout_time_ist": format_ist_timestamp(signal.get("breakout_timestamp")),
                 "signal_time_ist": now_ist.strftime("%H:%M:%S"),
@@ -555,6 +742,7 @@ class PremiumScreener:
                 "instrument_type": option_data.get("instrument_type"),
                 "premium_ltp": option_data.get("premium_ltp"),
                 "spot_ltp": option_data.get("spot_ltp"),
+                "indicator_confirmations": signal.get("indicator_confirmations"),
             },
         }
         if signal.get("idempotency_key"):
@@ -589,10 +777,15 @@ class PremiumScreener:
         with self._lock:
             return {
                 "monitored_contracts": len(self._monitored),
+                "monitored_itm_plus_1": sum(
+                    1 for state in self._monitored.values()
+                    if state.get("contract", {}).get("strike_band") == BAND_ITM_PLUS_1
+                ),
                 "armed_contracts": sum(
                     1 for s in self._monitored.values() if s.get("reference") and s["reference"].get("armed")
                 ),
                 "tracked_underlyings": len(self._refresh_state),
+                "indicator_rejections": dict(self._indicator_counts),
             }
 
     @staticmethod

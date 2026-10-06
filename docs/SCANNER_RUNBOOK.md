@@ -8,14 +8,43 @@ This runbook covers the premium breakout scanner that sends option alerts to the
 | Rule | Implementation |
 |---|---|
 | Expiry | Nearest listed expiry **strictly after today**. On expiry day the same-day contract is never used; the next expiry is used from the start of the day. |
-| Strikes | Taken from the listed Dhan contracts (no hard-coded strike step). For every underlying the scanner monitors CE and PE at **ITM+1, ATM, OTM+1** (6 contracts). CE ITM = lower strike, PE ITM = higher strike. |
+| Strikes | Entry scanning, alerts, and approval requests use only the **listed ITM+1 CE and PE** contracts. CE ITM is the next lower listed strike; PE ITM is the next higher listed strike. There is no ATM/OTM or synthetic fallback; a missing ITM+1 contract is skipped before option-candle/LTP requests. Existing paper positions and pending orders in any band remain independently quoted and protected by the paper portfolio worker. |
 | Reference candle | Most recent **RED** 10-minute candle (`close < open`; dojis are *not* red) within the last **20** ten-minute candles. Previous-session candles are fetched so the window is full from the open. |
-| Trigger | Premium price crosses **above the red candle HIGH**. Checked on every completed 10-minute candle and, between candles, on the live LTP (`LIVE_TRIGGER_POLL_SECONDS`, default 1 s). |
+| Confirmations | All five are mandatory for CE and PE: premium strictly above same-session option-premium VWAP; Wilder RSI(14) strictly above 30 and rising vs the preceding completed indicator observation; premium strictly above EMA(9); MACD(12,26) strictly above its EMA(9) signal; and PSAR(0.02, maximum 0.2) strictly below premium. All values use that exact option contract's premium candles, never underlying spot. |
+| Trigger | Premium price crosses **above the red candle HIGH**. Completed-candle and live-LTP triggers are both supported, but each is gated by all five confirmations before reference consumption, alert delivery, or approval enqueue. A failed filter leaves the reference armed for a later eligible live crossing while price remains above the red high. |
 | Entry | Red candle high |
 | Stop-loss | Red candle low × 0.95 (5 % below the low) |
 | Risk points | Entry − Stop-loss |
 | Target | Entry + 2 × Risk (single 2R target) |
 | Duplicates | One alert per option contract per reference red candle. |
+
+### Indicator calculation and live evidence
+
+- EMA(9), Wilder RSI(14), MACD(12,26,9), and PSAR use completed 10-minute
+  premium candles; previous trading-session bars may warm them up. EMA and MACD
+  EMAs seed with the first complete period's SMA. RSI seeds with mean gains/losses
+  over its first 14 changes; a flat series yields 50, a gain-only series 100, and a
+  loss-only series 0. PSAR starts from the first two bars, clamps against the prior
+  two highs/lows, and reverses on a strict penetration. At least 34 valid candles
+  are required for the seeded MACD signal and all indicator comparisons.
+- VWAP resets by IST exchange date/session and uses only completed current-session
+  option candles, with typical price `(high + low + close) / 3` weighted by real
+  candle volume. Missing/non-finite OHLCV, zero total current-session volume,
+  insufficient warmup, stale evidence, or invalid timestamps fail closed; there is
+  no substitute value or default-pass indicator.
+- The shared quote endpoint supplies timestamped fresh LTP, not live OHLCV. Between
+  candle refreshes, close-sensitive indicators use an immutable-on-disk provisional
+  candle built from observed fresh option LTP ticks (open/high/low/close). No
+  cumulative volume is inferred: live VWAP remains based on real completed volume
+  and its as-of time is shown in the service alert. This is explicitly an
+  approximation for live close-sensitive indicators, not a full live-volume VWAP.
+  Completed candle evidence and quotes are freshness-checked; future candles are
+  excluded, timestamps are deduplicated and ordered, and provisional bars are
+  rebuilt as snapshots rather than appended on each poll.
+- No per-indicator network requests are made. ITM+1 is selected before batched
+  candle and live-quote requests; the existing shared pacing/cache remains in use.
+  The five confirmations and ITM+1 scope are enforced defaults, not optional
+  switches. These filters reduce eligible signals; they do not guarantee returns.
 
 ## Memory / stability design
 
@@ -71,12 +100,15 @@ Flask app, including `/health`, keeps running.
 1. Run `pytest` locally – all tests must pass.
 2. During market hours, confirm in the logs:
    - `🧠 Memory [after security master load]: RSS=...` stays well below 512 MB,
-   - `🎯 [SYMBOL] CE band | ... | ITM+1=.. ATM=.. OTM+1=..` per underlying,
+   - `🎯 [SYMBOL] CE band | ... | ITM+1=..` per underlying; no ATM/OTM entry
+     contracts should be fetched,
    - on expiry day the `expiry=` shown is the **next** expiry.
 3. For each Telegram alert verify: underlying/category, option symbol, strike,
-   CE/PE, BUY CALL/BUY PUT, expiry, band, entry, stop-loss, risk, 2R target,
-   timeframe and IST reference/breakout times. Cross-check entry/SL/target
-   against the red candle on the Dhan chart.
+   CE/PE, BUY CALL/BUY PUT, expiry, ITM+1 band, entry, stop-loss, risk, 2R target,
+   timeframe, IST reference/breakout times, and all five displayed premium
+   indicator values/pass marks. For live alerts, check the provisional-close label
+   and completed-volume VWAP as-of time. Cross-check entry/SL/target against the
+   red candle on the Dhan chart.
 4. Latency: `⏱️ Latency <stage> (n=..): p50/p95/p99` log lines report internal timings
    from price receipt to evaluate, queue and Telegram send start.
 5. Verify the paper approval pipeline below. Do not enable live trading as a
@@ -132,7 +164,8 @@ cutoffs and unresolved-exit blocks still apply.
    - `paper_outbox`: notifier configured, pending backlog, oldest age, failed
      attempts and latest sanitized failure. Health reads do not send or freshen
      requests.
-4. During market hours, an eligible CE **and** PE observation should produce
+4. During market hours, an eligible ITM+1 CE **and** PE observation with all five
+   confirmations true should produce
    `#PAPER #APPROVAL`, exact contract/one-lot units, and **Approve Limit / Approve
    Market / Modify / Reject** buttons in trade_control, with no position or
    simulated execution beforehand. Verify `/orders` and `/positions`, then an

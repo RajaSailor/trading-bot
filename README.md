@@ -829,8 +829,9 @@ needs these packages, all pinned in `requirements.txt` (Render installs only tha
 At startup the scanner logs one `Market data dependency ...` line per package, and
 `/health` → `market_scanner.dependencies` shows the detected status.
 
-All active categories (commodity options, index options, NIFTY50 stock options and
-stock spot) evaluate **10-minute breakouts**:
+The active commodity, index and NIFTY50 stock-option categories evaluate the
+**10-minute option-premium breakout strategy**. Underlying spot data is used only
+to select real listed strikes; strategy indicators are never calculated from spot:
 
 - **TradingView** serves native 10-minute candles.
 - **DhanHQ** intraday only offers 1/5/15/25/60-minute candles, so the bot fetches
@@ -838,8 +839,58 @@ stock spot) evaluate **10-minute breakouts**:
   (open = first open, high = max high, low = min low, close = last close,
   volume = sum). Buckets are aligned in IST to the session start (NSE/BSE 09:15,
   MCX 09:00), and the still-forming latest bucket is excluded so partial candles
-  cannot trigger breakouts. This applies to ATM option premium candles and to
+  cannot trigger breakouts. This applies to listed ITM+1 option premium candles and to
   the DhanHQ fallback for underlying/spot candles.
+
+### Option-premium strategy entry rules
+
+- Only real listed **ITM+1 CE and PE** contracts are fetched for strategy entries.
+  CE selects the next lower listed strike from nearest-to-spot ATM; PE selects
+  the next higher listed strike. ATM/OTM contracts are not scanned, alerted, or
+  sent for approval. If ITM+1 is unavailable, that side is skipped without a
+  synthetic or ATM/OTM fallback. Existing paper positions and pending orders in
+  any strike band continue to receive independent quote, risk, stop, and target
+  protection.
+- The base strategy remains the most recent strictly red option-premium candle
+  (`close < open`) among the last 20 completed 10-minute candles. A later candle
+  high or fresh live premium must be **strictly above** its high. Entry is the red
+  high, stop is 5% below the red low, and the existing 2R target/trailing and
+  paper approval flow remain unchanged.
+- A CE/PE entry is eligible only when **all five** same-contract premium checks
+  pass: premium > same-session VWAP; Wilder RSI(14) > 30 and > its preceding
+  completed observation; premium > EMA(9); MACD(12,26) line > EMA(9) signal;
+  PSAR(0.02, max 0.2) < premium. Equality fails; none of these conditions is
+  optional. Failing filters do not consume the red reference; a later live
+  crossing can qualify if the price condition and all indicators still pass.
+- EMA/MACD use SMA seeding; Wilder RSI seeds from 14 changes (flat=50,
+  gain-only=100, loss-only=0). At least 34 valid, ordered 10-minute candles are
+  required; prior-session candles warm the close-based indicators. VWAP resets by
+  IST exchange session and uses completed current-session candles only, weighted
+  by real volume at HLC3 (`(high + low + close) / 3`). Missing/invalid volume,
+  zero session volume, stale evidence, or inadequate warmup means no signal.
+- The live quote feed provides timestamped LTP, not forming OHLCV/volume. Live
+  close-based checks therefore use a provisional candle built from observed
+  fresh LTP ticks; it is a snapshot, not a repeated appended bar. Live VWAP uses
+  only completed real-volume evidence, and the alert shows the indicator-bar,
+  fresh-LTP, and VWAP as-of times. This is a disclosed approximation, not
+  inferred live cumulative volume. The service alert includes each value and
+  pass mark:
+
+  ```text
+  🧭 PREMIUM CONFIRMATIONS
+  ✓ VWAP: 120.50 / 110.25
+  ✓ RSI14: 61.30 / 58.10
+  ✓ EMA9: 120.50 / 118.40
+  ✓ MACD: 2.50 / 1.80
+  ✓ PSAR: 115.20 / 120.50
+  Evidence: Live provisional close; VWAP uses completed volume
+  Fresh option LTP as of 05-Oct-2026 10:35:03 IST
+  VWAP volume as of 05-Oct-2026 10:25:00 IST
+  ```
+- Filters narrow signal eligibility; they are **not a guarantee of accuracy or
+  profit**. Keep practice mode enabled and evaluate with paper trading/backtests.
+  See [`docs/SCANNER_RUNBOOK.md`](docs/SCANNER_RUNBOOK.md) for detailed session,
+  data-quality, deployment-verification, and sample-message guidance.
 
 **Render operational notes:** after deploying, the logs should contain no
 `dhanhq SDK is unavailable` / `TradingView websocket dependency is unavailable`

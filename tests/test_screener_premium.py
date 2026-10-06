@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -8,7 +8,10 @@ from security_master import UnderlyingRef
 
 
 def _candle(minute, o, h, l, c):
-    return {"timestamp": f"2026-10-05T10:{minute:02d}:00+05:30", "open": o, "high": h, "low": l, "close": c}
+    return {
+        "timestamp": f"2026-10-05T10:{minute:02d}:00+05:30",
+        "open": o, "high": h, "low": l, "close": c, "volume": 100,
+    }
 
 
 def _contract(security_id, side="CE", band="ATM", strike=24450, segment="NSE_FNO"):
@@ -63,6 +66,20 @@ class _Base(unittest.TestCase):
             signal_callback=lambda payload: self.alerts.append(payload) or True,
             clock=lambda: self.clock_now,
         )
+        self.screener._calculate_confirmation = MagicMock(return_value={
+            "ready": True,
+            "passed": {
+                "above_vwap": True, "rsi14_above_30_and_rising": True, "above_ema9": True,
+                "macd_above_signal": True, "psar_below_premium": True,
+            },
+            "values": {
+                "premium": 56.0, "vwap": 50.0, "rsi14": 60.0, "rsi14_previous": 55.0,
+                "ema9": 52.0, "macd12_26": 1.0, "macd_signal9": .5, "psar_0_02_0_2": 48.0,
+            },
+            "evidence_mode": "completed",
+            "indicator_as_of": "2026-10-05T10:20:00+05:30",
+            "vwap_as_of": "2026-10-05T10:20:00+05:30",
+        })
 
 
 class SessionGatingTests(_Base):
@@ -121,15 +138,103 @@ class BreakoutFlowTests(_Base):
     def _prime(self, candles_by_id, now=MONDAY_MORNING):
         self.clock_now = now
         contracts = [_contract(101, "CE", "ITM+1", 24400), _contract(102, "CE", "ATM", 24450),
-                     _contract(201, "PE", "ATM", 24450)]
+                     _contract(201, "PE", "ITM+1", 24500)]
         self.screener.fetcher.get_spot_price = MagicMock(return_value=24460.0)
         self.screener.fetcher.resolve_strike_band = MagicMock(
-            side_effect=lambda inst, spot, side, now=None: [c for c in contracts if c["option_type"] == side]
+            side_effect=lambda inst, spot, side, now=None, bands=None: [
+                c for c in contracts if c["option_type"] == side and c["strike_band"] in bands
+            ]
         )
         self.screener.fetcher.fetch_option_candles = MagicMock(
             side_effect=lambda contract, interval, now=None: list(candles_by_id.get(contract["security_id"], []))
         )
         return self.screener._refresh_instrument(self.index, "10min", now)
+
+    def test_failed_completed_filters_leave_reference_armed_for_later_live_pass(self):
+        candles = [
+            _candle(0, 98, 110, 95, 100),
+            _candle(10, 100, 112, 96, 98),
+            _candle(20, 100, 113, 99, 111),
+        ]
+        failed = {
+            "ready": False,
+            "passed": {
+                "above_vwap": False, "rsi14_above_30_and_rising": True, "above_ema9": True,
+                "macd_above_signal": True, "psar_below_premium": True,
+            },
+            "values": {},
+        }
+        self.screener._calculate_confirmation = MagicMock(side_effect=[failed, {
+            "ready": True,
+            "passed": {
+                "above_vwap": True, "rsi14_above_30_and_rising": True, "above_ema9": True,
+                "macd_above_signal": True, "psar_below_premium": True,
+            },
+            "values": {},
+            "evidence_mode": "live_provisional_ltp",
+            "indicator_as_of": "2026-10-05T10:25:00+05:30",
+            "vwap_as_of": "2026-10-05T10:20:00+05:30",
+        }])
+        self.assertEqual(0, self._prime({101: candles}))
+        state = self.screener._monitored[101]
+        self.assertTrue(state["reference"]["armed"])
+        self.assertEqual([], self.alerts)
+
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 113.5, "timestamp": MONDAY_MORNING.timestamp()}
+        }
+        self.assertEqual(1, self.screener.live_check_once(MONDAY_MORNING))
+        self.assertEqual(1, len(self.alerts))
+        self.assertEqual("live_ltp", self.alerts[0]["metadata"]["trigger"])
+
+    def test_each_failed_filter_blocks_and_keeps_reference_armed(self):
+        candles = [
+            _candle(0, 98, 110, 95, 100),
+            _candle(10, 100, 112, 96, 98),
+            _candle(20, 100, 113, 99, 111),
+        ]
+        for failed_filter in (
+            "above_vwap", "rsi14_above_30_and_rising", "above_ema9", "macd_above_signal",
+            "psar_below_premium",
+        ):
+            with self.subTest(filter=failed_filter):
+                self.alerts.clear()
+                self.screener._monitored.clear()
+                passed = {
+                    "above_vwap": True, "rsi14_above_30_and_rising": True, "above_ema9": True,
+                    "macd_above_signal": True, "psar_below_premium": True,
+                }
+                passed[failed_filter] = False
+                self.screener._calculate_confirmation = MagicMock(return_value={
+                    "ready": False, "passed": passed, "values": {},
+                })
+                self.assertEqual(0, self._prime({101: candles}))
+                self.assertTrue(self.screener._monitored[101]["reference"]["armed"])
+                self.assertEqual([], self.alerts)
+
+    def test_only_itm_plus_one_is_selected_before_option_candle_fetch(self):
+        self._prime({101: [_candle(0, 100, 110, 95, 98)]})
+        self.assertEqual(
+            [101, 201],
+            [call.args[0]["security_id"] for call in self.screener.fetcher.fetch_option_candles.call_args_list],
+        )
+        self.assertNotIn(102, [call.args[0]["security_id"] for call in
+                               self.screener.fetcher.fetch_option_candles.call_args_list])
+        self.assertEqual("ITM+1", self.screener._monitored[101]["contract"]["strike_band"])
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 109, "timestamp": MONDAY_MORNING.timestamp()}
+        }
+        self.screener.live_check_once(MONDAY_MORNING)
+        self.assertEqual({"NSE_FNO": [101]}, self.data_manager.fetch_quotes.call_args.args[0])
+
+    def test_stale_live_quote_cannot_trigger(self):
+        self._prime({101: [_candle(0, 100, 110, 95, 98)]})
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 120, "timestamp": (MONDAY_MORNING - timedelta(seconds=11)).timestamp()}
+        }
+        self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
+        self.assertTrue(self.screener._monitored[101]["reference"]["armed"])
+        self.assertEqual([], self.alerts)
 
     def test_live_ltp_cross_of_red_high_alerts_immediately_with_full_payload(self):
         candles = [
@@ -137,12 +242,16 @@ class BreakoutFlowTests(_Base):
             _candle(10, 108, 112, 98, 100),   # most recent RED: high 112, low 98
             _candle(20, 100, 111, 99, 105),   # did not cross 112 -> still armed
         ]
-        self.assertEqual(0, self._prime({102: candles}))
+        self.assertEqual(0, self._prime({101: candles}))
         self.assertEqual(1, len(self.screener.armed_contracts()))
 
-        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 102): 111.5}
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 111.5, "timestamp": MONDAY_MORNING.timestamp()}
+        }
         self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
-        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 102): 112.4}
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 112.4, "timestamp": MONDAY_MORNING.timestamp()}
+        }
         self.assertEqual(1, self.screener.live_check_once(MONDAY_MORNING))
         self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))  # duplicate prevented
         self.assertEqual(1, len(self.alerts))
@@ -158,12 +267,12 @@ class BreakoutFlowTests(_Base):
         expected = {
             "underlying": "NIFTY",
             "category": "index_options",
-            "option_symbol": "NIFTY-Oct2026-24450-CE",
-            "strike": 24450,
+            "option_symbol": "NIFTY-Oct2026-24400-CE",
+            "strike": 24400,
             "option_type": "CE",
             "action_text": "BUY CALL",
             "expiry": "27OCT2026",
-            "strike_band": "ATM",
+            "strike_band": "ITM+1",
             "entry": 112.0,
             "stop_loss": 93.1,
             "risk_points": 18.9,
@@ -188,7 +297,9 @@ class BreakoutFlowTests(_Base):
         delivered = []
         self.screener.signal_callback = lambda payload: bool(delivered)
         self.screener.position_manager.add_position.return_value = None
-        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 201): 56}
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 201): {"price": 56, "timestamp": MONDAY_MORNING.timestamp()}
+        }
 
         self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
         self.assertEqual(1, len(self.screener.armed_contracts()))
@@ -199,7 +310,9 @@ class BreakoutFlowTests(_Base):
     def test_put_side_alert_is_buy_put(self):
         candles = [_candle(0, 50, 55, 45, 48)]
         self._prime({201: candles})
-        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 201): 56}
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 201): {"price": 56, "timestamp": MONDAY_MORNING.timestamp()}
+        }
         self.assertEqual(1, self.screener.live_check_once(MONDAY_MORNING))
         self.assertEqual("BUY", self.alerts[0]["action"])
         self.assertEqual("BUY PUT", self.alerts[0]["metadata"]["action_text"])
@@ -209,44 +322,54 @@ class BreakoutFlowTests(_Base):
         self._prime({201: [_candle(0, 50, 55, 45, 48)]})
         payloads = []
         self.screener.signal_callback = lambda payload: payloads.append(payload) or len(payloads) > 1
-        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 201): 56}
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 201): {"price": 56, "timestamp": MONDAY_MORNING.timestamp()}
+        }
         self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
         self.screener.position_manager.add_position.assert_not_called()
         later = MONDAY_MORNING.replace(second=20)
         self.clock_now = later
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 201): {"price": 56, "timestamp": later.timestamp()}
+        }
         self.assertEqual(1, self.screener.live_check_once(later))
         self.assertEqual(payloads[0]["timestamp"], payloads[1]["timestamp"])
         self.assertEqual(payloads[0]["breakout_timestamp"], payloads[1]["breakout_timestamp"])
 
     def test_startup_does_not_replay_old_latest_completed_breakout(self):
         candles = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 113, 97, 112)]
-        self.assertEqual(0, self._prime({102: candles}))
+        self.assertEqual(0, self._prime({101: candles}))
         self.assertEqual([], self.alerts)
 
     def test_candle_breakout_alerts_only_when_latest_completed_candle_broke_out(self):
         stale = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 115, 97, 114), _candle(20, 114, 116, 110, 115)]
         fresh = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 109, 97, 105), _candle(20, 105, 113, 104, 112)]
-        self.assertEqual(1, self._prime({101: stale, 102: fresh}))
-        self.assertEqual(["NIFTY-Oct2026-24450-CE"], [a["metadata"]["option_symbol"] for a in self.alerts])
+        self.assertEqual(0, self._prime({101: stale}))
+        self.assertEqual(1, self._prime({101: fresh}))
+        self.assertEqual(["NIFTY-Oct2026-24400-CE"], [a["metadata"]["option_symbol"] for a in self.alerts])
         self.assertEqual("candle_high", self.alerts[0]["metadata"]["trigger"])
         # The same reference never re-alerts (live or candle) after a refresh.
         self._prime({101: stale, 102: fresh})
-        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 102): 200}
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 200, "timestamp": MONDAY_MORNING.timestamp()}
+        }
         self.screener.live_check_once(MONDAY_MORNING)
         self.assertEqual(1, len(self.alerts))
 
     def test_live_check_skips_when_no_armed_contracts_or_market_closed(self):
         self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
-        self.data_manager.fetch_ltp.assert_not_called()
-        self._prime({102: [_candle(0, 100, 110, 95, 98)]})
+        self.data_manager.fetch_quotes.assert_not_called()
+        self._prime({101: [_candle(0, 100, 110, 95, 98)]})
         self.assertEqual(0, self.screener.live_check_once(SATURDAY))
-        self.data_manager.fetch_ltp.assert_not_called()
+        self.data_manager.fetch_quotes.assert_not_called()
 
     def test_band_change_drops_contracts_outside_new_band(self):
         self._prime({101: [_candle(0, 100, 110, 95, 98)], 102: [_candle(0, 100, 110, 95, 98)]})
         self.assertIn(101, self.screener._monitored)
         self.screener.fetcher.resolve_strike_band = MagicMock(
-            side_effect=lambda inst, spot, side, now=None: [_contract(102)] if side == "CE" else []
+            side_effect=lambda inst, spot, side, now=None, bands=None: [
+                _contract(102, band="ITM+1")
+            ] if side == "CE" else []
         )
         self.screener._refresh_instrument(self.index, "10min", MONDAY_MORNING)
         self.assertNotIn(101, self.screener._monitored)
@@ -275,12 +398,14 @@ class SpotStrategyTests(_Base):
         notifier.paper_option_contracts.return_value = [
             {"security_id": 777, "exchange_segment": "NSE_FNO"}
         ]
-        self.data_manager.fetch_ltp.return_value = {("NSE_FNO", 777): 125.0}
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 777): {"price": 125.0, "timestamp": MONDAY_MORNING.timestamp()}
+        }
         self.screener.paper_trade_notifier = notifier
 
         self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
 
-        self.data_manager.fetch_ltp.assert_called_once_with({"NSE_FNO": [777]})
+        self.data_manager.fetch_quotes.assert_called_once_with({"NSE_FNO": [777]})
         notifier.update_paper_trades.assert_called_once()
         self.assertEqual({("NSE_FNO", 777): 125.0}, notifier.update_paper_trades.call_args.args[0])
 
