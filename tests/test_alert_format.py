@@ -205,6 +205,30 @@ class AlertFormatTests(unittest.TestCase):
         summary = tracker.summary()
         self.assertAlmostEqual(4.0, summary["receive->send_start"]["p50"], places=3)
 
+    def test_service_alert_shows_live_indicator_values_status_and_evidence_times(self):
+        confirmations = {
+            "passed": {
+                "above_vwap": True, "rsi14_above_30_and_rising": True, "above_ema9": True,
+                "macd_above_signal": True, "psar_below_premium": True,
+            },
+            "values": {
+                "premium": 120.5, "vwap": 110.25, "rsi14": 61.3, "rsi14_previous": 58.1,
+                "ema9": 118.4, "macd12_26": 2.5, "macd_signal9": 1.8, "psar_0_02_0_2": 115.2,
+            },
+            "evidence_mode": "live_provisional_ltp",
+            "indicator_as_of": "2026-10-05T10:35:00+05:30",
+            "vwap_as_of": "2026-10-05T10:25:00+05:30",
+        }
+        message = SignalNotifier(_Handler()).format_strategy_signal(
+            _queue_signal(indicator_confirmations=confirmations)
+        )
+        self.assertIn("PREMIUM CONFIRMATIONS", message)
+        self.assertIn("✓ VWAP: 120.50 / 110.25", message)
+        self.assertIn("✓ RSI14: 61.30 / 58.10", message)
+        self.assertIn("Live provisional close; VWAP uses completed volume", message)
+        self.assertIn("05-Oct-2026 10:35:00 IST", message)
+        self.assertIn("05-Oct-2026 10:25:00 IST", message)
+
     def test_screener_payload_feeds_formatter(self):
         from types import SimpleNamespace
 

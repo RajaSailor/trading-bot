@@ -1,6 +1,7 @@
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -12,6 +13,34 @@ from signal_processor import SignalQueueProcessor
 
 
 SECRET = "s" * 40
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def passing_breakout_candles():
+    from datetime import timedelta
+
+    candles = []
+    for index in range(38):
+        start = datetime(2026, 10, 2, 9, 15, tzinfo=IST) + timedelta(minutes=10 * index)
+        close = 80 + index * 0.25 + (0.15 if index % 3 else -0.1)
+        open_price = close - 0.1 if index % 4 else close + 0.08
+        candles.append({
+            "timestamp": start.isoformat(), "open": open_price, "high": max(open_price, close) + 0.4,
+            "low": min(open_price, close) - 0.4, "close": close, "volume": 100 + index,
+        })
+    for stamp, open_price, high, low, close in (
+        ("09:15", 99, 101, 98, 100), ("09:25", 100, 102, 99, 101),
+        ("09:35", 101, 103, 100, 102), ("09:45", 102, 104, 101, 103),
+        ("09:55", 103, 104, 100, 101), ("10:05", 100, 110, 90, 98),
+        ("10:15", 98, 113, 97, 112),
+    ):
+        hour, minute = map(int, stamp.split(":"))
+        start = datetime(2026, 10, 5, hour, minute, tzinfo=IST)
+        candles.append({
+            "timestamp": start.isoformat(), "open": open_price, "high": high, "low": low,
+            "close": close, "volume": 100,
+        })
+    return candles
 
 
 @pytest.fixture
@@ -46,16 +75,16 @@ def pipeline(tmp_path, monkeypatch):
     )
     contracts = [{
         "security_id": sid, "exchange_segment": "NSE_FNO",
-        "option_symbol": f"NIFTY-27OCT2026-24450-{side}",
+        "option_symbol": f"NIFTY-27OCT2026-24400-{side}",
         "option_type": side, "lot_size": 75, "tick_size": .05,
         "expiry": "27OCT2026", "strike": 24450, "instrument_type": "OPTIDX",
     } for sid, side in ((101, "CE"), (201, "PE"))]
+    for contract in contracts:
+        contract.update({"strike": 24400, "strike_band": "ITM+1"})
     scanner.fetcher.resolve_strike_band = Mock(
-        side_effect=lambda inst, spot, side, now=None: [c for c in contracts if c["option_type"] == side])
-    scanner.fetcher.fetch_option_candles = Mock(return_value=[
-        {"timestamp": "2026-10-05T10:05:00+05:30", "open": 100, "high": 110, "low": 90, "close": 98},
-        {"timestamp": "2026-10-05T10:15:00+05:30", "open": 98, "high": 113, "low": 97, "close": 112},
-    ])
+        side_effect=lambda inst, spot, side, now=None, bands=None: [
+            c for c in contracts if c["option_type"] == side and c["strike_band"] in bands])
+    scanner.fetcher.fetch_option_candles = Mock(return_value=passing_breakout_candles())
     data.fetch_quotes.side_effect = lambda request: {
         (segment, sid): {"price": 110, "timestamp": clock.now}
         for segment, ids in request.items() for sid in ids
@@ -97,6 +126,8 @@ def test_actual_ce_pe_scanner_to_main_queue_portfolio_formatter(pipeline, action
         assert signal["metadata"]["timeframe"] == "10min"
         assert signal["metadata"]["display_timeframe"] == "10-MINUTE BREAKOUT"
         assert signal["metadata"]["option_type"] in {"CE", "PE"}
+        assert signal["metadata"]["strike_band"] == "ITM+1"
+        assert signal["metadata"]["indicator_confirmations"]["ready"]
         assert signal["timestamp"] == signal["detected_at"]
         assert signal["breakout_timestamp"] == "2026-10-05T10:15:00+05:30"
         assert signal["queue_received_at"]
@@ -151,7 +182,7 @@ def test_queue_latency_expiry_and_duplicate_restart_do_not_freshen(pipeline):
     receipts = [m for m in sent_messages(p) if "#REJECTED" in m["text"]]
     assert len(receipts) == 1
     assert original["signal_id"] in receipts[0]["text"]
-    assert "NIFTY-27OCT2026-24450-CE" in receipts[0]["text"]
+    assert "NIFTY-27OCT2026-24400-CE" in receipts[0]["text"]
 
 
 @pytest.mark.parametrize("field", ["lot_size", "tick_size", "security_id"])

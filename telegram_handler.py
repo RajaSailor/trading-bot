@@ -140,6 +140,37 @@ def format_option_breakout_alert(
         ]
     if alert.get("spot_ltp") is not None:
         lines.append(f"Underlying spot: {esc(_fmt_price(alert.get('spot_ltp')))}")
+    confirmations = alert.get("indicator_confirmations")
+    if isinstance(confirmations, dict):
+        values = confirmations.get("values") or {}
+        passed = confirmations.get("passed") or {}
+        checks = (
+            ("above_vwap", "VWAP", "premium", "vwap"),
+            ("rsi14_above_30_and_rising", "RSI14", "rsi14", "rsi14_previous"),
+            ("above_ema9", "EMA9", "premium", "ema9"),
+            ("macd_above_signal", "MACD", "macd12_26", "macd_signal9"),
+            ("psar_below_premium", "PSAR", "psar_0_02_0_2", "premium"),
+        )
+
+        def indicator_number(value):
+            try:
+                return f"{float(value):.2f}"
+            except (TypeError, ValueError):
+                return "N/A"
+
+        lines.extend(["", "🧭 <b>PREMIUM CONFIRMATIONS</b>"])
+        for key, label, left, right in checks:
+            mark = "✓" if passed.get(key) is True else "✗"
+            lines.append(
+                f"{mark} {label}: {esc(indicator_number(values.get(left)))} / "
+                f"{esc(indicator_number(values.get(right)))}"
+            )
+        live = confirmations.get("evidence_mode") == "live_provisional_ltp"
+        mode = "Live provisional close; VWAP uses completed volume" if live else "Completed candles"
+        lines.append(
+            f"Evidence: {esc(mode)} | indicators {esc(format_ist_timestamp(confirmations.get('indicator_as_of'), True))}"
+        )
+        lines.append(f"VWAP volume as of {esc(format_ist_timestamp(confirmations.get('vwap_as_of'), True))}")
     if practice_mode:
         lines.append("🧪 PRACTICE MODE: alert only, no live order placed")
     lines.extend(["", "📢 DISCLAIMER: Educational purposes only."])

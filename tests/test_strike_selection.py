@@ -110,10 +110,31 @@ class ContractDrivenStrikeSelectionTests(unittest.TestCase):
         )
         self.assertEqual([2950, 3000, 3100], [c["strike"] for c in band])
 
+    def test_entry_universe_can_resolve_only_the_listed_itm_plus_one(self):
+        strikes = [24300, 24350, 24400, 24450, 24500, 24550]
+        fetcher = _fetcher(_both_sides("NIFTY", strikes, exchange="NSE", instrument="OPTIDX"))
+        instrument = _instrument("NIFTY", "index_options")
+
+        ce = fetcher.resolve_strike_band(
+            instrument, 24460.0, "CE", now=NON_EXPIRY_DAY, bands=(BAND_ITM_PLUS_1,)
+        )
+        pe = fetcher.resolve_strike_band(
+            instrument, 24460.0, "PE", now=NON_EXPIRY_DAY, bands=(BAND_ITM_PLUS_1,)
+        )
+
+        assert [(contract["strike_band"], contract["strike"]) for contract in ce] == [(BAND_ITM_PLUS_1, 24400)]
+        assert [(contract["strike_band"], contract["strike"]) for contract in pe] == [(BAND_ITM_PLUS_1, 24500)]
+
     def test_band_skips_missing_neighbour_at_chain_edge(self):
         fetcher = _fetcher(_both_sides("GOLD", [72000, 72500]))
         band = fetcher.resolve_strike_band(_instrument("GOLD"), 71900.0, "CE", now=NON_EXPIRY_DAY)
         self.assertEqual([(BAND_ATM, 72000), (BAND_OTM_PLUS_1, 72500)], [(c["strike_band"], c["strike"]) for c in band])
+        self.assertEqual(
+            [],
+            fetcher.resolve_strike_band(
+                _instrument("GOLD"), 71900.0, "CE", now=NON_EXPIRY_DAY, bands=(BAND_ITM_PLUS_1,)
+            ),
+        )
 
     def test_selects_nearest_active_expiry_and_skips_expired_contracts(self):
         rows = (
