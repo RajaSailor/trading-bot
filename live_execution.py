@@ -401,7 +401,7 @@ class LiveExecution:
                 own_sells = sum(i["filled_quantity"] for i in items
                                 if i.get("entry_id") == entry["id"])
                 tracked = entry["filled_quantity"] - own_sells - entry.get("external_reduction", 0)
-                actual = float(snap["positions"].get(str(entry["security_id"]), 0)) if tracked > 0 else 0
+                actual = float(snap["positions"].get(str(entry["security_id"]), 0)) if tracked > 0 else 0.0
                 if not math.isfinite(actual) or actual < 0 or not actual.is_integer():
                     raise LiveBlocked("invalid authoritative position")
                 if actual < tracked:

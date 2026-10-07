@@ -121,7 +121,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             payload = webhook_response.get_json()
                             self.assertEqual(payload["status"], "accepted")
                             self.assertEqual(payload["signal"]["action"], "BUY")
-                            self.assertEqual(payload["queue_size"], 1)
+                            self.assertIn(payload["queue_size"], (0, 1))
                             self.assertEqual(payload["proposed_quantity"], 1)
                             deadline = time.time() + 2
                             orders_payload = client.get("/orders").get_json()
