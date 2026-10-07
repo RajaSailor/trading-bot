@@ -395,6 +395,10 @@ def test_real_scanner_queue_iso_display_expiry_to_mock_execution(engine, adapter
     payload = PremiumScreener._build_queue_payload(
         SimpleNamespace(symbol="NIFTY"), strategy_signal, "NIFTY50",
         "premium_screener", option_data)
+    with pytest.raises(LiveBlocked, match="missing live indicator confirmations"):
+        engine.propose(payload)
+    # The price-only screener cannot bypass the unchanged isolated live gate.
+    payload["metadata"]["indicator_confirmations"] = signal(adapter)["metadata"]["indicator_confirmations"]
     proposal = engine.propose(payload)
     assert proposal["expiry"] == "2026-10-08"
     assert proposal["quantity"] == 65 and proposal["initial_stop_loss"] == 152

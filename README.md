@@ -184,7 +184,7 @@ contract identity, one-lot units, actual simulated prices and effective
 protection. Changes use `#SL_UPDATE`, `#TARGET_UPDATE`, `#TRAIL_UPDATE`;
 T1 uses `#TARGET1`, with stop/risk/cutoff reason tags on relevant exits.
 `service_alerts` routing is unchanged; service messages now omit the entire
-indicator-confirmation block while preserving the internal gates.
+indicator-confirmation block; premium alerts are now price-only.
 
 Risk, cutoff, stop and emergency exits never wait for approval. Pending exits
 are informational, not approval requests. Protection escalates a
@@ -871,49 +871,51 @@ to select real listed strikes; strategy indicators are never calculated from spo
   any strike band continue to receive independent quote, risk, stop, and target
   protection.
 - The base strategy remains the most recent strictly red option-premium candle
-  (`close < open`) among the last 20 completed 10-minute candles. A later candle
-  high or fresh live premium must be **strictly above** its high. Entry is the red
+  (`close < open`) among the last 20 completed 10-minute candles. A fresh monitored
+  crossing must move from **≤ high to > high**. Entry is the red
   high, stop is 5% below the red low, and the existing 2R target/trailing and
   paper approval flow remain unchanged.
-- A CE/PE (long-option BUY) entry is eligible only when **all three** same-contract
-  premium checks pass at the trigger:
-  - **EMA(9) trigger rule:** the trigger candle breaking the red high must be
-    *above or straddling* the contemporaneous EMA9: trigger price > EMA9, **or**
-    the trigger candle's observed `low <= EMA9 <= high`. A trigger wholly below
-    EMA9 is rejected. The reference red candle itself may be wholly below, wholly
-    above, or straddling EMA9. Live
-    triggers use the forming bucket's observed fresh-LTP ticks (no invented
-    high/low; missing evidence fails closed). The fresh price must still be
-    strictly above the red high.
-  - **MACD(12,26,9):** MACD line strictly above its signal line.
-  - **RSI(14):** strictly above **25** and rising (strictly above the preceding
-    completed indicator observation; flat or falling fails).
-- VWAP and Parabolic SAR are **not** used, and volume is no longer required:
-  candles with missing/zero volume can pass when OHLC evidence is valid.
-- One distinct fresh live observation can qualify immediately, including in a
-  narrow range and early in the session. There is no same-day range warmup,
-  second-poll/candle wait or substitute momentum threshold.
-- EMA/MACD use SMA seeding; Wilder RSI seeds from 14 changes (flat=50,
-  gain-only=100, loss-only=0). At least 34 valid, ordered 10-minute candles are
-  required; prior-session candles warm the indicators. Stale evidence or
-  inadequate warmup means no signal. All gates are evaluated before reference
-  consumption, deduplication, alert delivery, or approval enqueue, so a failed or
-  pending candidate can still qualify later.
-- The live quote feed provides timestamped LTP, not forming OHLC. Live checks use
-  a provisional snapshot of observed fresh LTP ticks (never appended to, or
-  mutating, completed history). No additional quote requests are made for
-  confirmation; the existing shared live cadence/cooldown is reused. The service
-  alert intentionally omits indicator/evidence diagnostics:
+- **No EMA9, MACD, RSI or volume considerations.** Legacy sideways/range gates
+  remain removed. The first fresh observed crossing alerts immediately, without
+  waiting for candle close, a second observation above high, or continuation.
+  Startup above the reference never substitutes for monitored crossing evidence.
+  Quote freshness, session checks and per-contract/reference dedup remain.
+- **Re-entry anti-chop:** after a successfully delivered alert at observed P,
+  block the inclusive band `[P×0.95, P×1.05]`. P=100 blocks 98, 104, 95, 101
+  and 105; only a new crossing below 95 or above 105 qualifies. Key:
+  `category:underlying:CE|PE`, shared across strikes/expiries, without daily reset.
+  Persist `PREMIUM_ALERT_STATE_FILE` (default `premium_alert_state.json` beside
+  `STATE_FILE`) on a mounted volume; use one scanner process. Failed sends and
+  queue acceptance alone do not advance P.
+- Internal diagnostics retain reference time/high, first-crossing time/price,
+  detection time and send time. Failed delivery retries original evidence for
+  less than 60 seconds, not a retrospectively updated breakout. These diagnostics
+  never expand the compact service alert:
 
   ```text
-  NIFTY | BUY CALL | ITM+1 | PAPER SIGNAL ONLY
-  NIFTY 14OCT2026 25000 CE | Expiry 14-Oct-2026
-  Entry (reference): 170.80 | Stop: 152.00 | Risk: 18.80
-  T1: 189.60 | T2: 208.40
-  Observed breakout: 171.00 at 07-Oct-2026 09:34:03 IST
-  Underlying spot: 25080.00
+  🚀 BUY CALL | CRUDE OIL (COMMODITY OPTIONS)
+  Option: CRUDEOIL-15Oct2026-8650-CE
+  Strike: 8650 CE | Band: ITM+1
+  Expiry: 15OCT2026
+
+  📊 TRADE LEVELS
+  Entry: 316.50
+  Stop Loss: 289.37
+  Risk: 27.13 points
+  Target 1 (1R): 343.63
+  Target 2 (2R): 370.76
+
+  ⚡ Breakout: 07-Oct-2026 16:12:51 IST @ 318.50
+  Underlying spot: 8714.00
+  🧪 PRACTICE MODE: alert only, no live order placed
+
+  📢 DISCLAIMER: Educational purposes only.
   ```
-- Filters narrow signal eligibility; they are **not a guarantee of accuracy or
+- Live-execution controls are unchanged. Price-only scanner payloads do not
+  satisfy the isolated live engine's existing indicator-evidence gate; the
+  production `LiveBroker(None)` adapter also remains blocked. This change does
+  not complete or activate real-money trading.
+- Alerts are **not a guarantee of accuracy or
   profit**. A premium of 170.60 cannot break a 170.80 red high, even if a historical
   candle high was 189.35. Observed trigger, reference entry and executable quote
   are distinct. Startup historical initialization is silent; completed highs

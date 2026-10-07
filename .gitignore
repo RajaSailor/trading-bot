@@ -30,6 +30,7 @@ logs/
 # STATE & DATA FILES (RUNTIME GENERATED)
 # ============================================================================
 dhan_state.json         # Position state (contains sensitive trading data)
+premium_alert_state.json
 *.json.bak              # State backups
 trading_history.json    # Trade history
 

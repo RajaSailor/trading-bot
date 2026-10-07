@@ -7,6 +7,7 @@ import time
 from collections import Counter
 from datetime import datetime, time as dt_time, timezone
 import math
+from decimal import Decimal
 from typing import Dict, Iterable, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -15,12 +16,8 @@ from exchange_calendar import MCX, exchange_for_instrument, open_exchanges
 from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
-from premium_indicators import (
-    REQUIRED_CONFIRMATIONS,
-    IndicatorDataError,
-    calculate_confirmations,
-    completed_candles,
-)
+from premium_indicators import IndicatorDataError, completed_candles
+from state_manager import StateManager
 from telegram_handler import SCREENER_CATEGORIES, format_ist_timestamp
 
 
@@ -68,6 +65,7 @@ class PremiumScreener:
         signal_callback=None,
         paper_trade_notifier=None,
         clock=None,
+        alert_state_file=None,
     ) -> None:
         self.data_manager = data_manager
         self.telegram_handler = telegram_handler
@@ -80,10 +78,19 @@ class PremiumScreener:
         self.signal_callback = signal_callback
         self.paper_trade_notifier = paper_trade_notifier
         self.clock = clock or (lambda: datetime.now(IST))
+        self._alert_state = StateManager(
+            alert_state_file or os.getenv(
+                "PREMIUM_ALERT_STATE_FILE",
+                os.path.join(os.path.dirname(os.getenv("STATE_FILE", "bot_state.json")), "premium_alert_state.json"),
+            )
+        )
+        self._last_entries = self._alert_state.get_config("last_entries", {})
         self.refresh_retry_seconds = _env_float("SCANNER_REFRESH_RETRY_SECONDS", REFRESH_RETRY_SECONDS)
         self._lock = threading.RLock()
         self._processed_signal_keys: set[str] = set()
         self._processed_signal_order: list[str] = []
+        for key in self._alert_state.get_config("emitted_references", []):
+            self._remember_signal_key(key)
         self._detections: Dict[str, dict] = {}
         # security_id -> monitored contract state (contract, instrument, reference)
         self._monitored: Dict[int, dict] = {}
@@ -233,6 +240,15 @@ class PremiumScreener:
                 "candles": usable_candles,
             }
             with self._lock:
+                old = self._monitored.get(int(contract["security_id"]))
+                if (
+                    old and old.get("reference") and state["reference"]
+                    and old["reference"]["timestamp"] == state["reference"]["timestamp"]
+                    and old["reference"]["high"] == state["reference"]["high"]
+                ):
+                    state["reference"] = old["reference"]
+                    if old.get("pending_signal"):
+                        state["pending_signal"] = old["pending_signal"]
                 self._monitored[int(contract["security_id"])] = state
             armed += bool(state["reference"] and state["reference"].get("armed"))
 
@@ -351,6 +367,8 @@ class PremiumScreener:
                 if price is not None and quote_time is not None:
                     prices[key] = price
         for state in armed:
+            if not fixed_now:
+                now = self._as_ist(self.clock())
             contract = state["contract"]
             key = (contract["exchange_segment"], int(contract["security_id"]))
             price = prices.get(key)
@@ -368,66 +386,29 @@ class PremiumScreener:
             with self._lock:
                 if self._monitored.get(int(contract["security_id"])) is not state:
                     continue
-            provisional = self._observe_live_price(state, price, quote_time)
-            if provisional is None:
-                self._count_indicator_reason("out_of_order_quote")
-                continue
-            signal = self.engine.evaluate_live_price(
-                state["instrument"].symbol,
-                state["reference"],
-                price,
-                contract["option_type"],
-                state["instrument"].category,
-                timestamp=datetime.fromtimestamp(quote_time, IST).isoformat(timespec="microseconds"),
-            )
-            if signal is None:
-                continue
-            confirmation = self._calculate_confirmation(state["candles"], now, provisional_candle=provisional)
-            if confirmation is None or not confirmation.get("ready"):
-                if confirmation is not None:
-                    self._count_indicator_reason("filter_failed")
-                continue
-            gated = self._entry_gate(confirmation, signal, price=price)
-            if gated is None:
-                continue
-            signal["indicator_confirmations"] = gated
-            contract["premium_ltp"] = round(float(price), 2)
-            alerts += self._emit(
-                state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now, require_armed=True
-            )
+                if self._observe_live_price(state, price, quote_time) is None:
+                    self._count_indicator_reason("out_of_order_quote")
+                    continue
+                signal = state.get("pending_signal")
+                if signal is None:
+                    signal = self.engine.evaluate_live_price(
+                        state["instrument"].symbol, state["reference"], price,
+                        contract["option_type"], state["instrument"].category,
+                        timestamp=datetime.fromtimestamp(quote_time, IST).isoformat(timespec="microseconds"),
+                    )
+                    if signal is None:
+                        continue
+                    signal["detected_at"] = now.isoformat()
+                    state["pending_signal"] = signal
+                contract["premium_ltp"] = signal["breakout_price"]
+                alerts += self._emit(
+                    state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now, require_armed=True
+                )
         if paper_contracts and self.paper_trade_notifier is not None:
             update_trades = getattr(self.paper_trade_notifier, "update_paper_trades", None)
             if callable(update_trades):
                 update_trades(prices, exit_time=now.isoformat(timespec="seconds"))
         return alerts
-
-    def _calculate_confirmation(self, candles, now, provisional_candle=None):
-        try:
-            return calculate_confirmations(candles, now, provisional_candle)
-        except IndicatorDataError as exc:
-            self._count_indicator_reason(exc.reason)
-            return None
-
-    def _entry_gate(
-        self, confirmation, signal: dict, price
-    ) -> Optional[dict]:
-        """Strict actual live breakout plus the three mandatory indicator gates."""
-        if confirmation is None:
-            return None
-        if not confirmation.get("ready") or not all(
-            confirmation.get("passed", {}).get(name) is True for name in REQUIRED_CONFIRMATIONS
-        ):
-            self._count_indicator_reason("filter_failed")
-            return None
-        if (
-            signal.get("trigger") != TRIGGER_LIVE
-            or confirmation.get("evidence_mode") != "live_provisional_ltp"
-            or self._finite_positive(price) is None
-            or not float(price) > float(signal["reference_high"])
-        ):
-            self._count_indicator_reason("no_live_breakout")
-            return None
-        return confirmation
 
     def _count_indicator_reason(self, reason: str) -> None:
         with self._lock:
@@ -519,19 +500,14 @@ class PremiumScreener:
         now = self._as_ist(now if now is not None else self.clock())
         instrument = state["instrument"]
         contract = state["contract"]
-        confirmation = signal.get("indicator_confirmations")
         if (
             contract.get("strike_band") != BAND_ITM_PLUS_1
-            or not isinstance(confirmation, dict)
-            or not confirmation.get("ready")
-            or not all(
-                confirmation.get("passed", {}).get(name) is True for name in REQUIRED_CONFIRMATIONS
-            )
             or signal.get("trigger") != TRIGGER_LIVE
-            or confirmation.get("evidence_mode") != "live_provisional_ltp"
+            or state.get("pending_signal") is not signal
             or self._finite_positive(signal.get("breakout_price")) is None
             or not float(signal["breakout_price"]) > float(signal["reference_high"])
-            or not self._fresh_evidence(signal, now)
+            or self._finite_positive(signal.get("previous_observed_price")) is None
+            or float(signal["previous_observed_price"]) > float(signal["reference_high"])
         ):
             self._count_indicator_reason("entry_gate_rejected")
             return 0
@@ -541,22 +517,34 @@ class PremiumScreener:
                 return 0
             detection = self._detections.get(signal_key)
             if detection is None:
-                if not self._fresh_evidence(signal, now):
+                if not self._fresh_evidence(signal, datetime.fromisoformat(signal["detected_at"])):
                     logger.debug("Historical/incomplete premium evidence skipped: %s", signal_key)
                     return 0
                 detection = {
-                    "detected_at": now.isoformat(),
+                    "detected_at": signal["detected_at"],
                 }
                 self._detections[signal_key] = detection
                 if len(self._detections) > 2000:
                     self._detections.pop(next(iter(self._detections)))
             signal.update(detection)
             if (now - datetime.fromisoformat(signal["detected_at"])).total_seconds() >= 60:
+                state.pop("pending_signal", None)
+                state["reference"]["armed"] = False
                 return 0
             reference = state.get("reference")
             was_armed = bool(reference.get("armed")) if reference is not None else False
             if require_armed and not was_armed:
                 # Another thread already consumed this reference.
+                return 0
+            entry_key = f"{instrument.category}:{instrument.symbol}:{contract['option_type']}"
+            last = self._last_entries.get(entry_key)
+            price = Decimal(str(signal["breakout_price"]))
+            if last is not None and (
+                Decimal(str(last)) * Decimal(".95") <= price <= Decimal(str(last)) * Decimal("1.05")
+            ):
+                reference["armed"] = False
+                state.pop("pending_signal", None)
+                self._count_indicator_reason("reentry_band")
                 return 0
             if reference is not None:
                 # Each RED reference fires at most once.
@@ -586,13 +574,37 @@ class PremiumScreener:
             instrument.symbol,
             contract["option_symbol"],
             contract.get("strike_band"),
-            signal["entry"],
+            signal["breakout_price"],
             signal.get("trigger"),
         )
-        if self._deliver(instrument, signal, contract):
+        try:
+            delivered = self._deliver(instrument, signal, contract)
+        except Exception as exc:
+            logger.warning("Premium alert delivery failed: %s", exc.__class__.__name__)
+            delivered = False
+        if delivered:
+            signal["sent_at"] = (
+                signal.get("_delivery_payload", {}).get("metadata", {}).get("sent_at")
+                or self._as_ist(self.clock()).isoformat()
+            )
+            self._last_entries[entry_key] = signal["breakout_price"]
+            self._alert_state.state["configuration"].update({
+                "last_entries": self._last_entries,
+                "emitted_references": self._processed_signal_order,
+                "last_delivery": {
+                    key: signal.get(key) for key in (
+                        "reference_timestamp", "first_crossing_timestamp", "detected_at", "sent_at",
+                        "reference_high", "breakout_price",
+                    )
+                },
+            })
+            self._alert_state.save()
+            state.pop("pending_signal", None)
+            logger.info("Premium alert timing: %s", self._alert_state.get_config("last_delivery"))
             return 1
         with self._lock:
             self._processed_signal_keys.discard(signal_key)
+            self._processed_signal_order = [key for key in self._processed_signal_order if key != signal_key]
             forget = getattr(self.live_signal_detector, "forget", None)
             if callable(forget):
                 forget(signal_key)
@@ -623,7 +635,6 @@ class PremiumScreener:
                 "instrument_type": contract.get("instrument_type"),
                 "spot_ltp": contract.get("spot_ltp"),
                 "premium_ltp": contract.get("premium_ltp"),
-                "indicator_confirmations": signal.get("indicator_confirmations"),
                 "reference_time_ist": format_ist_timestamp(signal.get("reference_timestamp")),
                 "breakout_time_ist": format_ist_timestamp(signal.get("breakout_timestamp"), with_seconds=True),
                 "signal_time_ist": now_ist.strftime("%H:%M:%S"),
@@ -633,15 +644,17 @@ class PremiumScreener:
 
     def _deliver(self, instrument, signal: dict, contract: dict) -> bool:
         if self.signal_callback is not None:
-            return bool(self.signal_callback(
-                self._build_queue_payload(
+            payload = signal.get("_delivery_payload")
+            if payload is None:
+                payload = self._build_queue_payload(
                     instrument=instrument,
                     signal=signal,
                     route_category=instrument.category,
                     strategy_name="premium_screener",
                     option_data=contract,
                 )
-            ))
+                signal["_delivery_payload"] = payload
+            return bool(self.signal_callback(payload)) and payload["metadata"].get("alert_sent", True)
         if self.trade_control_handler and self.trade_control_bot:
             if self.trade_control_bot.create_and_send_request(signal, contract):
                 return True
@@ -719,6 +732,7 @@ class PremiumScreener:
             "category": route_category,
             "reference_timestamp": signal.get("reference_timestamp"),
             "breakout_timestamp": signal.get("breakout_timestamp"),
+            "first_crossing_timestamp": signal.get("first_crossing_timestamp"),
             "metadata": {
                 "source": "scanner",
                 "route_category": route_category,
@@ -728,6 +742,7 @@ class PremiumScreener:
                 "detected_at": signal.get("detected_at"),
                 "reference_timestamp": signal.get("reference_timestamp"),
                 "breakout_timestamp": signal.get("breakout_timestamp"),
+                "first_crossing_timestamp": signal.get("first_crossing_timestamp"),
                 "reference_time_ist": signal.get("reference_time_ist"),
                 "breakout_time_ist": signal.get("breakout_time_ist"),
                 "premium_strategy": bool(signal.get("premium_strategy")),
@@ -757,7 +772,6 @@ class PremiumScreener:
                 "instrument_type": option_data.get("instrument_type"),
                 "premium_ltp": option_data.get("premium_ltp"),
                 "spot_ltp": option_data.get("spot_ltp"),
-                "indicator_confirmations": signal.get("indicator_confirmations"),
             },
         }
         if signal.get("idempotency_key"):

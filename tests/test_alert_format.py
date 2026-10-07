@@ -53,6 +53,40 @@ class _Handler:
 
 
 class AlertFormatTests(unittest.TestCase):
+    def test_exact_final_commodity_template_in_all_format_paths(self):
+        alert = {
+            **_queue_signal()["metadata"],
+            "underlying": "CRUDE OIL", "category": "commodity_options",
+            "option_symbol": "CRUDEOIL-15Oct2026-8650-CE", "strike": 8650,
+            "expiry": "15OCT2026", "entry": 316.50, "stop_loss": 289.37,
+            "risk_points": 27.13, "breakout_price": 318.50, "premium_ltp": 999,
+            "breakout_timestamp": "2026-10-07T16:12:51+05:30", "spot_ltp": 8714,
+            "indicator_confirmations": {"ready": True}, "volume": 999,
+            "reference_high": 316.50, "detected_at": "2026-10-07T16:13:00+05:30",
+        }
+        expected = (
+            "🚀 BUY CALL | CRUDE OIL (COMMODITY OPTIONS)\n"
+            "Option: CRUDEOIL-15Oct2026-8650-CE\n"
+            "Strike: 8650 CE | Band: ITM+1\n"
+            "Expiry: 15OCT2026\n\n"
+            "📊 TRADE LEVELS\n"
+            "Entry: 316.50\n"
+            "Stop Loss: 289.37\n"
+            "Risk: 27.13 points\n"
+            "Target 1 (1R): 343.63\n"
+            "Target 2 (2R): 370.76\n\n"
+            "⚡ Breakout: 07-Oct-2026 16:12:51 IST @ 318.50\n"
+            "Underlying spot: 8714.00\n"
+            "🧪 PRACTICE MODE: alert only, no live order placed\n\n"
+            "📢 DISCLAIMER: Educational purposes only."
+        )
+        for compact in (False, True):
+            self.assertEqual(expected, _rendered_message(
+                format_option_breakout_alert(alert, practice_mode=True, compact=compact)))
+        queued = {"symbol": "CRUDEOIL", "category": "commodity_options", "metadata": alert}
+        self.assertEqual(expected, _rendered_message(
+            SignalNotifier(_Handler(), practice_mode=True).format_strategy_signal(queued)))
+
     def test_message_contains_every_required_field(self):
         message = SignalNotifier(_Handler(), practice_mode=True).format_strategy_signal(_queue_signal())
         for expected in (
@@ -151,6 +185,7 @@ class AlertFormatTests(unittest.TestCase):
             "Target 2 (2R): 7.47\n"
             "\n"
             "⚡ Breakout: 05-Oct-2026 10:31:05 IST @ 4.62\n"
+            "Underlying spot: N/A\n"
             "📌 SIGNAL ONLY: strategy observation, no broker entry implied\n"
             "\n"
             "📢 DISCLAIMER: Educational purposes only.",
@@ -323,13 +358,13 @@ class AlertFormatTests(unittest.TestCase):
         self.assertNotIn("Timeframe:", message)
         self.assertNotIn("Reference RED candle:", message)
 
-    def test_trade_control_premium_alert_keeps_legacy_format(self):
+    def test_trade_control_premium_alert_has_no_extra_analysis_sections(self):
         handler = TelegramHandler()
         signal = {**_queue_signal()["metadata"], "symbol": "BEL", "signal": "CALL"}
         message = handler.format_signal_message("trade_control", signal, {})
-        self.assertIn("Timeframe: 10-min", message)
-        self.assertIn("Entry: 120.00 (red candle high)", message)
-        self.assertIn("📉", handler.format_signal_message(
+        self.assertNotIn("Timeframe:", message)
+        self.assertIn("Entry: 120.00", message)
+        self.assertIn("🚀", handler.format_signal_message(
             "trade_control",
             {**signal, "option_type": "PE", "action_text": "BUY PUT"},
             {},

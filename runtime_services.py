@@ -86,16 +86,22 @@ class SignalNotifier:
         )
         self._send(TRADE_CONTROL_CHANNEL, message)
 
-    def notify_strategy_signal(self, signal: dict) -> None:
+    def notify_strategy_signal(self, signal: dict) -> bool:
         metadata = signal.get("metadata") or {}
         message = self.format_strategy_signal(signal)
         latency_marks = metadata.get("latency_marks")
+        delivered = False
         for channel in self.channels_for_signal(signal):
             if latency_marks and channel == SCREENER_ALERTS_CHANNEL:
                 marks = dict(latency_marks)
                 marks["send_start"] = now_mark()
                 get_latency_tracker().record(marks)
-            self._send(channel, message)
+            sent = self._send(channel, message)
+            if channel == SCREENER_ALERTS_CHANNEL and sent:
+                metadata["sent_at"] = now_local_iso()
+                delivered = True
+        metadata["alert_sent"] = delivered
+        return delivered
 
     def format_strategy_signal(self, signal: dict) -> str:
         metadata = signal.get("metadata") or {}
