@@ -208,28 +208,48 @@ class AlertFormatTests(unittest.TestCase):
     def test_service_alert_shows_live_indicator_values_status_and_evidence_times(self):
         confirmations = {
             "passed": {
-                "above_vwap": True, "rsi14_above_30_and_rising": True, "above_ema9": True,
-                "macd_above_signal": True, "psar_below_premium": True,
+                "trigger_above_or_straddles_ema9": True, "macd_above_signal": True,
+                "rsi14_above_25_and_rising": True,
             },
             "values": {
-                "premium": 120.5, "vwap": 110.25, "rsi14": 61.3, "rsi14_previous": 58.1,
-                "ema9": 118.4, "macd12_26": 2.5, "macd_signal9": 1.8, "psar_0_02_0_2": 115.2,
+                "premium": 120.5, "trigger_low": 118.0, "trigger_high": 121.0, "ema9": 118.4,
+                "rsi14": 61.3, "rsi14_previous": 58.1, "macd12_26": 2.5, "macd_signal9": 1.8,
             },
+            "ema9_position": "straddle",
+            "anti_chop": {"bars": 8, "window_low": 95.0, "window_high": 110.0, "range_fraction": 0.146341,
+                          "sideways": True},
+            "continuation": {"mode": "two_fresh_polls", "qualified": True, "reference_high": 112.0,
+                             "initial_stop": 93.1, "r": 18.9, "momentum_threshold": 117.67},
             "evidence_mode": "live_provisional_ltp",
             "indicator_as_of": "2026-10-05T10:35:00+05:30",
-            "vwap_as_of": "2026-10-05T10:25:00+05:30",
             "live_quote_as_of": "2026-10-05T10:35:03+05:30",
         }
         message = SignalNotifier(_Handler()).format_strategy_signal(
             _queue_signal(indicator_confirmations=confirmations)
         )
         self.assertIn("PREMIUM CONFIRMATIONS", message)
-        self.assertIn("✓ VWAP: 120.50 / 110.25", message)
-        self.assertIn("✓ RSI14: 61.30 / 58.10", message)
-        self.assertIn("Live provisional close; VWAP uses completed volume", message)
+        self.assertIn("✓ EMA9: trigger 120.50 straddle EMA 118.40 (L 118.00 / H 121.00)", message)
+        self.assertIn("✓ MACD 12/26/9: 2.50 &gt; 1.80", message)
+        self.assertIn("✓ RSI14 (&gt;25, rising): 61.30 vs prev 58.10", message)
+        self.assertIn("Range 8 bars: 95.00–110.00 (14.6%, ≤20% sideways) → SIDEWAYS", message)
+        self.assertIn(
+            "Confirmation: two fresh polls | Ref high 112.00 | Stop 93.10 | R 18.90 | 0.3R 117.67", message)
+        self.assertIn("Live provisional (observed LTP ticks)", message)
         self.assertIn("05-Oct-2026 10:35:00 IST", message)
-        self.assertIn("05-Oct-2026 10:25:00 IST", message)
         self.assertIn("Fresh option LTP as of 05-Oct-2026 10:35:03 IST", message)
+        self.assertNotIn("VWAP", message)
+        self.assertNotIn("PSAR", message)
+        self.assertLess(len(message), 4096)
+
+    def test_service_alert_escapes_indicator_text(self):
+        confirmations = {"passed": {}, "values": {}, "ema9_position": "<b>x</b>",
+                         "continuation": {"mode": "<i>m</i>"}}
+        message = SignalNotifier(_Handler()).format_strategy_signal(
+            _queue_signal(indicator_confirmations=confirmations)
+        )
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", message)
+        self.assertIn("&lt;i&gt;m&lt;/i&gt;", message)
+        self.assertIn("✗ EMA9: trigger N/A", message)
 
     def test_screener_payload_feeds_formatter(self):
         from types import SimpleNamespace

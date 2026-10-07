@@ -16,7 +16,23 @@ SECRET = "s" * 40
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def passing_breakout_candles():
+SESSION_START = datetime(2026, 10, 5, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+# Trending day: the 8 bars before the 10:35 trigger span 84-110 (>20%, normal mode);
+# most recent RED 105/110/98/100, trigger 100/113/99/112. No volume field at all.
+NORMAL_DAY = [
+    (85, 88, 84, 87), (87, 91, 86, 90), (90, 94, 89, 93), (93, 97, 92, 96), (96, 100, 95, 99),
+    (99, 103, 98, 102), (102, 106, 101, 105), (105, 110, 98, 100), (100, 113, 99, 112),
+]
+# Sideways day: the 8 bars before the trigger span 95-110 (~14.6%); RED 105/110/98/100
+# (stop 93.10, R 16.90, 0.3R level 115.07); trigger closes 112 (< 0.3R level).
+SIDEWAYS_DAY = [
+    (99, 101, 98, 100), (100, 102, 99, 101), (101, 103, 100, 102), (102, 104, 101, 103),
+    (103, 104, 100, 101), (101, 105, 99, 104), (104, 106, 101, 103), (105, 110, 98, 100),
+    (100, 113, 99, 112),
+]
+
+
+def passing_breakout_candles(today=NORMAL_DAY):
     from datetime import timedelta
 
     candles = []
@@ -26,19 +42,12 @@ def passing_breakout_candles():
         open_price = close - 0.1 if index % 4 else close + 0.08
         candles.append({
             "timestamp": start.isoformat(), "open": open_price, "high": max(open_price, close) + 0.4,
-            "low": min(open_price, close) - 0.4, "close": close, "volume": 100 + index,
+            "low": min(open_price, close) - 0.4, "close": close,
         })
-    for stamp, open_price, high, low, close in (
-        ("09:15", 99, 101, 98, 100), ("09:25", 100, 102, 99, 101),
-        ("09:35", 101, 103, 100, 102), ("09:45", 102, 104, 101, 103),
-        ("09:55", 103, 104, 100, 101), ("10:05", 100, 110, 90, 98),
-        ("10:15", 98, 113, 97, 112),
-    ):
-        hour, minute = map(int, stamp.split(":"))
-        start = datetime(2026, 10, 5, hour, minute, tzinfo=IST)
+    for index, (open_price, high, low, close) in enumerate(today):
         candles.append({
-            "timestamp": start.isoformat(), "open": open_price, "high": high, "low": low,
-            "close": close, "volume": 100,
+            "timestamp": (SESSION_START + timedelta(minutes=10 * index)).isoformat(),
+            "open": open_price, "high": high, "low": low, "close": close,
         })
     return candles
 
@@ -48,7 +57,7 @@ def pipeline(tmp_path, monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     import main
 
-    clock = SimpleNamespace(now=datetime(2026, 10, 5, 10, 25, 5, tzinfo=IST).timestamp())
+    clock = SimpleNamespace(now=datetime(2026, 10, 5, 10, 45, 5, tzinfo=IST).timestamp())
     portfolio = PaperPortfolio(tmp_path / "pipeline.db", clock=lambda: clock.now)
     handler = Mock()
     handler._get_bot_for_category.return_value = ("fake-token", -100)
@@ -129,7 +138,8 @@ def test_actual_ce_pe_scanner_to_main_queue_portfolio_formatter(pipeline, action
         assert signal["metadata"]["strike_band"] == "ITM+1"
         assert signal["metadata"]["indicator_confirmations"]["ready"]
         assert signal["timestamp"] == signal["detected_at"]
-        assert signal["breakout_timestamp"] == "2026-10-05T10:15:00+05:30"
+        assert signal["breakout_timestamp"] == "2026-10-05T10:35:00+05:30"
+        assert signal["metadata"]["indicator_confirmations"]["continuation"]["mode"] == "normal"
         assert signal["queue_received_at"]
     service_messages = [c.args[1] for c in p.handler.send_to_channel.call_args_list]
     assert len(service_messages) == 2
@@ -316,3 +326,85 @@ def test_main_queue_preserves_shorter_original_deadline(pipeline, monkeypatch, d
     assert p.worker.process_one()
     assert p.worker.status()["last_reason"] == "stale_signal"
     assert not p.portfolio.snapshot()["positions"]
+
+
+def _live_quotes(p, price):
+    p.data.fetch_quotes.side_effect = lambda request: {
+        (segment, sid): {"price": price, "timestamp": p.clock.now}
+        for segment, ids in request.items() for sid in ids
+    }
+
+
+def _live_poll(p, scanner=None):
+    return (scanner or p.scanner).live_check_once(datetime.fromtimestamp(p.clock.now, IST))
+
+
+def test_sideways_pending_reference_emits_once_after_two_fresh_polls_without_fill(pipeline):
+    p = pipeline
+    p.scanner.fetcher.fetch_option_candles = Mock(return_value=passing_breakout_candles(SIDEWAYS_DAY))
+    assert scan(p) == 0                      # completed close 112 < 0.3R level: stays armed
+    assert len(p.scanner.armed_contracts()) == 2
+    assert p.queue.queue_size() == 0
+    _live_quotes(p, 113)
+    assert _live_poll(p) == 0                # first fresh poll: pending
+    assert _live_poll(p) == 0                # same cached timestamp: not a second observation
+    p.clock.now += 1
+    assert _live_poll(p) == 2                # second distinct fresh poll: CE + PE
+    queued = list(p.queue._queue)
+    assert {s["metadata"]["option_type"] for s in queued} == {"CE", "PE"}
+    for signal in queued:
+        meta = signal["metadata"]
+        assert meta["strike_band"] == "ITM+1" and meta["trigger"] == "live_ltp"
+        continuation = meta["indicator_confirmations"]["continuation"]
+        assert continuation["mode"] == "two_fresh_polls" and continuation["sideways"]
+        assert meta["indicator_confirmations"]["anti_chop"]["sideways"] is True
+    p.clock.now += 1
+    assert _live_poll(p) == 0                # reference consumed: no duplicate
+    assert len(p.handler.send_to_channel.call_args_list) == 2
+    assert p.worker.process_one() and p.worker.process_one()
+    snapshot = p.portfolio.snapshot()
+    assert len(snapshot["pending"]) == 2 and not snapshot["executions"] and not snapshot["positions"]
+    assert len([m for m in sent_messages(p) if "PENDING APPROVAL" in m["text"]]) == 2
+    p.broker.place_trade.assert_not_called()
+
+    # Restart: ephemeral poll counts are not carried over, and a re-detected
+    # signal cannot create a second approval request for the same reference.
+    restarted = PremiumScreener(
+        p.data, p.handler, Mock(), signal_callback=p.scanner.signal_callback,
+        clock=p.scanner.clock,
+    )
+    restarted.fetcher = p.scanner.fetcher
+    p.clock.now += 1
+    assert restarted._refresh_instrument(
+        p.instrument, "10min", datetime.fromtimestamp(p.clock.now, IST), spot=24450) == 0
+    assert _live_poll(p, restarted) == 0
+    p.clock.now += 1
+    assert _live_poll(p, restarted) == 0     # duplicate idempotency key is refused downstream
+    assert len(p.handler.send_to_channel.call_args_list) == 2
+    while p.queue.queue_size():
+        assert p.worker.process_one()
+    snapshot = p.portfolio.snapshot()
+    assert len(snapshot["pending"]) == 2 and not snapshot["executions"]
+    assert len([m for m in sent_messages(p) if "PENDING APPROVAL" in m["text"]]) == 2
+
+
+def test_sideways_single_poll_at_0_3r_emits_and_stale_quote_stays_blocked(pipeline):
+    p = pipeline
+    p.scanner.fetcher.fetch_option_candles = Mock(return_value=passing_breakout_candles(SIDEWAYS_DAY))
+    assert scan(p) == 0
+    p.data.fetch_quotes.side_effect = lambda request: {
+        (segment, sid): {"price": 120, "timestamp": p.clock.now - 11}
+        for segment, ids in request.items() for sid in ids
+    }
+    assert _live_poll(p) == 0                # stale quote evidence never triggers
+    _live_quotes(p, 115.1)                   # >= 110 + 0.3 * 16.90 = 115.07
+    assert _live_poll(p) == 2
+    assert {s["metadata"]["indicator_confirmations"]["continuation"]["mode"]
+            for s in p.queue._queue} == {"momentum_0_3r"}
+
+
+def test_historical_startup_breakout_is_not_freshened(pipeline):
+    p = pipeline
+    p.clock.now += 120                       # breakout bar closed > 60s ago
+    assert scan(p) == 0
+    assert p.queue.queue_size() == 0

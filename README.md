@@ -856,36 +856,65 @@ to select real listed strikes; strategy indicators are never calculated from spo
   high or fresh live premium must be **strictly above** its high. Entry is the red
   high, stop is 5% below the red low, and the existing 2R target/trailing and
   paper approval flow remain unchanged.
-- A CE/PE entry is eligible only when **all five** same-contract premium checks
-  pass: premium > same-session VWAP; Wilder RSI(14) > 30 and > its preceding
-  completed observation; premium > EMA(9); MACD(12,26) line > EMA(9) signal;
-  PSAR(0.02, max 0.2) < premium. Equality fails; none of these conditions is
-  optional. Failing filters do not consume the red reference; a later live
-  crossing can qualify if the price condition and all indicators still pass.
+- A CE/PE (long-option BUY) entry is eligible only when **all three** same-contract
+  premium checks pass at the trigger (equality fails each one):
+  - **EMA(9) trigger rule:** the trigger candle breaking the red high must be
+    *above or straddling* the contemporaneous EMA9: trigger price > EMA9, **or**
+    the trigger candle's observed `low <= EMA9 <= high`. A trigger wholly below
+    EMA9 is rejected. The reference red candle itself may be wholly below, wholly
+    above, or straddling EMA9. Completed triggers use their actual OHLC; live
+    triggers use the forming bucket's observed fresh-LTP ticks (no invented
+    high/low; missing evidence fails closed). The fresh price must still be
+    strictly above the red high.
+  - **MACD(12,26,9):** MACD line strictly above its signal line.
+  - **RSI(14):** strictly above **25** and rising (strictly above the preceding
+    completed indicator observation; flat or falling fails).
+- VWAP and Parabolic SAR are **not** used, and volume is no longer required:
+  candles with missing/zero volume can pass when OHLC evidence is valid.
+- **Anti-chop (Option A):** the 8 completed same-contract 10-minute candles before
+  the trigger bucket give `window_high = max(high)`, `window_low = min(low)`,
+  `mid = (window_high + window_low) / 2`. The market is **sideways** when
+  `mid > 0` and `(window_high - window_low) / mid <= 0.20` (inclusive, about
+  ±10%). Example: highs/lows spanning 90–110 around 100 → 20/100 = 20% →
+  sideways; 89.9–110 → 20.1% → normal. The window must be on the trigger's IST
+  date with no gap over 30 minutes (sessions are never bridged); fewer than 8
+  usable bars means no entry, so the first ~80 minutes of each session cannot
+  signal.
+  - **Normal** (range > 20%): no extra delay; base breakout + the three gates.
+  - **Sideways**: base breakout + the three gates **and either** (a) **two
+    consecutive, distinct fresh live poll observations** strictly above the same
+    red high with every gate passing on both polls, **or** (b) fresh premium
+    `>= red_high + 0.3R`, where `R = red_high - initial stop` (> 0, premium
+    points). Equality at 0.3R qualifies; equality at the red high is not a
+    breakout. Two polls are **not** two candles and are not evidence of accuracy.
+    A repeated read of the same cached quote timestamp is not a second
+    observation. Counts reset when price is at/below the red high, a gate fails,
+    a quote is stale/missing, more than 10 s passes between counted polls, or the
+    reference, contract, bucket or session changes; they are in-memory only and
+    restart from zero after a restart. A completed sideways trigger qualifies
+    only if its actual **close** is `>= red_high + 0.3R`; otherwise the reference
+    stays armed for genuine live polls (polls are never fabricated from OHLC).
 - EMA/MACD use SMA seeding; Wilder RSI seeds from 14 changes (flat=50,
   gain-only=100, loss-only=0). At least 34 valid, ordered 10-minute candles are
-  required; prior-session candles warm the close-based indicators. VWAP resets by
-  IST exchange session and uses completed current-session candles only, weighted
-  by real volume at HLC3 (`(high + low + close) / 3`). Missing/invalid volume,
-  zero session volume, stale evidence, or inadequate warmup means no signal.
-- The live quote feed provides timestamped LTP, not forming OHLCV/volume. Live
-  close-based checks therefore use a provisional candle built from observed
-  fresh LTP ticks; it is a snapshot, not a repeated appended bar. Live VWAP uses
-  only completed real-volume evidence, and the alert shows the indicator-bar,
-  fresh-LTP, and VWAP as-of times. This is a disclosed approximation, not
-  inferred live cumulative volume. The service alert includes each value and
-  pass mark:
+  required; prior-session candles warm the indicators. Stale evidence or
+  inadequate warmup means no signal. All gates are evaluated before reference
+  consumption, deduplication, alert delivery, or approval enqueue, so a failed or
+  pending candidate can still qualify later.
+- The live quote feed provides timestamped LTP, not forming OHLC. Live checks use
+  a provisional snapshot of observed fresh LTP ticks (never appended to, or
+  mutating, completed history). No additional quote requests are made for
+  confirmation; the existing shared live cadence/cooldown is reused. The service
+  alert shows the evidence:
 
   ```text
   🧭 PREMIUM CONFIRMATIONS
-  ✓ VWAP: 120.50 / 110.25
-  ✓ RSI14: 61.30 / 58.10
-  ✓ EMA9: 120.50 / 118.40
-  ✓ MACD: 2.50 / 1.80
-  ✓ PSAR: 115.20 / 120.50
-  Evidence: Live provisional close; VWAP uses completed volume
+  ✓ EMA9: trigger 120.50 straddle EMA 118.40 (L 118.00 / H 121.00)
+  ✓ MACD 12/26/9: 2.50 > 1.80
+  ✓ RSI14 (>25, rising): 61.30 vs prev 58.10
+  Range 8 bars: 95.00–110.00 (14.6%, ≤20% sideways) → SIDEWAYS
+  Confirmation: two fresh polls | Ref high 112.00 | Stop 93.10 | R 18.90 | 0.3R 117.67
+  Evidence: Live provisional (observed LTP ticks) | indicators 05-Oct-2026 10:35:00 IST
   Fresh option LTP as of 05-Oct-2026 10:35:03 IST
-  VWAP volume as of 05-Oct-2026 10:25:00 IST
   ```
 - Filters narrow signal eligibility; they are **not a guarantee of accuracy or
   profit**. Keep practice mode enabled and evaluate with paper trading/backtests.
