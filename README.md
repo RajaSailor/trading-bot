@@ -1,10 +1,10 @@
 # DhanHQ Trading Bot - Comprehensive README
 
-**Paper trading and option alerts; real-money activation BLOCKED** | Telegram + DhanHQ Integration
+**Option alerts, paper trading and guarded NIFTY-only auto execution** | Telegram + DhanHQ Integration
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-brightgreen.svg)](https://www.python.org/downloads/)
-[![Status: Live Blocked](https://img.shields.io/badge/Status-Live%20Blocked-orange.svg)]()
+[![Status: Default Off](https://img.shields.io/badge/Status-Real%20Trading%20Default%20Off-orange.svg)]()
 
 ---
 
@@ -16,17 +16,31 @@ integration modules are not the paper execution path. Compact strategy alerts
 remain on `service_alerts`; approvals, simulated fills, protection, and account
 reports go to `trade_control`.
 
-### Separate NIFTY route — implementation present, production BLOCKED
+### Automatic NIFTY-only Super Orders — default OFF
 
-`NIFTY_LIVE_ENABLED=false` is the default. When deliberately configured, NIFTY
-signals are routed exclusively to the isolated approval architecture, not to
-duplicate paper approvals. All other scanner categories retain paper behavior.
-The isolated engine has mocked execution tests, a separate SQLite ledger,
-versioned authenticated controls, reservations, and conservative reconciliation.
-**This release cannot send real orders:** the production adapter is fail-closed.
-It is not a working real-money deployment, even with all three flags set.
-See [the activation blockers and official-source evidence](docs/DEPLOYMENT_GUIDE.md).
-Human review and completed production safeguards are required before activation.
+`NIFTY_LIVE_ENABLED=false`, `PRACTICE_MODE=true` and `AUTO_TRADING_ENABLED=false`
+are the safety defaults. The dedicated real route requires all three guards to
+permit execution; changing the paper runtime's flags alone is insufficient.
+Only selected NIFTY INDEX ITM+1 CE/PE long entries are eligible, exactly one
+security-master lot. Other indices, stock options and commodities remain
+signal-only in auto-live mode.
+
+The entry uses a Dhan Super Order with carry-forward product mapping, a LIMIT
+entry and broker-managed stop/target. Unknown submissions never cause blind
+resends. MARKET fallback requires confirmed zero-fill rejection and reconciliation;
+MARKET may be broker-protected or converted and does not guarantee a fill.
+Fresh funds/margin checks precede every entry; ₹25,000 is **not assumed sufficient**.
+At most two first-filled logical entries per IST day and one open/reserved position
+are permitted. SL is tick-rounded `0.95 × red candle low`; after actual fill E,
+target is `E + 2 × (E − SL)`. First +5 points moves SL to entry, then each additional
++5 favorable points raises it another 5, monotonically.
+
+IITS Scalping Options (`service_alerts`) keeps compact signals across categories.
+In auto-live mode Trade Control gets only actual NIFTY entry and completed-exit
+messages with funds context and realized P&L, not approvals or paper reports.
+Diagnostics stay in logs. See the [deployment runbook](docs/DEPLOYMENT_GUIDE.md)
+for broker capability gates and operational prerequisites.
+**Real options trading can lose capital; this strategy has no profit guarantee.**
 
 ### Persistence and controls
 
