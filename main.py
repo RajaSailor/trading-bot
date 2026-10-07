@@ -223,6 +223,20 @@ def _auto_live_nifty(config: dict) -> bool:
             and live.get("auto") is True)
 
 
+def _validate_auto_live_channels(config: dict) -> None:
+    if not _auto_live_nifty(config):
+        return
+    trade_token = os.getenv("BOT_TRADE_CONTROL_TOKEN")
+    signal_token = os.getenv("BOT_SERVICE_ALERTS_TOKEN")
+    channels = config.get("channels", {})
+    trade_chat = channels.get("trade_control")
+    signal_chat = channels.get("service_alerts")
+    if not all((trade_token, signal_token, trade_chat, signal_chat)):
+        raise RuntimeError("Auto-live requires explicit execution and signal bot/channel credentials")
+    if trade_token == signal_token or trade_chat == signal_chat:
+        raise RuntimeError("Auto-live execution and signal bots/channels must be separate")
+
+
 def _apply_refreshed_token(token: str) -> None:
     if not token or dhan_integration is None:
         return
@@ -415,6 +429,7 @@ def initialize_app(force: bool = False):
     
     try:
         runtime_config = _load_runtime_config()
+        _validate_auto_live_channels(runtime_config)
 
         # 1. Initialize DhanHQ Integration
         logger.info("1️⃣ Initializing DhanHQ Integration...")

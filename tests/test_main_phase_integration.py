@@ -194,6 +194,28 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             )
                             self.assertEqual(bad_webhook_response.status_code, 400)
 
+    def test_auto_live_requires_separate_explicit_bot_channels(self):
+        main_module = _load_main()
+        config = {
+            "nifty_live": {"enabled": True, "practice": False, "auto": True},
+            "channels": {"trade_control": "-1001", "service_alerts": "-1002"},
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError):
+                main_module._validate_auto_live_channels(config)
+        with patch.dict(os.environ, {
+            "BOT_TRADE_CONTROL_TOKEN": "same", "BOT_SERVICE_ALERTS_TOKEN": "same",
+        }):
+            with self.assertRaises(RuntimeError):
+                main_module._validate_auto_live_channels(config)
+        with patch.dict(os.environ, {
+            "BOT_TRADE_CONTROL_TOKEN": "trade", "BOT_SERVICE_ALERTS_TOKEN": "signal",
+        }):
+            main_module._validate_auto_live_channels(config)
+            config["channels"]["service_alerts"] = "-1001"
+            with self.assertRaises(RuntimeError):
+                main_module._validate_auto_live_channels(config)
+
     def test_alert_manager_routes_to_trade_control_not_service_alerts(self):
         main_module = _load_main()
         created_channels = []
