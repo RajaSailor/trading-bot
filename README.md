@@ -909,7 +909,7 @@ to select real listed strikes; strategy indicators are never calculated from spo
   ```text
   🧭 PREMIUM CONFIRMATIONS
   ✓ EMA9: trigger 120.50 straddle EMA 118.40 (L 118.00 / H 121.00)
-  ✓ MACD 12/26/9: 2.50 > 1.80
+  ✓ MACD 12/26/9: 2.50 vs signal 1.80
   ✓ RSI14 (>25, rising): 61.30 vs prev 58.10
   Range 8 bars: 95.00–110.00 (14.6%, ≤20% sideways) → SIDEWAYS
   Confirmation: two fresh polls | Ref high 112.00 | Stop 93.10 | R 18.90 | 0.3R 117.67

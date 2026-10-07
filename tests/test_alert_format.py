@@ -217,7 +217,7 @@ class AlertFormatTests(unittest.TestCase):
             },
             "ema9_position": "straddle",
             "anti_chop": {"bars": 8, "window_low": 95.0, "window_high": 110.0, "range_fraction": 0.146341,
-                          "sideways": True},
+                          "max_range_fraction": 0.2, "sideways": True},
             "continuation": {"mode": "two_fresh_polls", "qualified": True, "reference_high": 112.0,
                              "initial_stop": 93.1, "r": 18.9, "momentum_threshold": 117.67},
             "evidence_mode": "live_provisional_ltp",
@@ -229,7 +229,7 @@ class AlertFormatTests(unittest.TestCase):
         )
         self.assertIn("PREMIUM CONFIRMATIONS", message)
         self.assertIn("✓ EMA9: trigger 120.50 straddle EMA 118.40 (L 118.00 / H 121.00)", message)
-        self.assertIn("✓ MACD 12/26/9: 2.50 &gt; 1.80", message)
+        self.assertIn("✓ MACD 12/26/9: 2.50 vs signal 1.80", message)
         self.assertIn("✓ RSI14 (&gt;25, rising): 61.30 vs prev 58.10", message)
         self.assertIn("Range 8 bars: 95.00–110.00 (14.6%, ≤20% sideways) → SIDEWAYS", message)
         self.assertIn(

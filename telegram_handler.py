@@ -161,7 +161,7 @@ def format_option_breakout_alert(
             f"(L {esc(indicator_number(values.get('trigger_low')))} / H {esc(indicator_number(values.get('trigger_high')))})"
         )
         lines.append(
-            f"{mark('macd_above_signal')} MACD 12/26/9: {esc(indicator_number(values.get('macd12_26')))} &gt; "
+            f"{mark('macd_above_signal')} MACD 12/26/9: {esc(indicator_number(values.get('macd12_26')))} vs signal "
             f"{esc(indicator_number(values.get('macd_signal9')))}"
         )
         lines.append(
@@ -176,9 +176,13 @@ def format_option_breakout_alert(
             except (TypeError, ValueError):
                 range_pct = "N/A"
             regime = "SIDEWAYS" if anti_chop.get("sideways") is True else "normal"
+            try:
+                limit_pct = f"{float(anti_chop.get('max_range_fraction')) * 100:g}%"
+            except (TypeError, ValueError):
+                limit_pct = "N/A"
             lines.append(
                 f"Range {esc(anti_chop.get('bars'))} bars: {esc(indicator_number(anti_chop.get('window_low')))}–"
-                f"{esc(indicator_number(anti_chop.get('window_high')))} ({esc(range_pct)}, ≤20% sideways) → {esc(regime)}"
+                f"{esc(indicator_number(anti_chop.get('window_high')))} ({esc(range_pct)}, ≤{esc(limit_pct)} sideways) → {esc(regime)}"
             )
         if isinstance(continuation, dict):
             mode_labels = {"normal": "normal", "two_fresh_polls": "two fresh polls", "momentum_0_3r": "0.3R momentum"}

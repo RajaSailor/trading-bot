@@ -40,6 +40,8 @@ CANDLE_SETTLE_SECONDS = 5
 # Retry a failed instrument refresh sooner than the next 10-minute boundary.
 REFRESH_RETRY_SECONDS = 120
 LIVE_QUOTE_MAX_AGE_SECONDS = 10
+# Max spacing between two counted sideways-confirmation polls (Option A).
+LIVE_CONFIRMATION_MAX_GAP_SECONDS = LIVE_QUOTE_MAX_AGE_SECONDS
 
 
 def _env_float(name: str, default: float) -> float:
@@ -472,7 +474,7 @@ class PremiumScreener:
 
         Keyed by contract, red reference and forming bucket. A repeated read of
         the same quote timestamp (shared cache) is not a new observation. A gap
-        longer than the live quote freshness window expires the evidence.
+        longer than ``LIVE_CONFIRMATION_MAX_GAP_SECONDS`` expires the evidence.
         In-memory only: a restart starts again from zero.
         """
         reference = state.get("reference") or {}
@@ -487,7 +489,7 @@ class PremiumScreener:
             if (
                 not isinstance(tracker, dict)
                 or tracker.get("key") != key
-                or observed_at - tracker["last_observed_at"] > LIVE_QUOTE_MAX_AGE_SECONDS
+                or observed_at - tracker["last_observed_at"] > LIVE_CONFIRMATION_MAX_GAP_SECONDS
             ):
                 tracker = {"key": key, "count": 0, "last_observed_at": float("-inf")}
                 state["continuation"] = tracker
