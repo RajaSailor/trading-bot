@@ -21,6 +21,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
+from decimal import Decimal, ROUND_CEILING
 from zoneinfo import ZoneInfo
 
 from live_broker import LiveBlocked, LiveNotSent, canonical_expiry, positive
@@ -28,11 +29,12 @@ from live_broker import LiveBlocked, LiveNotSent, canonical_expiry, positive
 
 class LiveExecution:
     def __init__(self, db_path, broker, *, enabled=False, practice=True,
-                 auto=False, clock=time.time, approval_seconds=120):
+                 auto=False, auto_mode=False, clock=time.time, approval_seconds=120):
         if str(db_path) == ":memory:":
             raise ValueError("live state requires a persistent dedicated database")
         self.db_path, self.broker, self.clock = str(db_path), broker, clock
         self.enabled, self.practice, self.auto = enabled, practice, auto
+        self.auto_mode = auto_mode is True
         self.approval_seconds = approval_seconds
         self._lock = threading.RLock()
         with self._db() as db:
@@ -167,14 +169,10 @@ class LiveExecution:
         if (data.get("source") != "scanner" or data.get("strategy") != "premium_screener"
                 or data.get("trigger") != "live_ltp" or data.get("symbol") != "NIFTY"):
             raise LiveBlocked("fresh scanner live_ltp route only")
-        confirmation = data.get("indicator_confirmations")
-        gates = ("trigger_above_or_straddles_ema9", "macd_above_signal",
-                 "rsi14_above_25_and_rising")
-        if (not isinstance(confirmation, dict) or confirmation.get("ready") is not True
-                or confirmation.get("evidence_mode") != "live_provisional_ltp"
-                or not isinstance(confirmation.get("passed"), dict)
-                or not all(confirmation["passed"].get(gate) is True for gate in gates)):
-            raise LiveBlocked("missing live indicator confirmations")
+        if self.auto_mode and not self.broker.readiness().get("super_order_ready"):
+            raise LiveBlocked(
+                "automatic NIFTY execution is fail-closed until a verified Dhan Super Order adapter is available"
+            )
         detected = self._epoch(data.get("detected_at"))
         breakout_time = self._epoch(data.get("breakout_timestamp"))
         reference_time = self._epoch(data.get("reference_timestamp"))
@@ -203,22 +201,36 @@ class LiveExecution:
                 return json.loads(existing[0])
             self._entry_guards(db)
             contract = self.broker.contract(data)
+            entry_key = f"index_options:NIFTY:{contract['option_type']}"
+            trigger_price = Decimal(str(breakout))
+            for previous in self._all(db):
+                if (previous["side"] != "BUY" or previous.get("entry_key") != entry_key
+                        or previous.get("filled_quantity", 0) <= 0):
+                    continue
+                acted_price = Decimal(str(previous["breakout_price"]))
+                if acted_price * Decimal(".95") <= trigger_price <= acted_price * Decimal("1.05"):
+                    raise LiveBlocked("NIFTY re-entry within inclusive five-percent band")
             intent = {"CE": "CALL", "PE": "PUT"}[contract["option_type"]]
             if data.get("signal", intent) != intent or data.get("action_text", "BUY " + intent) != "BUY " + intent:
                 raise LiveBlocked("inconsistent option intent")
             lots = data.get("lots", 1)
-            if isinstance(lots, bool) or not isinstance(lots, int) or not 1 <= lots <= 5:
-                raise LiveBlocked("lots must be integer 1..5")
+            if isinstance(lots, bool) or not isinstance(lots, int) or lots != 1:
+                raise LiveBlocked("NIFTY entries require exactly one lot")
             current = positive(self.broker.read("quote", str(contract["security_id"])).get("price"))
             if current <= reference_high:
                 raise LiveBlocked("current actual premium not above reference high")
+            stop = self._round_up_tick(stop, contract["tick_size"])
+            if stop >= entry:
+                raise LiveBlocked("tick-rounded stop must remain below entry")
             item = {field: contract[field] for field in (
                 "security_id", "underlying", "exchange_segment", "instrument_type",
                 "option_type", "expiry", "strike", "lot_size", "tick_size")}
             item.update(id=uuid.uuid4().hex[:20], signal_key=key, side="BUY",
+                        entry_key=entry_key,
                         lots=lots, quantity=lots * int(contract["lot_size"]), version=1,
                         status="AWAITING", order_type="LIMIT",
                         limit_price=entry,
+                        product_type="MARGIN",
                         expires_at=detected + self.approval_seconds, filled_quantity=0,
                         owned_quantity=0, reserved_cash=0, initial_stop_loss=stop,
                         stop_loss=stop, reference_high=reference_high, reference_low=reference_low,
@@ -240,6 +252,8 @@ class LiveExecution:
 
     def bind(self, identifier, actor, chat_id):
         """Bind once when the authenticated Telegram controller publishes a card."""
+        if self.auto_mode:
+            raise LiveBlocked("manual controls are disabled in NIFTY auto mode")
         with self._lock, self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             item = self._get(db, identifier)
@@ -253,13 +267,14 @@ class LiveExecution:
 
     def modify(self, identifier, version, actor, chat_id, *, lots=None,
                order_type=None, limit_price=None):
+        if self.auto_mode:
+            raise LiveBlocked("manual controls are disabled in NIFTY auto mode")
         with self._lock, self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             item = self._bound(db, identifier, version, actor, chat_id)
             if lots is not None:
-                if item["side"] != "BUY" or isinstance(lots, bool) or not isinstance(lots, int) or not 1 <= lots <= 5:
-                    raise LiveBlocked("invalid lots")
-                item.update(lots=lots, quantity=lots * int(item["lot_size"]))
+                if item["side"] != "BUY" or isinstance(lots, bool) or not isinstance(lots, int) or lots != 1:
+                    raise LiveBlocked("NIFTY entries require exactly one lot")
             if order_type is not None:
                 item["order_type"] = order_type
             if limit_price is not None:
@@ -271,6 +286,8 @@ class LiveExecution:
             return item
 
     def reject(self, identifier, version, actor, chat_id):
+        if self.auto_mode:
+            raise LiveBlocked("manual controls are disabled in NIFTY auto mode")
         with self._lock, self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             item = self._bound(db, identifier, version, actor, chat_id)
@@ -281,6 +298,8 @@ class LiveExecution:
 
     def approve(self, identifier, version, actor, chat_id):
         """Persist UNKNOWN before the broker side effect; never blind retry."""
+        if self.auto_mode:
+            raise LiveBlocked("manual controls are disabled in NIFTY auto mode")
         with self._lock:
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -378,6 +397,20 @@ class LiveExecution:
                         item["entry_day"] = self._day(fill_time)
                         item["first_fill_timestamp"] = fill_time
                 item.update(status=status, filled_quantity=filled)
+                if self.auto_mode and item["side"] == "BUY" and filled and not item.get("entry_notified"):
+                    try:
+                        funds = self.broker.read("funds")
+                        available_funds = funds.get("available")
+                        funds_asof = funds.get("timestamp")
+                    except LiveBlocked:
+                        available_funds = funds_asof = None
+                    item.update(
+                        entry_notified=True,
+                        capital_committed=item["average_price"] * filled,
+                        available_funds=available_funds,
+                        funds_asof=funds_asof,
+                    )
+                    self._event(db, "entry_executed", item)
                 if record.get("order_id"):
                     item["order_id"] = str(record["order_id"])
                 if status in ("FILLED", "CANCELLED", "REJECTED"):
@@ -412,8 +445,24 @@ class LiveExecution:
                     risk = fill - entry["initial_stop_loss"]
                     if risk <= 0:
                         state["halted"] = True
-                    entry.update(risk_points=max(0, risk), target_1=fill + max(0, risk),
-                                 target_2=fill + 2 * max(0, risk))
+                    entry.update(
+                        risk_points=max(0, risk),
+                        target_2=self._round_up_tick(
+                            fill + 2 * max(0, risk), entry["tick_size"]),
+                    )
+            if self.auto_mode:
+                entries_by_id = {item["id"]: item for item in entries}
+                for item in items:
+                    if item["side"] != "SELL" or item["status"] != "FILLED" or item.get("exit_notified"):
+                        continue
+                    entry = entries_by_id.get(item.get("entry_id"))
+                    if not entry or not item.get("average_price") or not entry.get("average_price"):
+                        continue
+                    item["realized_pnl"] = (
+                        item["average_price"] - entry["average_price"]
+                    ) * item["filled_quantity"]
+                    item["exit_notified"] = True
+                    self._event(db, "exit_executed", item)
             known = {str(i["security_id"]) for i in items if i["side"] == "BUY"}
             if any(float(qty) != 0 and str(security) not in known
                    for security, qty in snap["positions"].items()):
@@ -426,6 +475,8 @@ class LiveExecution:
 
     def request_exit(self, entry_id, *, reason="manual"):
         """Cancel entry remainder first; a later snapshot must confirm cancellation."""
+        if self.auto_mode:
+            raise LiveBlocked("automatic exits require verified broker-managed Super Order protection")
         self.reconcile()
         with self._lock:
             with self._db() as db:
@@ -482,15 +533,8 @@ class LiveExecution:
                 pass  # cancellation remains unresolved until authoritative evidence
             return {"status": "CANCEL_AWAITING_RECONCILIATION", "entry_id": entry_id}
 
-    def protection_preview(self, entry_id, completed_option_candle=None):
-        """Preview-only protection; completed contract candle lows tighten SL.
-
-        An optional candle requires completed=True, security_id,
-        exchange_segment, timestamp, end_timestamp and low. It must finish
-        after the first actual fill and not be future or already consumed.
-        Without completed candle evidence, T1 only moves SL to actual fill.
-        No scheduler or exchange-side automatic protective order is installed.
-        """
+    def protection_preview(self, entry_id):
+        """Calculate the fill-based target and monotonic five-point step trail."""
         self.reconcile()
         with self._db() as db:
             entry = self._get(db, entry_id)
@@ -498,34 +542,31 @@ class LiveExecution:
             return None
         quote = self.broker.read("quote", str(entry["security_id"]))
         mark = positive(quote["price"])
-        if mark >= entry["target_1"]:
+        fill = positive(entry["average_price"])
+        steps = int((Decimal(str(mark)) - Decimal(str(fill))) // Decimal("5"))
+        if steps > 0:
+            desired_stop = self._round_up_tick(
+                fill + 5 * (steps - 1), entry["tick_size"])
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 entry = self._get(db, entry_id)
-                entry["stop_loss"] = max(entry["stop_loss"], entry["average_price"])
-                entry["t1_reached"] = True
+                entry["stop_loss"] = max(entry["stop_loss"], desired_stop)
+                entry["trail_steps"] = max(entry.get("trail_steps", 0), steps)
                 self._save(db, entry)
-        if completed_option_candle is not None:
-            candle = completed_option_candle
-            if (not isinstance(candle, dict) or candle.get("completed") is not True
-                    or str(candle.get("security_id")) != str(entry["security_id"])
-                    or candle.get("exchange_segment") != entry["exchange_segment"]):
-                raise LiveBlocked("unverified completed option candle")
-            start = self._epoch(candle.get("timestamp"))
-            end = self._epoch(candle.get("end_timestamp"))
-            low = positive(candle.get("low"))
-            if not start < end <= self.clock() or end <= entry["first_fill_timestamp"]:
-                raise LiveBlocked("ineligible completed option candle")
-            with self._db() as db:
-                db.execute("BEGIN IMMEDIATE")
-                entry = self._get(db, entry_id)
-                if end > entry.get("last_trailing_end", 0):
-                    entry["last_trailing_end"] = end
-                    if low > entry["stop_loss"]:
-                        entry.update(stop_loss=low, stop_source="completed_option_low")
-                    self._save(db, entry)
-        reason = ("trailing_stop" if entry.get("stop_source") == "completed_option_low" else "stop_loss") if mark <= entry["stop_loss"] else "target_2" if mark >= entry["target_2"] else None
+        reason = (
+            "trailing_stop" if mark <= entry["stop_loss"] and entry.get("trail_steps", 0)
+            else "stop_loss" if mark <= entry["stop_loss"]
+            else "target_2" if mark >= entry["target_2"]
+            else None
+        )
         return self.request_exit(entry_id, reason=reason) if reason else None
+
+    @staticmethod
+    def _round_up_tick(value, tick_size):
+        tick = Decimal(str(positive(tick_size)))
+        return float(
+            (Decimal(str(value)) / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+        )
 
     def callback(self, event_id, payload=None):
         """Callbacks only wake reconciliation; callback-reported fills are untrusted."""
@@ -588,9 +629,15 @@ class LiveExecution:
             rows = db.execute("SELECT id,data FROM live_outbox WHERE delivered=0 ORDER BY id LIMIT ?",
                               (batch_size,)).fetchall()
         delivered = 0
+        auto_messages = {"entry_executed", "exit_executed"}
         for row in rows:
             try:
-                if notify(row["id"], json.loads(row["data"])) is False:
+                event = json.loads(row["data"])
+                if self.auto_mode and event.get("kind") not in auto_messages:
+                    with self._db() as db:
+                        db.execute("UPDATE live_outbox SET delivered=1 WHERE id=?", (row["id"],))
+                    continue
+                if notify(row["id"], event) is False:
                     continue
             except Exception:
                 continue
@@ -602,5 +649,6 @@ class LiveExecution:
     def status(self):
         with self._db() as db:
             return {"enabled": self.enabled, "practice": self.practice, "auto": self.auto,
+                    "auto_mode": self.auto_mode,
                     **self.broker.readiness(), "account": self._state(db),
                     "intents": self._all(db)}

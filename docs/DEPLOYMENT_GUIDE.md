@@ -29,21 +29,22 @@ only**. No real order adapter is connected to the runtime. Flags cannot bypass
 this barrier; `/health` distinguishes paper, configured, and blocked states.
 Never interpret an outbound alert or broker acknowledgment as a real fill.
 
-Implemented in isolated mocked tests: master/ITM+1 validation, 1..5 lot proposals,
-version/actor/chat-bound approval and limit/market previews, durable intents and
-reservations, acknowledgment-versus-fill separation, monotonic normalized
-snapshot reconciliation, conservative exit quantity checks and notification
-outbox retries. `/telegram/live` is an authenticated separate controller;
-configured production signals are blocked without paper fallback.
+Implemented policy and isolated tests: NIFTY-only ITM+1 validation, exactly one
+metadata lot, carry-forward product intent (`MARGIN`), fresh funds/margin checks,
+two filled entries per IST day, one-open-position guard, five-percent inclusive
+re-entry band, acknowledgment-versus-fill separation, conservative normalized
+snapshot reconciliation, fill-based 2R target/step-trailing calculations, and
+auto-mode suppression of approval and non-execution messages. Auto mode remains
+fail-closed; these controls do not constitute a connected execution service.
 
-Missing runtime capabilities: verified Dhan HTTP placement/read adapters and
-wire schemas, paced production funds/margin cache, production live-card delivery
-worker, live broker-update ingress, reconciliation/protection scheduler, existing
-broker order modification/attributable protection cancellation, full live
-SL/target/trailing position controls, cutoff/emergency exit automation and a
-production readiness attestation. Mocked protection previews are not automatic
-real protection; card delivery is not connected while production is blocked.
-These are implementation gaps, not merely deployment environment settings.
+Missing runtime capabilities: verified Dhan Super Order placement/read adapters
+and wire schemas, paced production funds/margin cache, an automatic execution and
+notification worker, authenticated broker-update ingress, authoritative
+reconciliation/restart recovery, verified Super Order target/stop modification
+and attribution, protection scheduler, cutoff/emergency exit automation, and a
+production readiness attestation. A locally calculated stop/target is not broker
+protection. Auto-mode proposals fail closed and no generic-order substitute is
+sent. These are implementation gaps, not merely deployment environment settings.
 
 Known normalized-snapshot limitation: order fills can lead the broker's position
 snapshot. The mocked engine conservatively treats a lower position as an
@@ -92,10 +93,11 @@ protection guarantees from legacy modules.
    recovery. Attribute only managed orders; never cancel unrelated protection.
    Unknown submissions must reconcile by persisted correlation/trades, never
    blind resend. Local reservation accounting is not proof of broker execution.
-3. Complete and verify fill-based partial-fill protection, entry-remainder
-   cancellation before exits, monotonic completed-option-candle trailing,
-   T1 tightening, T2 full exit and session cutoffs. Client-side protection cannot
-   protect during outages; this is a readiness gap, not an exchange-side stop.
+3. Complete and verify actual-fill protection, Super Order stop/target behavior,
+   partial-fill handling, monotonic step trailing (first +5 points to breakeven,
+   then +5 SL for each additional +5 favorable move), 2R target, and session
+   cutoffs. Client-side protection cannot protect during outages; it is not an
+   exchange-side stop.
 4. Verify static IP against **actual deployment egress**, not inbound host IP;
    confirm Dhan trading/data permissions, token expiry and real contract metadata.
 5. Use separate persistent `LIVE_DB_PATH` and `PAPER_DB_PATH` on mounted storage,
@@ -115,29 +117,37 @@ protection guarantees from legacy modules.
 ### Engine safety policy and operator handling
 
 The isolated route admits only canonical NIFTY INDEX listed NSE_FNO OPTIDX
-ITM+1 CE/PE long BUY contracts, revalidated against the master at proposal,
-approval and write boundaries. Proposal lots default to one; +1/-1 controls
-and edits apply only before submission, integer 1..5, with dynamic lot/tick
-metadata. Modification invalidates older approval versions. MARKET is not a
-synthetic fill and LIMIT never silently converts after five seconds.
+ITM+1 CE/PE long BUY contracts, revalidated against the master at proposal and
+write boundaries. Size is exactly one lot using current lot-size metadata; no
+multi-lot control is exposed. Entry prefers LIMIT; a MARKET fallback may only
+follow a broker-confirmed non-submission/rejection. An uncertain result is
+reconciled, never blindly resent. The intended Dhan carry-forward product enum
+is `MARGIN`; verify the Super Order endpoint's accepted product/order enums from
+current official Dhan documentation before connecting an adapter.
 
 Two first-filled logical entries per IST day is the cap, independent of
 win/loss and lots. Partial fills count once; pending/unknown intents reserve
 capacity and cash. Reservations survive restart and day rollover until verified
-zero-fill cancellation/rejection. One open/reserved managed position is a
-conservative implementation policy, **not a user-confirmed quantity limit**.
+zero-fill cancellation/rejection. One open/reserved managed position is a required safety limit.
 No live daily profit/loss threshold is introduced; paper thresholds are unchanged.
 Entry kill switches/caps must not disable exit reconciliation or protection.
-Approval cards distinguish estimated funds from actual broker evidence and show
-balance as-of or explicitly unavailable. No funds or new deposits automatically
-replay rejected/expired proposals.
+Auto mode has no approval cards or manual control callbacks. In this mode the
+trade-control bot is reserved for two lifecycle message types only: confirmed
+entry fills (including capital committed and available-funds evidence) and
+completed exits (realized P&L). All other option signals stay on the service
+alerts bot and non-NIFTY signals never enter real or paper submission paths.
 
 Manage the actual account in Dhan. On unknown exposure, outages or unexpected
 manual changes, disable **new entries**, inspect actual positions, open orders and
 trades in Dhan, and handle emergency risk there. Reconcile the durable ledger
 before resuming; do not repeatedly press approval or infer closure from an alert.
 Direct Dhan changes cannot be promised error-free or instant synchronization.
-This blocked release does not provide a production emergency-exit service.
+This blocked release does not provide a production auto-entry, managed exit, or
+emergency-exit service.
+
+**Risk disclaimer:** Options can lose the entire premium quickly. Planned 1:2
+reward/risk, stop loss, target, and trailing do not guarantee execution, a win
+rate, or profit. Never trade money you cannot afford to lose.
 
 ### Quote freshness diagnosis
 

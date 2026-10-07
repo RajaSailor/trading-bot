@@ -1,6 +1,7 @@
 import pytest
 
 from live_telegram import LiveTelegram
+from live_broker import LiveBlocked
 from tests.test_live_broker import adapter, broker
 from tests.test_live_execution import engine, signal
 
@@ -41,7 +42,6 @@ def test_approval_duplicate_update_and_card_labels(controller, engine, adapter):
     rendered = controller.proposal_card(proposal, actor=7, chat_id=-9)
     assert "production BLOCKED" in rendered["text"]
     assert "not a fill" in rendered["text"]
-    assert rendered["reply_markup"]["inline_keyboard"][-1][0]["text"] == "+1 lot"
     assert "Balance 100000.0" in rendered["text"]
     assert "Filled entries today 0/2 (IST)" in rendered["text"]
     assert rendered["reply_markup"]["inline_keyboard"][0][0]["text"] == "Approve Limit"
@@ -56,18 +56,17 @@ def test_approval_duplicate_update_and_card_labels(controller, engine, adapter):
 def test_modify_version_lots_market_limit_and_reject(controller, engine, adapter):
     item = card(controller, engine, adapter)
     changed = controller.handle_update(update(item, "lots:5"), SECRET)
-    assert changed["result"]["proposal"]["quantity"] == 325
-    assert not controller.handle_update(update(item, update_id=2), SECRET)["ok"]
-    market = controller.handle_update(update(item, "market", version=2, update_id=3), SECRET)
+    assert not changed["ok"]
+    market = controller.handle_update(update(item, "market", update_id=2), SECRET)
     assert market["result"]["proposal"]["order_type"] == "MARKET"
-    message = {"update_id": 4, "message": {
+    message = {"update_id": 3, "message": {
         "from": {"id": 7}, "chat": {"id": -9},
-        "text": f"/live_limit {item['id']} 3 101.05",
+        "text": f"/live_limit {item['id']} 2 101.05",
     }}
     limit = controller.handle_update(message, SECRET)
-    assert limit["result"]["proposal"]["version"] == 4
+    assert limit["result"]["proposal"]["version"] == 3
     assert limit["result"]["proposal"]["limit_price"] == 101.05
-    result = controller.handle_update(update(item, "reject", version=4, update_id=5), SECRET)
+    result = controller.handle_update(update(item, "reject", version=3, update_id=4), SECRET)
     assert result["result"]["status"] == "REJECTED"
     assert not adapter.writes
 
@@ -120,10 +119,10 @@ def test_forwarded_and_sender_chat_controls_denied(controller, engine, adapter, 
 def test_callback_id_dedup_even_when_update_id_changes(controller, engine, adapter):
     item = card(controller, engine, adapter)
     payload = update(item, "lots:2")
-    assert controller.handle_update(payload, SECRET)["ok"]
+    assert not controller.handle_update(payload, SECRET)["ok"]
     payload["update_id"] = 2
     assert controller.handle_update(payload, SECRET)["duplicate"]
-    assert engine.status()["intents"][0]["version"] == 2
+    assert engine.status()["intents"][0]["version"] == 1
 
 
 def test_short_secret_and_invalid_ids_fail_closed(engine, adapter):
@@ -160,3 +159,12 @@ def test_market_selection_only_modifies_then_requires_fresh_authenticated_approv
     approved = controller.handle_update(update(item, version=2, update_id=4), SECRET)
     assert approved["ok"] and approved["result"]["status"] == "PENDING"
     assert len(adapter.writes) == 1 and adapter.writes[0]["order_type"] == "MARKET"
+
+
+def test_auto_mode_exposes_no_approval_card_or_manual_control(controller, engine, adapter):
+    item = engine.propose(signal(adapter))
+    engine.auto_mode = True
+    with pytest.raises(LiveBlocked, match="approval cards are disabled"):
+        controller.proposal_card(item, actor=7, chat_id=-9)
+    assert not controller.handle_update(update(item), SECRET)["ok"]
+    assert not adapter.writes

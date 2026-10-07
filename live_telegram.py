@@ -37,6 +37,8 @@ class LiveTelegram:
             raise LiveBlocked("actor/chat not allowlisted")
 
     def proposal_card(self, proposal, *, actor, chat_id):
+        if self.execution.auto_mode:
+            raise LiveBlocked("approval cards are disabled in NIFTY auto mode")
         self._allowed(actor, chat_id)
         item = self.execution.bind(proposal["id"], actor, chat_id)
         context = self.execution.approval_context(item["id"])
@@ -46,13 +48,6 @@ class LiveTelegram:
              {"text": "Reject", "callback_data": prefix + "reject"}],
             [{"text": "Modify to Market", "callback_data": prefix + "market"}],
         ]
-        if item["side"] == "BUY":
-            controls = []
-            if item["lots"] > 1:
-                controls.append({"text": "−1 lot", "callback_data": prefix + f"lots:{item['lots'] - 1}"})
-            if item["lots"] < 5:
-                controls.append({"text": "+1 lot", "callback_data": prefix + f"lots:{item['lots'] + 1}"})
-            buttons.append(controls)
         return {
             "chat_id": str(chat_id),
             "text": (f"LIVE SIMULATION ONLY — production BLOCKED\n"
@@ -80,6 +75,8 @@ class LiveTelegram:
                 raise LiveBlocked("invalid webhook secret")
             if not isinstance(payload, dict):
                 raise LiveBlocked("invalid update")
+            if self.execution.auto_mode:
+                raise LiveBlocked("manual trade controls are disabled in NIFTY auto mode")
             update_id = payload.get("update_id")
             if isinstance(update_id, bool) or not isinstance(update_id, int):
                 raise LiveBlocked("missing update id")
