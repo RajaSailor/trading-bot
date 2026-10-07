@@ -64,6 +64,18 @@ def test_quote_timestamp_uses_request_start_not_receipt(feed):
     assert manager.fetch_quotes({"NSE_FNO": [42]})[("NSE_FNO", 42)]["timestamp"] == started
 
 
+def test_trade_during_request_preserves_trade_time_and_conservative_book_time(feed):
+    manager, post, clock = feed
+    started = clock[0]
+    def slow_request(*args, **kwargs):
+        clock[0] += 2
+        return response({"last_price": 100, "last_trade_time": clock[0]})
+    post.side_effect = slow_request
+    quote = manager.fetch_quotes({"NSE_FNO": [42]})[("NSE_FNO", 42)]
+    assert quote["timestamp"] == started
+    assert quote["trade_timestamp"] == clock[0]
+
+
 def test_multiple_managers_and_workers_share_one_quote_request(feed):
     manager, post, clock = feed
     post.return_value = response({"last_price": 100})

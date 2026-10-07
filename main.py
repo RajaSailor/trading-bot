@@ -661,7 +661,9 @@ def live_telegram_webhook():
     result, status = live_route.handle_update(
         payload, request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     )
-    return jsonify(result), status
+    if result.get("ok") is not True:
+        return jsonify({"ok": False, "error": "live_control_rejected"}), status
+    return jsonify({"ok": True}), status
 
 
 @app.route('/telegram/paper', methods=['POST'])

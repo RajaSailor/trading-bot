@@ -17,7 +17,7 @@ def engine(tmp_path, broker, adapter):
 
 def signal(adapter, key="first"):
     return {"signal_id": key, "side": "BUY", "symbol": "NIFTY", "strategy": "premium_screener", "metadata": {
-        **adapter.contract, "premium_strategy": True, "entry_price": 100,
+        **adapter.contract, "premium_strategy": True, "entry_price": 99,
         "detected_at": adapter.now, "source": "scanner", "trigger": "live_ltp",
         "breakout_timestamp": adapter.now, "reference_timestamp": adapter.now - 600,
         "breakout_price": 100, "reference_high": 99, "reference_low": 90, "stop_loss": 85.5,
@@ -375,28 +375,45 @@ def test_lagging_position_snapshot_conservatively_halts_later_catchup(engine, ad
 
 def test_real_scanner_queue_iso_display_expiry_to_mock_execution(engine, adapter):
     from screener_premium import PremiumScreener
+    from premium_strategy_engine import PremiumStrategyEngine, TRIGGER_LIVE
 
-    strategy_signal = dict(signal(adapter)["metadata"])
-    for field in ("detected_at", "reference_timestamp", "breakout_timestamp"):
-        strategy_signal[field] = datetime.fromtimestamp(
-            strategy_signal[field], timezone.utc).isoformat()
-    strategy_signal.update(entry=100, target=129, targets=[129],
-                           signal="CALL", action="BUY", action_text="BUY CALL")
+    reference_time = datetime.fromtimestamp(adapter.now - 600, timezone.utc).isoformat()
+    quote_time = datetime.fromtimestamp(adapter.now, timezone.utc).isoformat()
+    reference = {
+        "candle": {"open": 170, "close": 165}, "timestamp": reference_time,
+        "high": 170.80, "low": 160,
+    }
+    strategy_signal = PremiumStrategyEngine().build_signal(
+        "NIFTY", "CE", "NIFTY50", reference, 171, quote_time, TRIGGER_LIVE)
+    strategy_signal.update(
+        premium_strategy=True, detected_at=quote_time,
+        action="BUY", action_text="BUY CALL",
+        indicator_confirmations=signal(adapter)["metadata"]["indicator_confirmations"])
+    adapter.price = 171
     option_data = {**adapter.contract, "expiry": "08OCT2026",
-                   "premium_ltp": 100, "spot_ltp": adapter.spot, "strike_band": "ITM+1"}
+                   "premium_ltp": 171, "spot_ltp": adapter.spot, "strike_band": "ITM+1"}
     payload = PremiumScreener._build_queue_payload(
         SimpleNamespace(symbol="NIFTY"), strategy_signal, "NIFTY50",
         "premium_screener", option_data)
     proposal = engine.propose(payload)
     assert proposal["expiry"] == "2026-10-08"
-    assert proposal["quantity"] == 65 and proposal["initial_stop_loss"] == 85.5
+    assert proposal["quantity"] == 65 and proposal["initial_stop_loss"] == 152
+    assert proposal["limit_price"] == strategy_signal["entry"] == 170.80
+    assert strategy_signal["breakout_price"] == 171 > strategy_signal["reference_high"]
     assert not adapter.writes
     engine.bind(proposal["id"], 7, -9)
     approved_item = engine.approve(proposal["id"], 1, 7, -9)
     assert approved_item["filled_quantity"] == 0
-    adapter.report(approved_item, 65, "FILLED", actual=65, price=105)
+    adapter.report(approved_item, 65, "FILLED", actual=65, price=171.5)
     engine.reconcile()
-    assert engine.status()["intents"][0]["target_2"] == 144
+    assert engine.status()["intents"][0]["target_2"] == 210.5
+
+
+def test_breakout_observation_cannot_replace_reference_entry(engine, adapter):
+    payload = signal(adapter)
+    payload["metadata"]["entry_price"] = payload["metadata"]["breakout_price"]
+    with pytest.raises(LiveBlocked, match="invalid actual breakout"):
+        engine.propose(payload)
 
 
 def test_external_partial_exit_after_preview_is_proven_not_sent_and_replaceable(engine, adapter):

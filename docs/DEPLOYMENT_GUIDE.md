@@ -147,6 +147,9 @@ The parser accepts epoch seconds/milliseconds, ISO offsets/UTC, and Dhan-style
 `DD/MM/YYYY HH:MM:SS` as IST. Cache reads retain source timestamps.
 Fresh bid/ask snapshots no longer turn stale last-traded premium into fresh live
 breakout evidence: `trade_timestamp` is separate from executable-book timestamp.
+Source trade freshness is checked at HTTP response receipt, preserving trades
+that genuinely occurred during the request. Executable-book age remains bounded
+by request start; receipt time does not refresh book evidence or loosen limits.
 Missing/stale source trade time blocks live LTP signals even with fresh depth.
 Do not increase polling, bypass cooldowns, or loosen freshness to force entries.
 Actual account 429 cause/permissions must be checked from broker/deployment

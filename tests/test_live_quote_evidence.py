@@ -38,3 +38,21 @@ def test_cached_quote_copies_cannot_refresh_trade_evidence():
     )
     copied = dict(quote)
     assert copied["trade_timestamp"] == NOW - 1
+
+
+@pytest.mark.parametrize("depth", [{}, {"bid": 170, "ask": 172}])
+def test_trade_during_request_is_fresh_without_refreshing_book_timestamp(depth):
+    quote = _parse_market_quote(
+        {"last_price": 171, "last_trade_time": NOW + 2, **depth}, NOW, NOW + 3
+    )
+    assert quote["trade_timestamp"] == NOW + 2
+    assert quote["timestamp"] == NOW
+
+
+def test_response_receipt_does_not_accept_future_or_stale_trade():
+    for stamp in (NOW + 4, NOW - 60):
+        quote = _parse_market_quote(
+            {"last_price": 171, "bid": 170, "ask": 172, "last_trade_time": stamp},
+            NOW, NOW + 3,
+        )
+        assert quote["trade_timestamp"] is None

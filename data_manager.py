@@ -277,7 +277,8 @@ def _quote_trade_timestamp(value: Any) -> Optional[float]:
     return _timestamp_to_epoch(value)
 
 
-def _parse_market_quote(quote: dict, requested_at: float) -> Optional[dict]:
+def _parse_market_quote(quote: dict, requested_at: float, received_at: Optional[float] = None) -> Optional[dict]:
+    received_at = requested_at if received_at is None else received_at
     price = _positive_price(quote.get("last_price"))
     if price is None:
         return None
@@ -298,15 +299,14 @@ def _parse_market_quote(quote: dict, requested_at: float) -> Optional[dict]:
         return None
     traded_at = _quote_trade_timestamp(quote.get("last_trade_time"))
     trade_timestamp = (
-        min(requested_at, traded_at)
+        traded_at
         if traded_at is not None and math.isfinite(traded_at)
-        and 0 <= requested_at - traded_at <= _quote_max_age()
+        and 0 <= received_at - traded_at <= _quote_max_age()
         else None
     )
     timestamp = requested_at
     if bid is None or ask is None:
-        if (traded_at is None or not math.isfinite(traded_at)
-                or requested_at - traded_at > _quote_max_age() or traded_at > requested_at + 1):
+        if trade_timestamp is None:
             return None
         timestamp = min(requested_at, traded_at)
     return {"price": price, "bid": bid, "ask": ask, "timestamp": timestamp,
@@ -715,6 +715,7 @@ class DataManager:
                     logger.warning("Dhan marketfeed request failed: %s", exc.__class__.__name__)
                     _quote_backoff()
                     break
+                received_at = time.time()
                 if response.status_code != 200:
                     logger.warning("Dhan marketfeed HTTP %s", response.status_code)
                     if response.status_code == 429 or response.status_code >= 500:
@@ -735,7 +736,7 @@ class DataManager:
                     raw = values.get(str(sid), values.get(sid)) if isinstance(values, dict) else None
                     if not isinstance(raw, dict):
                         continue
-                    value = _parse_market_quote(raw, requested_at) if quotes else _positive_price(raw.get("last_price"))
+                    value = _parse_market_quote(raw, requested_at, received_at) if quotes else _positive_price(raw.get("last_price"))
                     if value is not None:
                         fetched[(segment, sid)] = value
                         _market_quote_cache[(account, url, (segment, sid))] = {

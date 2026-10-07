@@ -185,10 +185,11 @@ class LiveExecution:
         reference_high = positive(data.get("reference_high"))
         reference_low = positive(data.get("reference_low"))
         breakout = positive(data.get("breakout_price"))
+        # Strategy entry is rounded RED high; observed breakout is a distinct LTP.
         entry = positive(data.get("entry_price", data.get("entry")))
         stop = positive(data.get("stop_loss"))
         if (reference_low > reference_high or breakout <= reference_high
-                or not math.isclose(entry, breakout, rel_tol=0, abs_tol=1e-8)
+                or not math.isclose(entry, round(reference_high, 2), rel_tol=0, abs_tol=1e-8)
                 or ("entry" in data and not math.isclose(positive(data["entry"]), entry, abs_tol=1e-8))
                 or not math.isclose(stop, round(reference_low * .95, 2), rel_tol=0, abs_tol=1e-8)
                 or stop >= entry):
@@ -221,7 +222,7 @@ class LiveExecution:
                         expires_at=detected + self.approval_seconds, filled_quantity=0,
                         owned_quantity=0, reserved_cash=0, initial_stop_loss=stop,
                         stop_loss=stop, reference_high=reference_high, reference_low=reference_low,
-                        breakout_timestamp=breakout_time, detected_at=detected)
+                        breakout_price=breakout, breakout_timestamp=breakout_time, detected_at=detected)
             item["correlation_id"] = "L" + item["id"]
             item["reserved_cash"] = self.broker.preflight(item)
             self._save(db, item)
