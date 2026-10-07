@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -50,8 +51,9 @@ class PremiumStrategyEngine:
     def find_reference(self, candles: Sequence[dict]) -> Optional[dict]:
         """Most recent RED candle within the last ``lookback`` completed candles.
 
-        Returns the reference with ``breakout_index`` set to the first later
-        completed candle whose high crossed the red high (``None`` = still armed).
+        ``breakout_index`` records a historical high crossing for diagnostics.
+        Historical bars never consume the reference; only a delivered live
+        observation can do that.
         """
         window = list(candles[-self.lookback:])
         for red_idx in range(len(window) - 1, -1, -1):
@@ -68,11 +70,11 @@ class PremiumStrategyEngine:
                 "candle": red,
                 "index": red_idx,
                 "window": window,
-                "high": round(red_high, 2),
-                "low": round(float(red["low"]), 2),
+                "high": red_high,
+                "low": float(red["low"]),
                 "timestamp": red.get("timestamp"),
                 "breakout_index": breakout_index,
-                "armed": breakout_index is None,
+                "armed": True,
             }
         return None
 
@@ -104,7 +106,7 @@ class PremiumStrategyEngine:
             "reference_high": reference["high"],
             "reference_low": reference["low"],
             "breakout_high": round(float(breakout_high if breakout_high is not None else breakout_price), 2),
-            "breakout_price": round(float(breakout_price), 2),
+            "breakout_price": float(breakout_price),
         }
         signal.update(trade_levels(reference["high"], reference["low"]))
         return signal
@@ -117,12 +119,12 @@ class PremiumStrategyEngine:
         option_type: str,
         category: str,
     ) -> Optional[dict]:
-        """Breakout of the most recent RED candle by a later completed candle high."""
+        """Historical diagnostics only; not eligible for live alerts or entries."""
         reference = self.find_reference(candles)
         if reference is None:
             logger.debug("📊 [%s] %s: no RED candle in last %s candles", symbol, option_type, self.lookback)
             return None
-        if reference["armed"]:
+        if reference["breakout_index"] is None:
             logger.debug(
                 "📊 [%s] %s: armed on RED high %.2f (%s)", symbol, option_type, reference["high"], reference["timestamp"]
             )
@@ -161,8 +163,11 @@ class PremiumStrategyEngine:
         """Immediate trigger: live premium strictly crosses the armed RED high."""
         if reference is None or not reference.get("armed") or live_price is None:
             return None
-        price = float(live_price)
-        if price <= float(reference["high"]):
+        try:
+            price = float(live_price)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(price) or price <= 0 or price <= float(reference["high"]):
             return None
         logger.info(
             "🚀 [%s] %s BREAKOUT (live) above RED HIGH %.2f → %.2f",

@@ -296,14 +296,21 @@ def _parse_market_quote(quote: dict, requested_at: float) -> Optional[dict]:
     ask = best_price("sell", min) or _positive_price(quote.get("ask"))
     if bid is not None and ask is not None and bid > ask:
         return None
+    traded_at = _quote_trade_timestamp(quote.get("last_trade_time"))
+    trade_timestamp = (
+        min(requested_at, traded_at)
+        if traded_at is not None and math.isfinite(traded_at)
+        and 0 <= requested_at - traded_at <= _quote_max_age()
+        else None
+    )
     timestamp = requested_at
     if bid is None or ask is None:
-        traded_at = _quote_trade_timestamp(quote.get("last_trade_time"))
         if (traded_at is None or not math.isfinite(traded_at)
                 or requested_at - traded_at > _quote_max_age() or traded_at > requested_at + 1):
             return None
         timestamp = min(requested_at, traded_at)
     return {"price": price, "bid": bid, "ask": ask, "timestamp": timestamp,
+            "trade_timestamp": trade_timestamp,
             "model": "depth" if bid is not None and ask is not None else "ltp"}
 
 

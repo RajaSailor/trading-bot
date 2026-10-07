@@ -9,10 +9,7 @@ Entry gates (all mandatory, strict, same option contract's premium candles):
 * RSI(14): strictly above 25 and strictly above the preceding completed
   indicator observation (rising).
 
-Option A anti-chop: the 8 completed candles before the trigger bucket are
-classified "sideways" when ``(max high - min low) / mid <= 0.20``; sideways
-breakouts additionally need continuation (two distinct fresh live polls above
-the same red high, or a fresh premium >= red high + 0.3R). Volume is not used.
+Volume is not used.
 """
 
 from __future__ import annotations
@@ -33,17 +30,6 @@ RSI_THRESHOLD = 25.0
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
-SIDEWAYS_WINDOW_BARS = 8
-SIDEWAYS_MAX_RANGE_FRACTION = 0.20
-# Bars further apart than this (e.g. overnight/session breaks or long illiquid
-# holes) are never bridged to build the anti-chop range.
-SIDEWAYS_MAX_BAR_GAP_SECONDS = 3 * TIMEFRAME_SECONDS
-CONTINUATION_R_MULTIPLE = 0.3
-REQUIRED_LIVE_POLLS = 2
-MODE_NORMAL = "normal"
-MODE_TWO_POLLS = "two_fresh_polls"
-MODE_MOMENTUM = "momentum_0_3r"
-MODE_PENDING = "pending"
 REQUIRED_CONFIRMATIONS = (
     "trigger_above_or_straddles_ema9",
     "macd_above_signal",
@@ -233,104 +219,12 @@ def confirmation_status(values: dict) -> dict:
     }
 
 
-def anti_chop_status(bars: Sequence[dict], trigger_epoch: float) -> dict:
-    """Option A sideways classification from the 8 completed bars before the trigger.
-
-    ``bars`` must be validated output of :func:`completed_candles`. Only bars that
-    started before the trigger bucket are used (no trigger/forming/future bar).
-    The window must be on the trigger's IST date and contain no gap larger than
-    ``SIDEWAYS_MAX_BAR_GAP_SECONDS`` (sessions are never bridged); otherwise the
-    anti-chop evidence is insufficient and the caller must fail closed.
-    """
-    window = [bar for bar in bars if bar["_timestamp_epoch"] < trigger_epoch][-SIDEWAYS_WINDOW_BARS:]
-    if len(window) < SIDEWAYS_WINDOW_BARS:
-        raise IndicatorDataError("insufficient_anti_chop_history")
-    trigger_day = datetime.fromtimestamp(trigger_epoch, IST).date()
-    epochs = [bar["_timestamp_epoch"] for bar in window] + [trigger_epoch]
-    if any(later - earlier > SIDEWAYS_MAX_BAR_GAP_SECONDS for earlier, later in zip(epochs, epochs[1:])) or any(
-        datetime.fromtimestamp(epoch, IST).date() != trigger_day for epoch in epochs
-    ):
-        raise IndicatorDataError("anti_chop_session_gap")
-    window_high = max(bar["high"] for bar in window)
-    window_low = min(bar["low"] for bar in window)
-    mid_price = (window_high + window_low) / 2.0
-    if not (math.isfinite(mid_price) and mid_price > 0):
-        raise IndicatorDataError("invalid_anti_chop_range")
-    range_fraction = round((window_high - window_low) / mid_price, 9)
-    return {
-        "bars": len(window),
-        "window_high": round(window_high, 6),
-        "window_low": round(window_low, 6),
-        "mid_price": round(mid_price, 6),
-        "range_fraction": range_fraction,
-        "max_range_fraction": SIDEWAYS_MAX_RANGE_FRACTION,
-        "sideways": range_fraction <= SIDEWAYS_MAX_RANGE_FRACTION,
-        "window_start": datetime.fromtimestamp(window[0]["_timestamp_epoch"], IST).isoformat(timespec="seconds"),
-        "window_end": datetime.fromtimestamp(
-            window[-1]["_timestamp_epoch"] + TIMEFRAME_SECONDS, IST
-        ).isoformat(timespec="seconds"),
-    }
-
-
-def continuation_status(
-    *, sideways: bool, price, red_high, initial_stop, live_polls: int = 0, continuation_price=None
-) -> dict:
-    """Option A continuation decision for one breakout candidate.
-
-    * Base breakout always requires ``price > red_high`` (equality is not a breakout).
-    * Not sideways: no extra delay (``mode="normal"``).
-    * Sideways: qualifies when ``price >= red_high + 0.3R`` (``R = red_high -
-      initial_stop > 0``; equality counts) **or** ``live_polls >= 2`` distinct,
-      consecutive fresh live poll observations above the same red high. Two polls
-      are not two candles, and neither is evidence of accuracy.
-
-    ``price`` is the breakout evidence (fresh live LTP, or a completed trigger
-    candle's high). ``continuation_price`` (default ``price``) is compared with
-    the 0.3R threshold; completed candles pass their actual close so a wick
-    that reverted is not treated as held continuation.
-    """
-    price_value, high_value = _finite_positive(price), _finite_positive(red_high)
-    held_value = price_value if continuation_price is None else _finite_positive(continuation_price)
-    stop_value = _finite_positive(initial_stop)
-    risk = None
-    threshold = None
-    if high_value is not None and stop_value is not None and high_value - stop_value > 0:
-        risk = round(high_value - stop_value, 6)
-        threshold = round(high_value + CONTINUATION_R_MULTIPLE * risk, 6)
-    polls = max(0, int(live_polls or 0))
-    result = {
-        "sideways": bool(sideways),
-        "mode": MODE_PENDING,
-        "qualified": False,
-        "reference_high": high_value,
-        "initial_stop": stop_value,
-        "r": risk,
-        "momentum_threshold": threshold,
-        "live_polls": polls,
-        "required_live_polls": REQUIRED_LIVE_POLLS,
-        "price": price_value,
-        "continuation_price": held_value,
-    }
-    if price_value is None or high_value is None or not price_value > high_value:
-        result["reason"] = "no_breakout"
-        return result
-    if not sideways:
-        result.update(mode=MODE_NORMAL, qualified=True, reason="not_sideways")
-    elif threshold is not None and held_value is not None and round(held_value, 6) >= threshold:
-        result.update(mode=MODE_MOMENTUM, qualified=True, reason="reached_0_3r")
-    elif polls >= REQUIRED_LIVE_POLLS:
-        result.update(mode=MODE_TWO_POLLS, qualified=True, reason="two_fresh_polls")
-    else:
-        result["reason"] = "awaiting_continuation" if threshold is not None else "awaiting_polls_invalid_r"
-    return result
-
-
 def calculate_confirmations(
     candles: Sequence[dict],
     now: datetime,
     provisional_candle: Optional[dict] = None,
 ) -> dict:
-    """Return mandatory AND confirmations, anti-chop evidence and metadata.
+    """Return mandatory AND confirmations and observed indicator metadata.
 
     Completed mode: the trigger is the latest completed candle; EMA9/MACD/RSI
     are taken at that bar and the EMA rule uses its actual OHLC. Live mode: a
@@ -364,7 +258,8 @@ def calculate_confirmations(
             raise IndicatorDataError("invalid_provisional_candle") from exc
         if (
             provisional_timestamp > now.timestamp()
-            or provisional_timestamp <= closed[-1]["_timestamp_epoch"]
+            or now.timestamp() - provisional_timestamp >= TIMEFRAME_SECONDS
+            or provisional_timestamp < closed[-1]["_timestamp_epoch"] + TIMEFRAME_SECONDS
             or not all(math.isfinite(value) for value in provisional_values.values())
             or min(provisional_values.values()) <= 0
             or provisional_values["high"] < max(provisional_values.values())
@@ -379,14 +274,13 @@ def calculate_confirmations(
                 observed_at = _epoch(provisional["observed_at"])
             except (TypeError, ValueError, OverflowError, OSError) as exc:
                 raise IndicatorDataError("invalid_provisional_candle") from exc
-            if observed_at > now.timestamp():
+            if observed_at > now.timestamp() or observed_at < provisional_timestamp:
                 raise IndicatorDataError("invalid_provisional_candle")
             provisional["observed_at"] = observed_at
         price_bars.append(provisional)
         evidence_mode = "live_provisional_ltp"
         trigger_evidence = "live_observed_ticks"
     trigger = price_bars[-1]
-    anti_chop = anti_chop_status(closed, trigger["_timestamp_epoch"])
     closes = [candle["close"] for candle in price_bars]
     ema_values = ema(closes, EMA_PERIOD)
     rsi_values = wilder_rsi(closes)
@@ -415,7 +309,6 @@ def calculate_confirmations(
             values["premium"], values["trigger_low"], values["trigger_high"], values["ema9"]
         ),
         "rsi_threshold": RSI_THRESHOLD,
-        "anti_chop": anti_chop,
         "evidence_mode": evidence_mode,
         "trigger_evidence": trigger_evidence,
         "indicator_as_of": datetime.fromtimestamp(trigger["_timestamp_epoch"], IST).isoformat(timespec="seconds"),

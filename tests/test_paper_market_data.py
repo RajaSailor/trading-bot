@@ -42,11 +42,13 @@ def test_depth_best_prices_and_cache_timestamp_are_preserved(feed):
         "sell": [{"price": 102}, {"price": 101}],
     }})
     first = manager.fetch_quotes({"NSE_FNO": [42, 42]})[("NSE_FNO", 42)]
-    assert first == {"price": 100, "bid": 99, "ask": 101, "timestamp": clock[0], "model": "depth"}
+    assert first == {"price": 100, "bid": 99, "ask": 101, "timestamp": clock[0],
+                     "trade_timestamp": clock[0], "model": "depth"}
     first["bid"] = 1
     clock[0] += .5
     cached = manager.fetch_quotes({"NSE_FNO": [42]})[("NSE_FNO", 42)]
     assert cached["timestamp"] == clock[0] - .5
+    assert cached["trade_timestamp"] == clock[0] - .5
     assert cached["bid"] == 99
     assert post.call_count == 1
     assert post.call_args.args[0] == market.DHAN_QUOTE_URL

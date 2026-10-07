@@ -1,20 +1,32 @@
 # DhanHQ Trading Bot - Comprehensive README
 
-**Production-Ready Automated Trading System** | Telegram + DhanHQ Integration | Real-time Position Monitoring
+**Paper trading and option alerts; real-money activation BLOCKED** | Telegram + DhanHQ Integration
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-brightgreen.svg)](https://www.python.org/downloads/)
-[![Status: Production Ready](https://img.shields.io/badge/Status-Production%20Ready-success.svg)]()
+[![Status: Live Blocked](https://img.shields.io/badge/Status-Live%20Blocked-orange.svg)]()
 
 ---
 
 ## Persistent PRACTICE portfolio (`main.py`)
 
-The application runtime is **PRACTICE-only**, regardless of `PRACTICE_MODE` or
-`AUTO_TRADING_ENABLED`. It never sends paper orders to Dhan. Existing broker
+The default application runtime is **PRACTICE-only**. Changing `PRACTICE_MODE` or
+`AUTO_TRADING_ENABLED` alone does not enable real trading. It never sends paper orders to Dhan. Existing broker
 integration modules are not the paper execution path. Compact strategy alerts
 remain on `service_alerts`; approvals, simulated fills, protection, and account
 reports go to `trade_control`.
+
+### Separate NIFTY route — implementation present, production BLOCKED
+
+`NIFTY_LIVE_ENABLED=false` is the default. When deliberately configured, NIFTY
+signals are routed exclusively to the isolated approval architecture, not to
+duplicate paper approvals. All other scanner categories retain paper behavior.
+The isolated engine has mocked execution tests, a separate SQLite ledger,
+versioned authenticated controls, reservations, and conservative reconciliation.
+**This release cannot send real orders:** the production adapter is fail-closed.
+It is not a working real-money deployment, even with all three flags set.
+See [the activation blockers and official-source evidence](docs/DEPLOYMENT_GUIDE.md).
+Human review and completed production safeguards are required before activation.
 
 ### Persistence and controls
 
@@ -171,7 +183,8 @@ Fees are not modeled and are explicitly excluded. Messages show IST timestamps,
 contract identity, one-lot units, actual simulated prices and effective
 protection. Changes use `#SL_UPDATE`, `#TARGET_UPDATE`, `#TRAIL_UPDATE`;
 T1 uses `#TARGET1`, with stop/risk/cutoff reason tags on relevant exits.
-`service_alerts` routing and formatting are unchanged.
+`service_alerts` routing is unchanged; service messages now omit the entire
+indicator-confirmation block while preserving the internal gates.
 
 Risk, cutoff, stop and emergency exits never wait for approval. Pending exits
 are informational, not approval requests. Protection escalates a
@@ -186,6 +199,11 @@ The application drains its persistent notification outbox on a separate thread,
 so slow Telegram delivery does not hold up quote evaluation or cutoff recovery.
 
 ## 📋 Quick Start
+
+**Legacy examples below are not activation instructions.** The current
+`main.py` paper behavior and blocked isolated NIFTY route above take precedence.
+Generic signal, direct broker-client and old auto-close examples do not provide
+the live approval, ownership or protection safeguards.
 
 ### 30-Second Setup
 
@@ -232,7 +250,7 @@ python main.py
 - ✅ Risk management (max loss, position size limits)
 - ✅ Account balance & margin monitoring
 
-### **Production Ready**
+### **Legacy integration components (not proof of live readiness)**
 - ✅ Webhook postback handling (HMAC-SHA256 signature verification)
 - ✅ State persistence (JSON)
 - ✅ Comprehensive error recovery
@@ -404,7 +422,8 @@ TELEGRAM_TEST_SECRET=your_private_telegram_test_secret
 # TRADING PARAMETERS
 # ============================================================================
 PRACTICE_MODE=true                # Keep true for safe practice trading
-AUTO_TRADING_ENABLED=false        # Must also be true before any live order API call
+AUTO_TRADING_ENABLED=false        # Conscious guard; does not enable production execution
+NIFTY_LIVE_ENABLED=false          # Separate opt-in route; production currently BLOCKED
 ENABLE_MARKET_SCANNER=false       # Enable only after market-data config is verified
 ENABLE_DHAN_TOKEN_RENEWAL=true    # Runtime-only renewal; secrets still live in Render
 MAX_LOSS_PER_TRADE=500            # Maximum loss per trade (₹)
@@ -743,7 +762,7 @@ trading-bot/
     └── logs/                        # Application logs
 ```
 
-**Total: 19 Files | 5,760+ Lines | Production-Ready**
+**Legacy component inventory; not a production-readiness certification**
 
 ---
 
@@ -857,12 +876,12 @@ to select real listed strikes; strategy indicators are never calculated from spo
   high, stop is 5% below the red low, and the existing 2R target/trailing and
   paper approval flow remain unchanged.
 - A CE/PE (long-option BUY) entry is eligible only when **all three** same-contract
-  premium checks pass at the trigger (equality fails each one):
+  premium checks pass at the trigger:
   - **EMA(9) trigger rule:** the trigger candle breaking the red high must be
     *above or straddling* the contemporaneous EMA9: trigger price > EMA9, **or**
     the trigger candle's observed `low <= EMA9 <= high`. A trigger wholly below
     EMA9 is rejected. The reference red candle itself may be wholly below, wholly
-    above, or straddling EMA9. Completed triggers use their actual OHLC; live
+    above, or straddling EMA9. Live
     triggers use the forming bucket's observed fresh-LTP ticks (no invented
     high/low; missing evidence fails closed). The fresh price must still be
     strictly above the red high.
@@ -871,29 +890,9 @@ to select real listed strikes; strategy indicators are never calculated from spo
     completed indicator observation; flat or falling fails).
 - VWAP and Parabolic SAR are **not** used, and volume is no longer required:
   candles with missing/zero volume can pass when OHLC evidence is valid.
-- **Anti-chop (Option A):** the 8 completed same-contract 10-minute candles before
-  the trigger bucket give `window_high = max(high)`, `window_low = min(low)`,
-  `mid = (window_high + window_low) / 2`. The market is **sideways** when
-  `mid > 0` and `(window_high - window_low) / mid <= 0.20` (inclusive, about
-  ±10%). Example: highs/lows spanning 90–110 around 100 → 20/100 = 20% →
-  sideways; 89.9–110 → 20.1% → normal. The window must be on the trigger's IST
-  date with no gap over 30 minutes (sessions are never bridged); fewer than 8
-  usable bars means no entry, so the first ~80 minutes of each session cannot
-  signal.
-  - **Normal** (range > 20%): no extra delay; base breakout + the three gates.
-  - **Sideways**: base breakout + the three gates **and either** (a) **two
-    consecutive, distinct fresh live poll observations** strictly above the same
-    red high with every gate passing on both polls, **or** (b) fresh premium
-    `>= red_high + 0.3R`, where `R = red_high - initial stop` (> 0, premium
-    points). Equality at 0.3R qualifies; equality at the red high is not a
-    breakout. Two polls are **not** two candles and are not evidence of accuracy.
-    A repeated read of the same cached quote timestamp is not a second
-    observation. Counts reset when price is at/below the red high, a gate fails,
-    a quote is stale/missing, more than 10 s passes between counted polls, or the
-    reference, contract, bucket or session changes; they are in-memory only and
-    restart from zero after a restart. A completed sideways trigger qualifies
-    only if its actual **close** is `>= red_high + 0.3R`; otherwise the reference
-    stays armed for genuine live polls (polls are never fabricated from OHLC).
+- One distinct fresh live observation can qualify immediately, including in a
+  narrow range and early in the session. There is no same-day range warmup,
+  second-poll/candle wait or substitute momentum threshold.
 - EMA/MACD use SMA seeding; Wilder RSI seeds from 14 changes (flat=50,
   gain-only=100, loss-only=0). At least 34 valid, ordered 10-minute candles are
   required; prior-session candles warm the indicators. Stale evidence or
@@ -904,20 +903,21 @@ to select real listed strikes; strategy indicators are never calculated from spo
   a provisional snapshot of observed fresh LTP ticks (never appended to, or
   mutating, completed history). No additional quote requests are made for
   confirmation; the existing shared live cadence/cooldown is reused. The service
-  alert shows the evidence:
+  alert intentionally omits indicator/evidence diagnostics:
 
   ```text
-  🧭 PREMIUM CONFIRMATIONS
-  ✓ EMA9: trigger 120.50 straddle EMA 118.40 (L 118.00 / H 121.00)
-  ✓ MACD 12/26/9: 2.50 vs signal 1.80
-  ✓ RSI14 (>25, rising): 61.30 vs prev 58.10
-  Range 8 bars: 95.00–110.00 (14.6%, ≤20% sideways) → SIDEWAYS
-  Confirmation: two fresh polls | Ref high 112.00 | Stop 93.10 | R 18.90 | 0.3R 117.67
-  Evidence: Live provisional (observed LTP ticks) | indicators 05-Oct-2026 10:35:00 IST
-  Fresh option LTP as of 05-Oct-2026 10:35:03 IST
+  NIFTY | BUY CALL | ITM+1 | PAPER SIGNAL ONLY
+  NIFTY 14OCT2026 25000 CE | Expiry 14-Oct-2026
+  Entry (reference): 170.80 | Stop: 152.00 | Risk: 18.80
+  T1: 189.60 | T2: 208.40
+  Observed breakout: 171.00 at 07-Oct-2026 09:34:03 IST
+  Underlying spot: 25080.00
   ```
 - Filters narrow signal eligibility; they are **not a guarantee of accuracy or
-  profit**. Keep practice mode enabled and evaluate with paper trading/backtests.
+  profit**. A premium of 170.60 cannot break a 170.80 red high, even if a historical
+  candle high was 189.35. Observed trigger, reference entry and executable quote
+  are distinct. Startup historical initialization is silent; completed highs
+  never masquerade as new live signals. Keep practice mode enabled and evaluate with paper trading/backtests.
   See [`docs/SCANNER_RUNBOOK.md`](docs/SCANNER_RUNBOOK.md) for detailed session,
   data-quality, deployment-verification, and sample-message guidance.
 
@@ -928,26 +928,17 @@ lines. If they appear, clear the build cache and redeploy (Manual Deploy →
 look for `✅ [GOLD] Got N CE candles`. Keep `PRACTICE_MODE=true` /
 `AUTO_TRADING_ENABLED=false` while verifying.
 
-### **Step 4: Add Webhook to DhanHQ**
+### **Step 4: Verify broker update integration**
 
-In DhanHQ account settings:
-
-```
-1. Go to Settings → Webhooks
-2. Webhook URL: https://trading-bot-0p7j.onrender.com/dhan/postback
-3. Webhook Secret: 7kJ9mL2pQ5xR8tV1wY3nB6cD9hF2jG5kL8mN
-4. Enable Events: ✅ Order Execution, ✅ Position Update, ✅ Account Update
-5. Save & Test
-```
+Legacy `/dhan/postback` is not connected to the isolated live ledger. Verify the
+current official broker update schema and authentication before enabling any
+production receiver. Never infer protection readiness from webhook registration.
 
 ### **Step 5: Whitelist IPs in DhanHQ**
 
-In DhanHQ account settings → API → IP Whitelist:
-
-```
-106.200.21.44    (Render server 1) ✅
-74.220.52.33     (Render server 2) ✅
-```
+Verify the deployment's actual static **outbound egress IP** and whitelist it
+in Dhan. Example or inbound hosting addresses are not evidence of your egress.
+See `docs/DEPLOYMENT_GUIDE.md`; real-money activation is blocked in this release.
 
 ---
 
@@ -1200,7 +1191,7 @@ This project is inspired by and integrates with:
 
 ## 🎉 What You Get
 
-- ✅ **19 Production-Ready Files**
+- Legacy integration components (live readiness is blocked)
 - ✅ **5,760+ Lines of Code**
 - ✅ **Official DhanHQ v2 API Integration** (Reference: https://github.com/Kalaiviswa/dhan-api-v2-docs)
 - ✅ **Real-time Position Tracking**
@@ -1220,7 +1211,8 @@ This project is inspired by and integrates with:
 2. Follow the setup guide above
 3. Send test signals via Telegram
 4. Monitor P&L with `/pnl` command
-5. When confident, set `PRACTICE_MODE=false` for real trading
+5. Do not activate real trading: complete the blockers in `docs/DEPLOYMENT_GUIDE.md`
+   and obtain human review first. Environment flag changes alone are insufficient.
 
 **⚠️ DISCLAIMER:** This is automated trading software. Only trade with capital you can afford to lose. Start small, test thoroughly, and monitor constantly.
 
@@ -1228,4 +1220,4 @@ This project is inspired by and integrates with:
 
 **Made with ❤️ by RajaSailor**
 
-*Last Updated: September 2026 | Status: ✅ Production Ready*
+*Status: paper runtime available; real-money activation BLOCKED*

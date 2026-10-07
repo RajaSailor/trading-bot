@@ -100,10 +100,16 @@ def format_option_breakout_alert(
             if target_2 is None and alert.get("targets"):
                 target_2 = alert["targets"][0]
     reference_ist = alert.get("reference_time_ist") or format_ist_timestamp(alert.get("reference_timestamp"))
-    breakout_ist = alert.get("breakout_time_ist") or format_ist_timestamp(
-        alert.get("breakout_timestamp"), with_seconds=not compact
+    breakout_timestamp = alert.get("breakout_timestamp")
+    breakout_ist = (
+        format_ist_timestamp(breakout_timestamp, with_seconds=True)
+        if breakout_timestamp not in (None, "")
+        else alert.get("breakout_time_ist") or "N/A"
     )
     trigger = _TRIGGER_LABELS.get(str(alert.get("trigger") or ""), alert.get("trigger") or "breakout")
+    observed_price = alert.get("breakout_price")
+    if observed_price is None:
+        observed_price = alert.get("premium_ltp")
     if compact:
         lines = [
             f"{icon} <b>{esc(action)}</b> | <b>{esc(alert.get('underlying') or alert.get('symbol'))}</b> ({esc(category_label)})",
@@ -118,7 +124,7 @@ def format_option_breakout_alert(
             f"Target 1 (1R): {esc(_fmt_price(target_1))}",
             f"Target 2 (2R): {esc(_fmt_price(target_2))}",
             "",
-            f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(alert.get('premium_ltp') or alert.get('breakout_price')))}",
+            f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(observed_price))}",
         ]
     else:
         lines = [
@@ -136,74 +142,16 @@ def format_option_breakout_alert(
             f"Target 2 (2R): {esc(_fmt_price(target_2))}",
             "",
             f"🔴 Reference RED candle: {esc(reference_ist)}",
-            f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(alert.get('premium_ltp') or alert.get('breakout_price')))} ({esc(trigger)})",
+            f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(observed_price))} ({esc(trigger)})",
         ]
     if alert.get("spot_ltp") is not None:
         lines.append(f"Underlying spot: {esc(_fmt_price(alert.get('spot_ltp')))}")
-    confirmations = alert.get("indicator_confirmations")
-    if isinstance(confirmations, dict):
-        values = confirmations.get("values") or {}
-        passed = confirmations.get("passed") or {}
-
-        def indicator_number(value):
-            try:
-                return f"{float(value):.2f}"
-            except (TypeError, ValueError):
-                return "N/A"
-
-        def mark(key):
-            return "✓" if passed.get(key) is True else "✗"
-
-        lines.extend(["", "🧭 <b>PREMIUM CONFIRMATIONS</b>"])
-        lines.append(
-            f"{mark('trigger_above_or_straddles_ema9')} EMA9: trigger {esc(indicator_number(values.get('premium')))} "
-            f"{esc(confirmations.get('ema9_position') or 'N/A')} EMA {esc(indicator_number(values.get('ema9')))} "
-            f"(L {esc(indicator_number(values.get('trigger_low')))} / H {esc(indicator_number(values.get('trigger_high')))})"
-        )
-        lines.append(
-            f"{mark('macd_above_signal')} MACD 12/26/9: {esc(indicator_number(values.get('macd12_26')))} vs signal "
-            f"{esc(indicator_number(values.get('macd_signal9')))}"
-        )
-        lines.append(
-            f"{mark('rsi14_above_25_and_rising')} RSI14 (&gt;25, rising): {esc(indicator_number(values.get('rsi14')))} "
-            f"vs prev {esc(indicator_number(values.get('rsi14_previous')))}"
-        )
-        anti_chop = confirmations.get("anti_chop")
-        continuation = confirmations.get("continuation")
-        if isinstance(anti_chop, dict):
-            try:
-                range_pct = f"{float(anti_chop.get('range_fraction')) * 100:.1f}%"
-            except (TypeError, ValueError):
-                range_pct = "N/A"
-            regime = "SIDEWAYS" if anti_chop.get("sideways") is True else "normal"
-            try:
-                limit_pct = f"{float(anti_chop.get('max_range_fraction')) * 100:g}%"
-            except (TypeError, ValueError):
-                limit_pct = "N/A"
-            lines.append(
-                f"Range {esc(anti_chop.get('bars'))} bars: {esc(indicator_number(anti_chop.get('window_low')))}–"
-                f"{esc(indicator_number(anti_chop.get('window_high')))} ({esc(range_pct)}, ≤{esc(limit_pct)} sideways) → {esc(regime)}"
-            )
-        if isinstance(continuation, dict):
-            mode_labels = {"normal": "normal", "two_fresh_polls": "two fresh polls", "momentum_0_3r": "0.3R momentum"}
-            lines.append(
-                f"Confirmation: {esc(mode_labels.get(continuation.get('mode'), continuation.get('mode')))} | "
-                f"Ref high {esc(indicator_number(continuation.get('reference_high')))} | "
-                f"Stop {esc(indicator_number(continuation.get('initial_stop')))} | "
-                f"R {esc(indicator_number(continuation.get('r')))} | "
-                f"0.3R {esc(indicator_number(continuation.get('momentum_threshold')))}"
-            )
-        live = confirmations.get("evidence_mode") == "live_provisional_ltp"
-        mode = "Live provisional (observed LTP ticks)" if live else "Completed candles"
-        lines.append(
-            f"Evidence: {esc(mode)} | indicators {esc(format_ist_timestamp(confirmations.get('indicator_as_of'), True))}"
-        )
-        if live and confirmations.get("live_quote_as_of"):
-            lines.append(
-                f"Fresh option LTP as of {esc(format_ist_timestamp(confirmations.get('live_quote_as_of'), True))}"
-            )
     if practice_mode:
         lines.append("🧪 PRACTICE MODE: alert only, no live order placed")
+    elif practice_mode is False:
+        lines.append("📌 SIGNAL ONLY: strategy observation, no broker entry implied")
+    else:
+        lines.append("📌 SIGNAL ONLY (mode unverified): strategy observation, no broker entry implied")
     lines.extend(["", "📢 DISCLAIMER: Educational purposes only."])
     return "\n".join(lines)
 

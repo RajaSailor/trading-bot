@@ -34,7 +34,7 @@ def _contract(security_id, side="CE", band="ATM", strike=24450, segment="NSE_FNO
 GATES = ("trigger_above_or_straddles_ema9", "macd_above_signal", "rsi14_above_25_and_rising")
 
 
-def _confirmation(sideways=False, failed=None, mode="completed"):
+def _confirmation(failed=None, mode="live_provisional_ltp"):
     passed = {name: name != failed for name in GATES}
     return {
         "ready": failed is None,
@@ -44,10 +44,6 @@ def _confirmation(sideways=False, failed=None, mode="completed"):
             "rsi14": 60.0, "rsi14_previous": 55.0, "macd12_26": 1.0, "macd_signal9": .5,
         },
         "ema9_position": "straddle",
-        "anti_chop": {
-            "bars": 8, "window_high": 110.0, "window_low": 95.0, "mid_price": 102.5,
-            "range_fraction": 0.146341 if sideways else 0.35, "sideways": sideways,
-        },
         "evidence_mode": mode,
         "indicator_as_of": "2026-10-05T10:20:00+05:30",
     }
@@ -159,7 +155,7 @@ class BreakoutFlowTests(_Base):
         )
         return self.screener._refresh_instrument(self.index, "10min", now)
 
-    def test_failed_completed_filters_leave_reference_armed_for_later_live_pass(self):
+    def test_failed_live_filters_leave_reference_armed_for_later_live_pass(self):
         candles = [
             _candle(0, 98, 110, 95, 100),
             _candle(10, 100, 112, 96, 98),
@@ -176,11 +172,13 @@ class BreakoutFlowTests(_Base):
         self.data_manager.fetch_quotes.return_value = {
             ("NSE_FNO", 101): {"price": 113.5, "timestamp": MONDAY_MORNING.timestamp()}
         }
+        self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
+        self.assertTrue(state["reference"]["armed"])
         self.assertEqual(1, self.screener.live_check_once(MONDAY_MORNING))
         self.assertEqual(1, len(self.alerts))
         self.assertEqual("live_ltp", self.alerts[0]["metadata"]["trigger"])
 
-    def test_each_failed_filter_blocks_and_keeps_reference_armed(self):
+    def test_each_failed_filter_blocks_live_and_keeps_reference_armed(self):
         candles = [
             _candle(0, 98, 110, 95, 100),
             _candle(10, 100, 112, 96, 98),
@@ -194,6 +192,10 @@ class BreakoutFlowTests(_Base):
                     return_value=_confirmation(failed=failed_filter)
                 )
                 self.assertEqual(0, self._prime({101: candles}))
+                self.data_manager.fetch_quotes.return_value = {
+                    ("NSE_FNO", 101): {"price": 113.5, "timestamp": MONDAY_MORNING.timestamp()}
+                }
+                self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
                 self.assertTrue(self.screener._monitored[101]["reference"]["armed"])
                 self.assertEqual([], self.alerts)
 
@@ -303,7 +305,7 @@ class BreakoutFlowTests(_Base):
         self.assertEqual("BUY PUT", self.alerts[0]["metadata"]["action_text"])
         self.assertEqual("PE", self.alerts[0]["metadata"]["option_type"])
 
-    def test_delivery_retry_preserves_original_detection_and_evidence(self):
+    def test_delivery_retry_preserves_detection_but_reports_actual_new_quote(self):
         self._prime({201: [_candle(0, 50, 55, 45, 48)]})
         payloads = []
         self.screener.signal_callback = lambda payload: payloads.append(payload) or len(payloads) > 1
@@ -319,25 +321,27 @@ class BreakoutFlowTests(_Base):
         }
         self.assertEqual(1, self.screener.live_check_once(later))
         self.assertEqual(payloads[0]["timestamp"], payloads[1]["timestamp"])
-        self.assertEqual(payloads[0]["breakout_timestamp"], payloads[1]["breakout_timestamp"])
+        self.assertNotEqual(payloads[0]["breakout_timestamp"], payloads[1]["breakout_timestamp"])
+        self.assertEqual(later.timestamp(), datetime.fromisoformat(payloads[1]["breakout_timestamp"]).timestamp())
 
     def test_startup_does_not_replay_old_latest_completed_breakout(self):
         candles = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 113, 97, 112)]
         self.assertEqual(0, self._prime({101: candles}))
         self.assertEqual([], self.alerts)
 
-    def test_candle_breakout_alerts_only_when_latest_completed_candle_broke_out(self):
+    def test_history_refresh_never_alerts_or_consumes_reference(self):
         stale = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 115, 97, 114), _candle(20, 114, 116, 110, 115)]
         fresh = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 109, 97, 105), _candle(20, 105, 113, 104, 112)]
         self.assertEqual(0, self._prime({101: stale}))
-        self.assertEqual(1, self._prime({101: fresh}))
-        self.assertEqual(["NIFTY-Oct2026-24400-CE"], [a["metadata"]["option_symbol"] for a in self.alerts])
-        self.assertEqual("candle_high", self.alerts[0]["metadata"]["trigger"])
-        # The same reference never re-alerts (live or candle) after a refresh.
+        self.assertEqual(0, self._prime({101: fresh}))
+        self.assertEqual([], self.alerts)
+        self.screener._calculate_confirmation.assert_not_called()
         self._prime({101: stale, 102: fresh})
         self.data_manager.fetch_quotes.return_value = {
             ("NSE_FNO", 101): {"price": 200, "timestamp": MONDAY_MORNING.timestamp()}
         }
+        self.screener.live_check_once(MONDAY_MORNING)
+        self._prime({101: stale})
         self.screener.live_check_once(MONDAY_MORNING)
         self.assertEqual(1, len(self.alerts))
 
@@ -368,23 +372,14 @@ class BreakoutFlowTests(_Base):
         self.data_manager.fetch_ltp.assert_called_once_with({"IDX_I": [13]})
 
 
-class SidewaysContinuationTests(_Base):
-    """Option A: sideways breakouts need two distinct fresh polls OR >= red high + 0.3R."""
-
+class ActualLiveEvidenceTests(_Base):
     _prime = BreakoutFlowTests._prime
 
-    # Most recent RED: high 112, low 96 -> stop 91.20, R 20.80, 0.3R level 118.24.
     ARMED = [
         _candle(0, 98, 110, 95, 100),
         _candle(10, 100, 112, 96, 98),
         _candle(20, 100, 111, 99, 105),
     ]
-
-    def setUp(self):
-        super().setUp()
-        self.screener._calculate_confirmation = MagicMock(
-            return_value=_confirmation(sideways=True, mode="live_provisional_ltp")
-        )
 
     def _poll(self, price, at, quote_at=None):
         self.clock_now = at
@@ -398,121 +393,97 @@ class SidewaysContinuationTests(_Base):
         self.assertEqual(0, self._prime({101: list(self.ARMED)}))
         self.assertTrue(self.screener._monitored[101]["reference"]["armed"])
 
-    def test_two_distinct_fresh_polls_qualify_and_emit_once(self):
-        self._armed()
-        self.assertEqual(0, self._poll(112.5, MONDAY_MORNING))
-        self.assertEqual([], self.alerts)
-        self.assertEqual(1, self.screener.status()["pending_live_confirmations"])
-        self.assertEqual(1, self._poll(112.6, MONDAY_MORNING + timedelta(seconds=1)))
-        self.assertEqual(0, self._poll(112.7, MONDAY_MORNING + timedelta(seconds=2)))
-        self.assertEqual(1, len(self.alerts))
-        continuation = self.alerts[0]["metadata"]["indicator_confirmations"]["continuation"]
-        self.assertEqual("two_fresh_polls", continuation["mode"])
-        self.assertEqual(2, continuation["live_polls"])
-        self.assertEqual(112.0, continuation["reference_high"])
-        self.assertAlmostEqual(20.8, continuation["r"])
-
-    def test_repeated_cached_quote_timestamp_is_not_a_second_observation(self):
-        self._armed()
-        self.assertEqual(0, self._poll(112.5, MONDAY_MORNING))
-        for second in (1, 2, 3):
-            self.assertEqual(0, self._poll(112.5, MONDAY_MORNING + timedelta(seconds=second), MONDAY_MORNING))
-        self.assertEqual([], self.alerts)
-        self.assertEqual(1, self._poll(112.5, MONDAY_MORNING + timedelta(seconds=4)))
-
-    def test_price_at_or_below_red_high_resets_confirmation(self):
-        self._armed()
-        self.assertEqual(0, self._poll(112.5, MONDAY_MORNING))
-        self.assertEqual(0, self._poll(112.0, MONDAY_MORNING + timedelta(seconds=1)))   # equality is no breakout
-        self.assertEqual(0, self._poll(112.5, MONDAY_MORNING + timedelta(seconds=2)))
-        self.assertEqual(0, self._poll(96.0, MONDAY_MORNING + timedelta(seconds=3)))    # bounce to red low
-        self.assertEqual(0, self._poll(112.5, MONDAY_MORNING + timedelta(seconds=4)))
-        self.assertEqual([], self.alerts)
-        self.assertEqual(1, self._poll(112.5, MONDAY_MORNING + timedelta(seconds=5)))
-
-    def test_indicator_failure_stale_or_missing_quote_resets_confirmation(self):
-        sideways = _confirmation(sideways=True, mode="live_provisional_ltp")
-        for interruption in ("filter", "stale", "missing"):
-            with self.subTest(interruption=interruption):
-                self.setUp()  # fresh screener: no dedup state from the previous subtest
-                self.screener._calculate_confirmation = MagicMock(return_value=sideways)
-                self._armed()
-                self.assertEqual(0, self._poll(112.5, MONDAY_MORNING))
-                if interruption == "filter":
-                    self.screener._calculate_confirmation.return_value = _confirmation(
-                        sideways=True, failed="rsi14_above_25_and_rising")
-                    self.assertEqual(0, self._poll(112.6, MONDAY_MORNING + timedelta(seconds=1)))
-                    self.screener._calculate_confirmation.return_value = sideways
-                elif interruption == "stale":
-                    self.assertEqual(0, self._poll(
-                        112.6, MONDAY_MORNING + timedelta(seconds=12), MONDAY_MORNING - timedelta(seconds=1)))
-                else:
-                    self.clock_now = MONDAY_MORNING + timedelta(seconds=1)
-                    self.data_manager.fetch_quotes.return_value = {}
-                    self.assertEqual(0, self.screener.live_check_once(self.clock_now))
-                self.assertEqual(0, self._poll(112.7, MONDAY_MORNING + timedelta(seconds=13)))
-                self.assertEqual([], self.alerts)
-                self.assertEqual(1, self._poll(112.8, MONDAY_MORNING + timedelta(seconds=14)))
-
-    def test_expired_first_observation_does_not_pair_with_later_poll(self):
-        self._armed()
-        self.assertEqual(0, self._poll(112.5, MONDAY_MORNING))
-        self.assertEqual(0, self._poll(112.5, MONDAY_MORNING + timedelta(seconds=11)))
-        self.assertEqual([], self.alerts)
-
-    def test_new_bucket_or_new_reference_resets_confirmation(self):
-        self._armed()
-        before_boundary = datetime(2026, 10, 5, 10, 34, 59, tzinfo=IST)
-        self.assertEqual(0, self._poll(112.5, before_boundary))
-        self.assertEqual(0, self._poll(112.5, before_boundary + timedelta(seconds=2)))  # 10:35 NSE bucket
-        self.assertEqual([], self.alerts)
-        # A refresh with a newer RED reference replaces the state and its counts.
-        refreshed = list(self.ARMED) + [_candle(30, 108, 113, 100, 104)]
-        self.screener._monitored.clear()
-        self.screener._live_bars.clear()
-        self.assertEqual(0, self._prime({101: refreshed}, now=MONDAY_MORNING.replace(minute=41)))
-        self.assertNotIn("continuation", self.screener._monitored[101])
-        self.assertEqual(113.0, self.screener._monitored[101]["reference"]["high"])
-
-    def test_single_fresh_poll_at_0_3r_qualifies_and_just_below_does_not(self):
-        self._armed()
-        self.assertEqual(0, self._poll(118.23, MONDAY_MORNING))
-        self.screener._monitored[101].pop("continuation")  # isolate the momentum branch
-        self.assertEqual(1, self._poll(118.24, MONDAY_MORNING + timedelta(seconds=1)))
-        continuation = self.alerts[0]["metadata"]["indicator_confirmations"]["continuation"]
-        self.assertEqual("momentum_0_3r", continuation["mode"])
-        self.assertAlmostEqual(118.24, continuation["momentum_threshold"])
-
-    def test_normal_mode_has_no_continuation_delay(self):
-        self.screener._calculate_confirmation.return_value = _confirmation(sideways=False)
+    def test_first_fresh_quote_alerts_without_range_wait(self):
         self._armed()
         self.assertEqual(1, self._poll(112.05, MONDAY_MORNING))
-        self.assertEqual(
-            "normal", self.alerts[0]["metadata"]["indicator_confirmations"]["continuation"]["mode"])
-
-    def test_completed_sideways_breakout_stays_armed_then_needs_real_polls(self):
-        fresh = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 109, 97, 105), _candle(20, 105, 113, 104, 112)]
-        # Red 100/110/95/98 -> stop 90.25, R 19.75, 0.3R level 115.925; close 112 is below.
-        self.assertEqual(0, self._prime({101: fresh}))
-        self.assertTrue(self.screener._monitored[101]["reference"]["armed"])
-        self.assertEqual([], self.alerts)
-        self.assertNotIn("continuation", self.screener._monitored[101])  # no polls fabricated from OHLC
-        self.assertEqual(0, self._poll(112.5, MONDAY_MORNING))
-        self.assertEqual(1, self._poll(112.5, MONDAY_MORNING + timedelta(seconds=1)))
+        self.assertEqual(0, self._poll(112.7, MONDAY_MORNING + timedelta(seconds=2)))
         self.assertEqual(1, len(self.alerts))
-        self.assertEqual("live_ltp", self.alerts[0]["metadata"]["trigger"])
 
-    def test_completed_sideways_close_at_0_3r_emits_from_candle(self):
-        fresh = [_candle(0, 100, 110, 95, 98), _candle(10, 98, 109, 97, 105), _candle(20, 105, 117, 104, 116)]
-        self.assertEqual(1, self._prime({101: fresh}))
+    def test_170_60_red_high_equal_fails_170_80_alerts_without_wait(self):
+        self._prime({101: [_candle(0, 170, 170.60, 160, 165)]})
+        self.assertEqual(0, self._poll(170.60, MONDAY_MORNING))
+        self.assertEqual(0, self._poll(170.50, MONDAY_MORNING + timedelta(seconds=1)))
+        self.assertEqual(1, self._poll(170.80, MONDAY_MORNING + timedelta(seconds=2)))
         meta = self.alerts[0]["metadata"]
-        self.assertEqual("candle_high", meta["trigger"])
-        self.assertEqual("momentum_0_3r", meta["indicator_confirmations"]["continuation"]["mode"])
+        self.assertEqual(170.60, meta["entry"])
+        self.assertEqual(170.80, meta["breakout_price"])
+        self.assertEqual(152.0, meta["stop_loss"])
+
+    def test_170_80_breakout_uses_real_indicators_from_previous_session_warmup(self):
+        self.screener._calculate_confirmation = PremiumScreener._calculate_confirmation.__get__(self.screener)
+        candles = []
+        for index in range(40):
+            close = 150 + index * .4 + (1 if index % 3 == 1 else 0)
+            candles.append({
+                "timestamp": (datetime(2026, 10, 1, 9, 15, tzinfo=IST)
+                              + timedelta(minutes=index * 10)).isoformat(),
+                "open": close - .1, "high": close + .5, "low": close - .5, "close": close,
+            })
+        candles.append({
+            "timestamp": "2026-10-05T10:15:00+05:30",
+            "open": 170, "high": 170.60, "low": 160, "close": 165,
+        })
+        self.assertEqual(0, self._prime({101: candles}))
+        before = [dict(candle) for candle in self.screener._monitored[101]["candles"]]
+        self.assertEqual(0, self._poll(170.60, MONDAY_MORNING))
+        self.assertEqual(1, self._poll(170.80, MONDAY_MORNING + timedelta(seconds=1)))
+        self.assertEqual(before, self.screener._monitored[101]["candles"])
+        confirmation = self.alerts[0]["metadata"]["indicator_confirmations"]
+        self.assertEqual({name: True for name in GATES}, confirmation["passed"])
+        self.assertGreater(confirmation["values"]["rsi14"], confirmation["values"]["rsi14_previous"])
+        self.assertEqual(170.80, confirmation["values"]["premium"])
+
+    def test_missing_future_invalid_and_out_of_order_quotes_cannot_alert(self):
+        self._armed()
+        self.assertEqual(0, self._poll(100, MONDAY_MORNING))
+        self.assertEqual(0, self._poll(113, MONDAY_MORNING, MONDAY_MORNING + timedelta(seconds=1)))
+        self.assertEqual(0, self._poll(float("nan"), MONDAY_MORNING))
+        self.assertEqual(0, self._poll(113, MONDAY_MORNING, MONDAY_MORNING - timedelta(seconds=1)))
+        self.data_manager.fetch_quotes.return_value = {}
+        self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
+        self.assertEqual([], self.alerts)
+        self.assertTrue(self.screener._monitored[101]["reference"]["armed"])
+        self.assertEqual(1, self._poll(113, MONDAY_MORNING + timedelta(seconds=1)))
+
+    def test_reported_breakout_time_is_quote_time_not_poll_time(self):
+        self._armed()
+        observed = MONDAY_MORNING - timedelta(seconds=3)
+        self.assertEqual(1, self._poll(113, MONDAY_MORNING, observed))
+        self.assertEqual(observed.timestamp(), datetime.fromisoformat(self.alerts[0]["breakout_timestamp"]).timestamp())
+
+    def test_fresh_depth_receipt_does_not_disguise_missing_or_stale_last_trade(self):
+        self._armed()
+        for traded_at in (None, MONDAY_MORNING.timestamp() - 11):
+            self.data_manager.fetch_quotes.return_value = {
+                ("NSE_FNO", 101): {
+                    "price": 113, "bid": 112.5, "ask": 113.5,
+                    "timestamp": MONDAY_MORNING.timestamp(), "trade_timestamp": traded_at,
+                },
+            }
+            self.assertEqual(0, self.screener.live_check_once(MONDAY_MORNING))
+        self.assertEqual([], self.alerts)
+        self.assertTrue(self.screener._monitored[101]["reference"]["armed"])
+        self.data_manager.fetch_quotes.return_value[("NSE_FNO", 101)]["trade_timestamp"] = (
+            MONDAY_MORNING.timestamp() - 2
+        )
+        self.assertEqual(1, self.screener.live_check_once(MONDAY_MORNING))
+        self.assertEqual(MONDAY_MORNING.timestamp() - 2,
+                         datetime.fromisoformat(self.alerts[0]["breakout_timestamp"]).timestamp())
+
+    def test_forming_bucket_extremes_reset_and_never_use_completed_high(self):
+        self._armed()
+        self._poll(105, MONDAY_MORNING)
+        first = self.screener._live_bars[101]
+        self.assertEqual((105, 105), (first["low"], first["high"]))
+        later = MONDAY_MORNING.replace(minute=35, second=1)
+        self._poll(106, later)
+        second = self.screener._live_bars[101]
+        self.assertEqual((106, 106), (second["low"], second["high"]))
+        self.assertNotEqual(first["bucket"], second["bucket"])
 
     def test_concurrent_live_polls_emit_exactly_once(self):
         import threading
 
-        self.screener._calculate_confirmation.return_value = _confirmation(sideways=False)
         self._armed()
         self.data_manager.fetch_quotes.return_value = {
             ("NSE_FNO", 101): {"price": 113, "timestamp": MONDAY_MORNING.timestamp()}
@@ -529,14 +500,13 @@ class SidewaysContinuationTests(_Base):
         self.assertEqual(1, sum(results))
         self.assertEqual(1, len(self.alerts))
 
-    def test_emit_rejects_unqualified_continuation(self):
+    def test_emit_rejects_completed_only_confirmation_even_if_ready(self):
         self._armed()
         state = self.screener._monitored[101]
         signal = self.screener.engine.evaluate_live_price(
             "NIFTY", state["reference"], 113, "CE", "index_options",
             timestamp=MONDAY_MORNING.isoformat())
-        signal["indicator_confirmations"] = {
-            **_confirmation(sideways=True), "continuation": {"qualified": False, "mode": "pending"}}
+        signal["indicator_confirmations"] = _confirmation(mode="completed")
         self.assertEqual(0, self.screener._emit(state, signal, {}, MONDAY_MORNING, require_armed=True))
         self.assertTrue(state["reference"]["armed"])
         self.assertEqual([], self.alerts)

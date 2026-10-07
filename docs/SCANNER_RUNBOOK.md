@@ -11,8 +11,7 @@ This runbook covers the premium breakout scanner that sends option alerts to the
 | Strikes | Entry scanning, alerts, and approval requests use only the **listed ITM+1 CE and PE** contracts. CE ITM is the next lower listed strike; PE ITM is the next higher listed strike. There is no ATM/OTM or synthetic fallback; a missing ITM+1 contract is skipped before option-candle/LTP requests. Existing paper positions and pending orders in any band remain independently quoted and protected by the paper portfolio worker. |
 | Reference candle | Most recent **RED** 10-minute candle (`close < open`; dojis are *not* red) within the last **20** ten-minute candles. Previous-session candles are fetched so the window is full from the open. |
 | Confirmations | All three are mandatory for CE and PE (equality fails): **EMA(9)** – the trigger candle is above or straddles the contemporaneous EMA9 (trigger price > EMA9, or observed trigger `low <= EMA9 <= high`; wholly below fails; the red reference candle may sit anywhere relative to EMA9); **MACD(12,26,9)** line strictly above signal; **Wilder RSI(14)** strictly above 25 and strictly above the preceding completed observation. VWAP and Parabolic SAR are not used and volume is not required. All values use that exact option contract's premium candles, never underlying spot. |
-| Anti-chop (Option A) | Last 8 completed candles before the trigger bucket (same IST date, no gap > 30 min, else no entry): `range = (max high - min low) / ((max high + min low) / 2)`. `range <= 0.20` (inclusive) = **sideways**. Sideways entries additionally need **either** two consecutive distinct fresh live polls above the same red high with all gates passing on both, **or** fresh premium `>= red_high + 0.3R` (`R = red_high - stop`, > 0). Normal (`> 0.20`) has no extra delay. |
-| Trigger | Premium price crosses **strictly above the red candle HIGH**. Completed-candle and live-LTP triggers are both supported, but each is gated by the three confirmations and anti-chop continuation before reference consumption, alert delivery, or approval enqueue. A failed or pending candidate leaves the reference armed for a later eligible live crossing while price remains above the red high. A completed sideways trigger qualifies only when its actual close reaches the 0.3R level. |
+| Trigger | Actual fresh option premium **strictly above the red candle HIGH**, with all three gates passing. Equality fails. The first eligible live observation can alert immediately; completed highs/closes never trigger service alerts or entries. A failed candidate leaves the reference armed for reevaluation while price remains above the red high. |
 | Entry | Red candle high |
 | Stop-loss | Red candle low × 0.95 (5 % below the low) |
 | Risk points | Entry − Stop-loss |
@@ -29,22 +28,15 @@ This runbook covers the premium breakout scanner that sends option alerts to the
   signal and all indicator comparisons. Missing/non-finite OHLC, insufficient
   warmup, stale evidence, or invalid timestamps fail closed; there is no
   substitute value or default-pass indicator. Volume is optional and unused.
-- Evidence timestamps: completed triggers evaluate EMA9/MACD/RSI at the trigger
-  bar (`indicator_as_of`) against the previous completed bar
-  (`previous_indicator_as_of`) using the trigger's actual OHLC. Live triggers
+- Evidence timestamps: live triggers
   use a provisional snapshot of the forming bucket built only from observed fresh
   option LTP ticks (first/max/min/last, `live_quote_as_of`); it is rebuilt each
   poll from immutable completed history, never appended or persisted, and never
   uses future bars. Observed live high/low may be narrower than the exchange's
   true forming range; the bot does not invent extremes to make a straddle pass.
-- Two-poll confirmation state is keyed by contract, red reference and forming
-  bucket, held under the scanner lock, bounded to monitored contracts, and
-  in-memory only (a restart starts from zero rather than claiming earlier polls).
-  The same cached quote timestamp never counts twice. Reasons for pending or
-  rejected candidates are counted in `/health` → scanner `indicator_rejections`
-  (e.g. `continuation_awaiting_continuation`, `filter_failed`,
-  `insufficient_anti_chop_history`) and `pending_live_confirmations`; they are
-  not sent to Telegram.
+- Rejected candidates are counted in `/health` → scanner `indicator_rejections`
+  (e.g. `filter_failed`, `stale_quote`, `insufficient_history`); they are not
+  sent to Telegram. History loading is silent, including at startup.
 - No per-indicator or per-confirmation network requests are made. ITM+1 is
   selected before batched candle and live-quote requests; the existing shared
   pacing/cache/429 cooldown remains in use. These filters reduce eligible
@@ -80,14 +72,15 @@ Flask app, including `/health`, keeps running.
 | Variable | Default | Purpose |
 |---|---|---|
 | `PRACTICE_MODE` | `true` | Persistent simulated portfolio, no real orders. Main enforces practice mode. |
-| `AUTO_TRADING_ENABLED` | `false` | Main disables live auto-trading regardless of this value. Keep `false`. |
+| `AUTO_TRADING_ENABLED` | `false` | Conscious isolated live guard; paper remains simulated and production is blocked. Keep `false`. |
+| `NIFTY_LIVE_ENABLED` | `false` | Separate opt-in NIFTY route, no duplicate paper approval when configured. Production adapter remains blocked; see deployment guide. |
 | `ENABLE_MARKET_SCANNER` | `false` | Set `true` to run the scanner (also needs `ACCESS_TOKEN`). |
 | `ACCESS_TOKEN` | – | Dhan access token (candles, LTP). |
 | `DHAN_CLIENT_ID` (or `API_KEY`) | – | Dhan client id, required by the LTP endpoint used for live triggers. |
 | `CHANNEL_SERVICE_ALERTS_ID`, `BOT_SERVICE_ALERTS_TOKEN` | – | Telegram alert channel / bot. |
 | `SCANNER_IDLE_SECONDS` | `300` | Max sleep while all exchanges are closed. |
 | `LIVE_TRIGGER_ENABLED` | `true` | Live LTP breakout checks between candles. |
-| `LIVE_TRIGGER_POLL_SECONDS` | `1` | Live LTP poll interval (Dhan LTP limit is 1 request/s). |
+| `LIVE_TRIGGER_POLL_SECONDS` | `1` | Local live-check cadence; shared cache/pacing/backoff controls HTTP requests, not this counter alone. |
 | `SCANNER_REFRESH_RETRY_SECONDS` | `120` | Retry delay after a failed candle refresh. |
 | `EXCHANGE_EXTRA_HOLIDAYS` | – | Extra closures, e.g. `ALL:2027-01-26,MCX:2026-12-31`; MCX half days via `MCX_MORNING:<date>` / `MCX_EVENING:<date>`. Required for 2027+ until the calendar is updated. |
 | `DHAN_SECURITY_MASTER_URL` | Dhan compact CSV | Override the security master source. |
@@ -110,10 +103,8 @@ Flask app, including `/health`, keeps running.
    - on expiry day the `expiry=` shown is the **next** expiry.
 3. For each Telegram alert verify: underlying/category, option symbol, strike,
    CE/PE, BUY CALL/BUY PUT, expiry, ITM+1 band, entry, stop-loss, risk, 2R target,
-   timeframe, IST reference/breakout times, the EMA9 (above/straddle), MACD and
-   RSI14 (>25, rising) values/pass marks, the 8-bar range %/regime and the
-   confirmation mode (normal / two fresh polls / 0.3R) with reference high, stop
-   and R. For live alerts, check the observed-LTP-ticks label and LTP as-of time.
+   observed breakout price and IST quote time, underlying spot and practice mode.
+   Indicator calculations remain internal and are not included in service alerts.
    Cross-check entry/SL/target against the red candle on the Dhan chart.
 4. Latency: `⏱️ Latency <stage> (n=..): p50/p95/p99` log lines report internal timings
    from price receipt to evaluate, queue and Telegram send start.
@@ -137,12 +128,13 @@ after original detection by default—not 60 seconds after the candle's start or
 the worker's next retry. Submit, approval and simulated fill enforce it.
 `/pending`, duplicate requests, restart and retries do not extend it.
 
-Only latest completed-candle breakouts detected within 60 seconds of completion
-are eligible (10-minute candle start age 600–660 seconds). Live evidence must be
-at most 60 seconds old at detection. Startup does not replay older latest
-breakouts; previous-session RED references may still arm a **new live** crossing.
-Slow historical fetches can safely miss this window; do not increase freshness or
-substitute historical breakout prices for execution quotes to force approvals.
+Only actual live quotes at most 10 seconds old at detection are eligible.
+When quotes expose a separate last-trade timestamp, that timestamp must be fresh;
+a fresh depth/receipt timestamp cannot turn stale option LTP into breakout evidence.
+Startup/history refresh does not replay completed breakouts; previous-session
+RED references may still arm a **new live** observation.
+Do not increase freshness or substitute historical breakout prices for execution
+quotes to force approvals.
 Execution needs a fresh shared quote (default 10 seconds), exact listed security
 ID/segment, positive metadata lot size and INR tick size. One real metadata lot,
 max 5 occupied/reserved slots, max 20 daily entries, cash/risk limits, exchange
@@ -171,7 +163,7 @@ cutoffs and unresolved-exit blocks still apply.
      attempts and latest sanitized failure. Health reads do not send or freshen
      requests.
 4. During market hours, an eligible ITM+1 CE **and** PE observation with all three
-   confirmations true (plus Option A continuation when sideways) should produce
+   confirmations true should produce
    `#PAPER #APPROVAL`, exact contract/one-lot units, and **Approve Limit / Approve
    Market / Modify / Reject** buttons in trade_control, with no position or
    simulated execution beforehand. Verify `/orders` and `/positions`, then an
