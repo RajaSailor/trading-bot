@@ -48,7 +48,7 @@ class _FakeFetcher:
     def get_spot_price(self, instrument, interval="10min"):
         return 72000.0
 
-    def resolve_strike_band(self, instrument, spot, option_type, now=None):
+    def resolve_strike_band(self, instrument, spot, option_type, now=None, bands=None):
         return [
             {
                 "security_id": 1 if option_type == "CE" else 2,
@@ -57,7 +57,7 @@ class _FakeFetcher:
                 "instrument_type": "OPTFUT",
                 "strike": 127,
                 "atm_strike": 127,
-                "strike_band": "ATM",
+                "strike_band": "ITM+1",
                 "expiry": "24OCT2026",
                 "option_type": option_type,
             }
@@ -88,21 +88,16 @@ class _FakePositionManager:
 
 
 class PremiumScreenerTests(unittest.TestCase):
-    def test_scan_instruments_sends_ce_and_pe_premium_alerts(self):
+    def test_history_scan_arms_ce_and_pe_without_alerts(self):
         telegram = _FakeTelegramHandler()
         screener = PremiumScreener(_FakeDataManager(), telegram, _FakePositionManager())
         screener.fetcher = _FakeFetcher()
 
         alerts = screener._scan_instruments(screener.commodity_instruments, "10min", NOW)
 
-        self.assertEqual(2, alerts)
-        self.assertEqual(
-            [
-                ("commodity_options", "CALL", "GOLD-24OCT-127-CE"),
-                ("commodity_options", "PUT", "GOLD-24OCT-127-PE"),
-            ],
-            telegram.sent,
-        )
+        self.assertEqual(0, alerts)
+        self.assertEqual([], telegram.sent)
+        self.assertEqual(2, len(screener.armed_contracts()))
 
     def test_stock_option_alerts_are_sent_once_to_the_screener_channel(self):
         telegram = _FakeTelegramHandler()
@@ -160,15 +155,9 @@ class PremiumScreenerTests(unittest.TestCase):
         first = screener._scan_instruments(screener.commodity_instruments, "10min", NOW)
         second = screener._scan_instruments(screener.commodity_instruments, "10min", NOW)
 
-        self.assertEqual(2, first)
+        self.assertEqual(0, first)
         self.assertEqual(0, second)
-        self.assertEqual(
-            [
-                ("commodity_options", "CALL", "GOLD-24OCT-127-CE"),
-                ("commodity_options", "PUT", "GOLD-24OCT-127-PE"),
-            ],
-            telegram.sent,
-        )
+        self.assertEqual([], telegram.sent)
 
 
 if __name__ == "__main__":

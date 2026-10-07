@@ -301,6 +301,7 @@ class QueueConsumerWorker:
         dhan_integration=None,
         paper_portfolio=None,
         quote_provider=None,
+        live_route=None,
     ) -> None:
         self.queue_processor = queue_processor
         self.order_executor = order_executor
@@ -311,6 +312,7 @@ class QueueConsumerWorker:
         self.dhan_integration = dhan_integration
         self.paper_portfolio = paper_portfolio
         self.quote_provider = quote_provider
+        self.live_route = live_route
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
@@ -395,6 +397,8 @@ class QueueConsumerWorker:
             return True
 
     def _execute_signal(self, signal: dict):
+        if self.live_route is not None and self.live_route.targets(signal):
+            return self.live_route.propose(signal)
         if self.paper_portfolio is not None:
             metadata = signal.get("metadata") or {}
             quote = None

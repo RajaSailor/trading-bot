@@ -82,10 +82,17 @@ class RedCandleReferenceTests(unittest.TestCase):
         self.assertEqual(110.05, signal["breakout_price"])
         self.assertEqual(110.0, signal["entry"])
 
-    def test_live_price_ignored_when_reference_already_broken(self):
+    def test_historical_high_does_not_consume_live_reference(self):
         reference = self.engine.find_reference([_c(0, 105, 110, 100, 102), _c(1, 102, 111, 101, 110.5)])
-        self.assertFalse(reference["armed"])
-        self.assertIsNone(self.engine.evaluate_live_price("GOLD", reference, 200.0, "CE", "commodity_options"))
+        self.assertTrue(reference["armed"])
+        self.assertIsNotNone(self.engine.evaluate_live_price("GOLD", reference, 200.0, "CE", "commodity_options"))
+
+    def test_consumed_reference_and_nonfinite_prices_cannot_trigger(self):
+        reference = self.engine.find_reference([_c(0, 105, 110, 100, 102)])
+        for price in (None, float("nan"), float("inf"), -1, "invalid"):
+            self.assertIsNone(self.engine.evaluate_live_price("GOLD", reference, price, "CE", "commodity_options"))
+        reference["armed"] = False
+        self.assertIsNone(self.engine.evaluate_live_price("GOLD", reference, 120, "CE", "commodity_options"))
 
     def test_legacy_cache_api_uses_new_rules_and_is_bounded(self):
         for candle in [_green(i) for i in range(30)] + [_c(30, 105, 110, 100, 102), _c(31, 102, 111, 101, 110)]:

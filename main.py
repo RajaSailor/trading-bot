@@ -102,6 +102,7 @@ except ImportError:
 from paper_portfolio import PaperPortfolio
 from paper_telegram import PaperTelegramControl
 from data_manager import get_shared_data_manager
+from live_runtime import build_live_route
 
 from timezone_utils import now_local_iso
 
@@ -139,6 +140,7 @@ token_manager = None
 paper_portfolio = None
 paper_portfolio_worker = None
 paper_telegram_control = None
+live_route = None
 phase_components = {}
 runtime_config = {}
 initialized = False
@@ -180,6 +182,15 @@ def _load_runtime_config() -> dict:
     return {
         "practice_mode": practice_mode,
         "auto_trading_enabled": False,
+        "nifty_live": {
+            "enabled": _env_bool("NIFTY_LIVE_ENABLED", False),
+            "practice": _env_bool("PRACTICE_MODE", True),
+            "auto": _env_bool("AUTO_TRADING_ENABLED", False),
+            "db_path": os.getenv("LIVE_DB_PATH", "live_trading.db"),
+            "allowed_users": os.getenv("LIVE_TELEGRAM_ALLOWED_USER_IDS", ""),
+            "chat_id": os.getenv("LIVE_TELEGRAM_CHAT_ID", ""),
+            "webhook_secret": os.getenv("LIVE_TELEGRAM_WEBHOOK_SECRET", ""),
+        },
         "max_loss_per_trade": _env_float("MAX_LOSS_PER_TRADE", 0.01),
         "max_position_size": max(1, _env_int("MAX_POSITION_SIZE", 5)),
         "min_rr_ratio": _env_float("MIN_RR_RATIO", 1.5),
@@ -224,7 +235,7 @@ def _apply_refreshed_token(token: str) -> None:
             headers["Authorization"] = "Bearer " + token
 
 
-def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
+def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True, *, scanner_origin: bool = False):
     if signal_queue_processor is None:
         return None, ("Signal queue processor not initialized", 503)
 
@@ -235,6 +246,7 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True):
     signal = signal_queue_processor.parse_webhook_signal(payload)
     if signal is None:
         return None, ("Invalid signal payload", 400)
+    signal["_scanner_origin"] = scanner_origin
 
     signal["entry_price"] = payload.get("entry_price", payload.get("price"))
     signal["target_price"] = payload.get("target_price")
@@ -332,6 +344,7 @@ def initialize_app(force: bool = False):
     global trading_db, state_manager, metrics_collector, alert_manager
     global telegram_handler, signal_notifier, queue_consumer_worker, market_scanner_worker, token_manager
     global paper_portfolio, paper_portfolio_worker, paper_telegram_control
+    global live_route
     global phase_components, runtime_config, initialized
 
     if initialized and not force:
@@ -378,6 +391,7 @@ def initialize_app(force: bool = False):
         paper_portfolio = None
         paper_portfolio_worker = None
         paper_telegram_control = None
+        live_route = None
         phase_components.clear()
         initialized = False
     
@@ -519,6 +533,8 @@ def initialize_app(force: bool = False):
         paper_portfolio_worker = PaperPortfolioWorker(paper_portfolio)
         paper_portfolio_worker.start()
         phase_components["paper_portfolio"] = True
+        live_route = build_live_route(runtime_config["nifty_live"], paper_db_path=paper_db_path)
+        phase_components["nifty_live"] = live_route is not None
 
         channels = []
         if (
@@ -561,6 +577,7 @@ def initialize_app(force: bool = False):
                 dhan_integration=dhan_integration,
                 paper_portfolio=paper_portfolio,
                 quote_provider=get_shared_data_manager(),
+                live_route=live_route,
             )
             queue_started = queue_consumer_worker.start(runtime_config["queue_poll_seconds"])
             phase_components["queue_consumer"] = True
@@ -571,7 +588,9 @@ def initialize_app(force: bool = False):
 
         if MarketScannerWorker is not None and signal_notifier is not None and signal_queue_processor is not None:
             market_scanner_worker = MarketScannerWorker(
-                signal_acceptor=lambda payload, notify: _queue_signal_from_payload(payload, notify)[0] is not None,
+                signal_acceptor=lambda payload, notify: _queue_signal_from_payload(
+                    payload, notify, scanner_origin=True
+                )[0] is not None,
                 runtime_config=runtime_config,
                 paper_trade_notifier=None,
             )
@@ -626,6 +645,27 @@ def initialize_app(force: bool = False):
 # FLASK ROUTES
 # ============================================================================
 
+@app.route('/telegram/live', methods=['POST'])
+def live_telegram_webhook():
+    if live_route is None:
+        return jsonify({"ok": False, "error": "disabled"}), 503
+    if request.content_length is not None and request.content_length > 65536:
+        return jsonify({"ok": False, "error": "payload_too_large"}), 413
+    body = request.stream.read(65537)
+    if len(body) > 65536:
+        return jsonify({"ok": False, "error": "payload_too_large"}), 413
+    try:
+        payload = json.loads(body) if request.is_json else None
+    except (ValueError, UnicodeDecodeError):
+        payload = None
+    result, status = live_route.handle_update(
+        payload, request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    )
+    if result.get("ok") is not True:
+        return jsonify({"ok": False, "error": "live_control_rejected"}), status
+    return jsonify({"ok": True}), status
+
+
 @app.route('/telegram/paper', methods=['POST'])
 def paper_telegram_webhook():
     if paper_telegram_control is None:
@@ -662,6 +702,9 @@ def health_check():
             "telegram_connected": dhan_bridge is not None,
             "telegram_routing": signal_notifier.status() if signal_notifier is not None else {},
             "paper_telegram": paper_telegram_control.readiness_status() if paper_telegram_control is not None else {},
+            "nifty_live": live_route.status() if live_route is not None else {
+                "configured": False, "mode": "paper", "production_ready": False,
+            },
             "paper_outbox": paper_portfolio.notification_status() if paper_portfolio is not None else {},
             "paper_submissions": paper_portfolio.submission_status() if paper_portfolio is not None else {},
             "workers": {

@@ -14,13 +14,12 @@ from atm_options_fetcher import ATMOptionsFetcher, BAND_ITM_PLUS_1
 from exchange_calendar import MCX, exchange_for_instrument, open_exchanges
 from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
-from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_CANDLE, TRIGGER_LIVE, PremiumStrategyEngine
+from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
 from premium_indicators import (
     REQUIRED_CONFIRMATIONS,
     IndicatorDataError,
     calculate_confirmations,
     completed_candles,
-    continuation_status,
 )
 from telegram_handler import SCREENER_CATEGORIES, format_ist_timestamp
 
@@ -40,8 +39,6 @@ CANDLE_SETTLE_SECONDS = 5
 # Retry a failed instrument refresh sooner than the next 10-minute boundary.
 REFRESH_RETRY_SECONDS = 120
 LIVE_QUOTE_MAX_AGE_SECONDS = 10
-# Max spacing between two counted sideways-confirmation polls (Option A).
-LIVE_CONFIRMATION_MAX_GAP_SECONDS = LIVE_QUOTE_MAX_AGE_SECONDS
 
 
 def _env_float(name: str, default: float) -> float:
@@ -211,7 +208,6 @@ class PremiumScreener:
                     self._live_bars.pop(int(contract["security_id"]), None)
                 logger.debug("[%s] No candles for %s", instrument.symbol, contract["option_symbol"])
                 continue
-            receive_mark = now_mark()
             fetched += 1
             try:
                 usable_candles = completed_candles(candles, now)
@@ -233,33 +229,12 @@ class PremiumScreener:
             state = {
                 "contract": contract,
                 "instrument": instrument,
-                "reference": self._slim(reference),
+                "reference": self._armed_reference(reference),
                 "candles": usable_candles,
             }
-            signal = self.engine.evaluate_candles(
-                instrument.symbol, usable_candles, contract["option_type"], instrument.category
-            )
-            gated = None
-            if signal and signal.get("breakout_is_latest"):
-                # Completed trigger: base = candle high > red high; the 0.3R
-                # sideways continuation uses the candle's actual close. Two live
-                # polls are never fabricated from bar OHLC: a pending sideways
-                # candidate stays armed for genuine live observations.
-                gated = self._entry_gate(
-                    self._calculate_confirmation(usable_candles, now),
-                    signal,
-                    price=signal["breakout_high"],
-                    continuation_price=signal["breakout_price"],
-                )
-                if gated is None:
-                    state["reference"] = self._armed_reference(reference)
-                else:
-                    signal["indicator_confirmations"] = gated
             with self._lock:
                 self._monitored[int(contract["security_id"])] = state
             armed += bool(state["reference"] and state["reference"].get("armed"))
-            if gated is not None:
-                alerts += self._emit(state, signal, {"receive": receive_mark, "evaluate": now_mark()}, now)
 
         if fetched:
             self._refresh_state[instrument.symbol] = {"bucket": bucket, "retry_at": None}
@@ -324,7 +299,8 @@ class PremiumScreener:
 
     def live_check_once(self, now: datetime | None = None) -> int:
         """Poll fresh batched quotes for armed entries and existing paper positions."""
-        now = self._as_ist(now)
+        fixed_now = now is not None
+        now = self._as_ist(now if now is not None else self.clock())
         open_now = open_exchanges(now)
         paper_contracts = []
         if self.paper_trade_notifier is not None:
@@ -362,10 +338,8 @@ class PremiumScreener:
             quotes = {}
         receive_mark = now_mark()
         if not quotes:
-            for state in armed:
-                self._reset_continuation(state)
             return 0
-        if now is None:
+        if not fixed_now:
             now = self._as_ist(self.clock())
 
         alerts = 0
@@ -376,18 +350,19 @@ class PremiumScreener:
                 quote_time = self._quote_epoch(quote.get("timestamp"))
                 if price is not None and quote_time is not None:
                     prices[key] = price
-        timestamp = now.isoformat(timespec="seconds")
         for state in armed:
             contract = state["contract"]
             key = (contract["exchange_segment"], int(contract["security_id"]))
             price = prices.get(key)
-            quote_time = self._quote_epoch((quotes.get(key) or {}).get("timestamp")) if isinstance(quotes.get(key), dict) else None
+            quote = quotes.get(key)
+            quote_time = self._quote_epoch(
+                quote.get("trade_timestamp", quote.get("timestamp"))
+            ) if isinstance(quote, dict) else None
             if (
                 price is None or quote_time is None
                 or quote_time > now.timestamp()
                 or now.timestamp() - quote_time > LIVE_QUOTE_MAX_AGE_SECONDS
             ):
-                self._reset_continuation(state)
                 self._count_indicator_reason("stale_quote")
                 continue
             with self._lock:
@@ -395,7 +370,6 @@ class PremiumScreener:
                     continue
             provisional = self._observe_live_price(state, price, quote_time)
             if provisional is None:
-                self._reset_continuation(state)
                 self._count_indicator_reason("out_of_order_quote")
                 continue
             signal = self.engine.evaluate_live_price(
@@ -404,21 +378,16 @@ class PremiumScreener:
                 price,
                 contract["option_type"],
                 state["instrument"].category,
-                timestamp=timestamp,
+                timestamp=datetime.fromtimestamp(quote_time, IST).isoformat(timespec="microseconds"),
             )
             if signal is None:
-                # At/below the red high (or reference consumed): confirmation restarts.
-                self._reset_continuation(state)
                 continue
             confirmation = self._calculate_confirmation(state["candles"], now, provisional_candle=provisional)
             if confirmation is None or not confirmation.get("ready"):
-                self._reset_continuation(state)
                 if confirmation is not None:
                     self._count_indicator_reason("filter_failed")
                 continue
-            # Only polls where every mandatory filter passes are counted.
-            polls = self._record_live_poll(state, quote_time, provisional["timestamp"])
-            gated = self._entry_gate(confirmation, signal, price=price, live_polls=polls)
+            gated = self._entry_gate(confirmation, signal, price=price)
             if gated is None:
                 continue
             signal["indicator_confirmations"] = gated
@@ -440,68 +409,25 @@ class PremiumScreener:
             return None
 
     def _entry_gate(
-        self, confirmation, signal: dict, price, continuation_price=None, live_polls: int = 0
+        self, confirmation, signal: dict, price
     ) -> Optional[dict]:
-        """Base breakout + EMA9/MACD/RSI + Option A continuation, before any emit.
-
-        Returns the confirmation enriched with ``continuation`` evidence, or
-        ``None`` (reason counted, not alerted) so the reference stays armed.
-        """
+        """Strict actual live breakout plus the three mandatory indicator gates."""
         if confirmation is None:
             return None
-        if not confirmation.get("ready"):
+        if not confirmation.get("ready") or not all(
+            confirmation.get("passed", {}).get(name) is True for name in REQUIRED_CONFIRMATIONS
+        ):
             self._count_indicator_reason("filter_failed")
             return None
-        anti_chop = confirmation.get("anti_chop")
-        if not isinstance(anti_chop, dict) or not isinstance(anti_chop.get("sideways"), bool):
-            self._count_indicator_reason("insufficient_anti_chop_history")
+        if (
+            signal.get("trigger") != TRIGGER_LIVE
+            or confirmation.get("evidence_mode") != "live_provisional_ltp"
+            or self._finite_positive(price) is None
+            or not float(price) > float(signal["reference_high"])
+        ):
+            self._count_indicator_reason("no_live_breakout")
             return None
-        continuation = continuation_status(
-            sideways=anti_chop["sideways"],
-            price=price,
-            red_high=signal.get("reference_high"),
-            initial_stop=signal.get("stop_loss"),
-            live_polls=live_polls,
-            continuation_price=continuation_price,
-        )
-        if not continuation["qualified"]:
-            self._count_indicator_reason(f"continuation_{continuation.get('reason', 'pending')}")
-            return None
-        return {**confirmation, "continuation": continuation}
-
-    def _record_live_poll(self, state: dict, observed_at: float, bucket_start) -> int:
-        """Count consecutive, distinct fresh poll observations for one contract+reference.
-
-        Keyed by contract, red reference and forming bucket. A repeated read of
-        the same quote timestamp (shared cache) is not a new observation. A gap
-        longer than ``LIVE_CONFIRMATION_MAX_GAP_SECONDS`` expires the evidence.
-        In-memory only: a restart starts again from zero.
-        """
-        reference = state.get("reference") or {}
-        key = (
-            int(state["contract"]["security_id"]),
-            str(reference.get("timestamp")),
-            reference.get("high"),
-            bucket_start,
-        )
-        with self._lock:
-            tracker = state.get("continuation")
-            if (
-                not isinstance(tracker, dict)
-                or tracker.get("key") != key
-                or observed_at - tracker["last_observed_at"] > LIVE_CONFIRMATION_MAX_GAP_SECONDS
-                or observed_at < tracker["last_observed_at"]
-            ):
-                tracker = {"key": key, "count": 0, "last_observed_at": float("-inf")}
-                state["continuation"] = tracker
-            if observed_at > tracker["last_observed_at"]:
-                tracker["count"] += 1
-                tracker["last_observed_at"] = observed_at
-            return tracker["count"]
-
-    def _reset_continuation(self, state: dict) -> None:
-        with self._lock:
-            state.pop("continuation", None)
+        return confirmation
 
     def _count_indicator_reason(self, reason: str) -> None:
         with self._lock:
@@ -590,7 +516,7 @@ class PremiumScreener:
         now: datetime | None = None,
         require_armed: bool = False,
     ) -> int:
-        now = self._as_ist(self.clock())
+        now = self._as_ist(now if now is not None else self.clock())
         instrument = state["instrument"]
         contract = state["contract"]
         confirmation = signal.get("indicator_confirmations")
@@ -601,8 +527,11 @@ class PremiumScreener:
             or not all(
                 confirmation.get("passed", {}).get(name) is True for name in REQUIRED_CONFIRMATIONS
             )
-            or not isinstance(confirmation.get("continuation"), dict)
-            or confirmation["continuation"].get("qualified") is not True
+            or signal.get("trigger") != TRIGGER_LIVE
+            or confirmation.get("evidence_mode") != "live_provisional_ltp"
+            or self._finite_positive(signal.get("breakout_price")) is None
+            or not float(signal["breakout_price"]) > float(signal["reference_high"])
+            or not self._fresh_evidence(signal, now)
         ):
             self._count_indicator_reason("entry_gate_rejected")
             return 0
@@ -617,7 +546,6 @@ class PremiumScreener:
                     return 0
                 detection = {
                     "detected_at": now.isoformat(),
-                    "breakout_timestamp": signal.get("breakout_timestamp"),
                 }
                 self._detections[signal_key] = detection
                 if len(self._detections) > 2000:
@@ -631,7 +559,7 @@ class PremiumScreener:
                 # Another thread already consumed this reference.
                 return 0
             if reference is not None:
-                # Each RED reference fires at most once (live or candle).
+                # Each RED reference fires at most once.
                 reference["armed"] = False
             if signal_key in self._processed_signal_keys:
                 logger.debug("⚠️ [%s] Duplicate premium signal skipped: %s", instrument.symbol, signal_key)
@@ -697,7 +625,7 @@ class PremiumScreener:
                 "premium_ltp": contract.get("premium_ltp"),
                 "indicator_confirmations": signal.get("indicator_confirmations"),
                 "reference_time_ist": format_ist_timestamp(signal.get("reference_timestamp")),
-                "breakout_time_ist": format_ist_timestamp(signal.get("breakout_timestamp")),
+                "breakout_time_ist": format_ist_timestamp(signal.get("breakout_timestamp"), with_seconds=True),
                 "signal_time_ist": now_ist.strftime("%H:%M:%S"),
                 "signal_date_ist": now_ist.strftime("%d:%m:%Y"),
             }
@@ -751,9 +679,7 @@ class PremiumScreener:
                 if evidence.tzinfo is None:
                     return False
             age = (now - evidence).total_seconds()
-            if signal.get("trigger") == TRIGGER_CANDLE:
-                return bool(signal.get("breakout_is_latest")) and BUCKET_SECONDS <= age <= BUCKET_SECONDS + 60
-            return signal.get("trigger") == TRIGGER_LIVE and 0 <= age <= 60
+            return signal.get("trigger") == TRIGGER_LIVE and 0 <= age <= LIVE_QUOTE_MAX_AGE_SECONDS
         except (KeyError, ValueError, TypeError, OverflowError, OSError):
             return False
 
@@ -816,6 +742,7 @@ class PremiumScreener:
                 "target": target,
                 "targets": list(signal.get("targets", [])),
                 "trigger": signal.get("trigger"),
+                "breakout_price": signal.get("breakout_price"),
                 "reference_high": signal.get("reference_high"),
                 "reference_low": signal.get("reference_low"),
                 "option_symbol": option_data.get("option_symbol"),
@@ -873,10 +800,6 @@ class PremiumScreener:
                     1 for s in self._monitored.values() if s.get("reference") and s["reference"].get("armed")
                 ),
                 "tracked_underlyings": len(self._refresh_state),
-                "pending_live_confirmations": sum(
-                    1 for s in self._monitored.values()
-                    if isinstance(s.get("continuation"), dict) and s["continuation"].get("count", 0) > 0
-                ),
                 "indicator_rejections": dict(self._indicator_counts),
             }
 

@@ -68,7 +68,7 @@ class AlertFormatTests(unittest.TestCase):
             "Risk: 25.00 points",
             "Target 1 (1R): 145.00",
             "Target 2 (2R): 170.00",
-            "Breakout: 05-Oct-2026 10:31 IST @ 120.50",
+            "Breakout: 05-Oct-2026 10:31:05 IST @ 120.50",
             "PRACTICE MODE",
         ):
             self.assertIn(expected, message)
@@ -111,7 +111,7 @@ class AlertFormatTests(unittest.TestCase):
             "Target 1 (1R): 12.57\n"
             "Target 2 (2R): 14.34\n"
             "\n"
-            "⚡ Breakout: 05-Oct-2026 09:50 IST @ 10.95\n"
+            "⚡ Breakout: 05-Oct-2026 09:50:42 IST @ 10.95\n"
             "Underlying spot: 379.40\n"
             "🧪 PRACTICE MODE: alert only, no live order placed\n"
             "\n"
@@ -150,13 +150,55 @@ class AlertFormatTests(unittest.TestCase):
             "Target 1 (1R): 6.02\n"
             "Target 2 (2R): 7.47\n"
             "\n"
-            "⚡ Breakout: 05-Oct-2026 10:31 IST @ 4.62\n"
+            "⚡ Breakout: 05-Oct-2026 10:31:05 IST @ 4.62\n"
+            "📌 SIGNAL ONLY: strategy observation, no broker entry implied\n"
             "\n"
             "📢 DISCLAIMER: Educational purposes only.",
             _rendered_message(message),
         )
         self.assertIn("M&amp;M", message)
         self.assertNotIn("PRACTICE MODE", message)
+
+    def test_false_and_unverified_modes_are_explicit_signal_only_not_broker_entries(self):
+        for practice_mode in (False, None):
+            for compact in (False, True):
+                with self.subTest(practice_mode=practice_mode, compact=compact):
+                    message = format_option_breakout_alert(
+                        _queue_signal()["metadata"], practice_mode=practice_mode, compact=compact,
+                    )
+                    self.assertIn("SIGNAL ONLY", message)
+                    self.assertIn("no broker entry implied", message)
+                    self.assertNotIn("LIVE", message)
+                    self.assertNotIn("PRACTICE MODE", message)
+                    self.assertEqual(practice_mode is None, "mode unverified" in message)
+
+    def test_raw_quote_timestamp_overrides_minute_only_presentation_time(self):
+        alert = _queue_signal(breakout_time_ist="05-Oct-2026 10:31 IST")["metadata"]
+        for compact in (False, True):
+            message = format_option_breakout_alert(alert, compact=compact)
+            self.assertIn("Breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
+
+    def test_scanner_enrichment_and_queue_payload_preserve_observed_seconds(self):
+        from types import SimpleNamespace
+
+        instrument = SimpleNamespace(symbol="NIFTY", category="index_options")
+        signal = {
+            **_queue_signal()["metadata"],
+            "signal": "CALL", "detected_at": "2026-10-05T10:31:09+05:30", "breakout_price": 120.5,
+        }
+        contract = {
+            **_queue_signal()["metadata"],
+            "security_id": 101, "exchange_segment": "NSE_FNO",
+            "lot_size": 75, "tick_size": .05, "instrument_type": "OPTIDX",
+        }
+        scanner = object.__new__(PremiumScreener)
+        scanner._enrich_signal(signal, instrument, contract)
+        self.assertEqual("05-Oct-2026 10:31:05 IST", signal["breakout_time_ist"])
+        payload = scanner._build_queue_payload(instrument, signal, "index_options", "premium_screener", contract)
+        self.assertEqual("05-Oct-2026 10:31:05 IST", payload["metadata"]["breakout_time_ist"])
+        message = SignalNotifier(_Handler()).format_strategy_signal(payload)
+        self.assertIn("Breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
+        self.assertNotIn("10:31:09 IST @", message)
 
     def test_compact_commodity_category_mapping(self):
         message = format_option_breakout_alert(
@@ -179,7 +221,7 @@ class AlertFormatTests(unittest.TestCase):
         )
         self.assertIn("🚀 BUY PUT | GOLD (COMMODITY OPTIONS)", _rendered_message(message))
         self.assertNotIn("PRACTICE MODE", message)
-        self.assertIn("⚡ Breakout: 05-Oct-2026 09:50 IST @ 2904.50", _rendered_message(message))
+        self.assertIn("⚡ Breakout: 05-Oct-2026 09:50:00 IST @ 2904.50", _rendered_message(message))
 
     def test_put_alert_says_buy_put(self):
         message = format_option_breakout_alert(
@@ -199,13 +241,13 @@ class AlertFormatTests(unittest.TestCase):
         self.assertEqual(["service_alerts"], [channel for channel, _ in handler.calls])
         self.assertIn("Target 1 (1R): 145.00", handler.calls[0][1])
         self.assertIn("Target 2 (2R): 170.00", handler.calls[0][1])
-        self.assertIn("Breakout: 05-Oct-2026 10:31 IST @ 120.50", handler.calls[0][1])
+        self.assertIn("Breakout: 05-Oct-2026 10:31:05 IST @ 120.50", handler.calls[0][1])
         self.assertNotIn("Timeframe:", handler.calls[0][1])
-        self.assertNotIn("10:31:05", handler.calls[0][1])
+        self.assertIn("10:31:05", handler.calls[0][1])
         summary = tracker.summary()
         self.assertAlmostEqual(4.0, summary["receive->send_start"]["p50"], places=3)
 
-    def test_service_alert_shows_live_indicator_values_status_and_evidence_times(self):
+    def test_service_alert_omits_internal_indicators_in_compact_and_full_formats(self):
         confirmations = {
             "passed": {
                 "trigger_above_or_straddles_ema9": True, "macd_above_signal": True,
@@ -216,40 +258,31 @@ class AlertFormatTests(unittest.TestCase):
                 "rsi14": 61.3, "rsi14_previous": 58.1, "macd12_26": 2.5, "macd_signal9": 1.8,
             },
             "ema9_position": "straddle",
-            "anti_chop": {"bars": 8, "window_low": 95.0, "window_high": 110.0, "range_fraction": 0.146341,
-                          "max_range_fraction": 0.2, "sideways": True},
-            "continuation": {"mode": "two_fresh_polls", "qualified": True, "reference_high": 112.0,
-                             "initial_stop": 93.1, "r": 18.9, "momentum_threshold": 117.67},
             "evidence_mode": "live_provisional_ltp",
             "indicator_as_of": "2026-10-05T10:35:00+05:30",
             "live_quote_as_of": "2026-10-05T10:35:03+05:30",
         }
-        message = SignalNotifier(_Handler()).format_strategy_signal(
-            _queue_signal(indicator_confirmations=confirmations)
-        )
-        self.assertIn("PREMIUM CONFIRMATIONS", message)
-        self.assertIn("✓ EMA9: trigger 120.50 straddle EMA 118.40 (L 118.00 / H 121.00)", message)
-        self.assertIn("✓ MACD 12/26/9: 2.50 vs signal 1.80", message)
-        self.assertIn("✓ RSI14 (&gt;25, rising): 61.30 vs prev 58.10", message)
-        self.assertIn("Range 8 bars: 95.00–110.00 (14.6%, ≤20% sideways) → SIDEWAYS", message)
-        self.assertIn(
-            "Confirmation: two fresh polls | Ref high 112.00 | Stop 93.10 | R 18.90 | 0.3R 117.67", message)
-        self.assertIn("Live provisional (observed LTP ticks)", message)
-        self.assertIn("05-Oct-2026 10:35:00 IST", message)
-        self.assertIn("Fresh option LTP as of 05-Oct-2026 10:35:03 IST", message)
-        self.assertNotIn("VWAP", message)
-        self.assertNotIn("PSAR", message)
-        self.assertLess(len(message), 4096)
+        signal = _queue_signal(indicator_confirmations=confirmations)
+        messages = [SignalNotifier(_Handler()).format_strategy_signal(signal)]
+        messages.extend(format_option_breakout_alert(signal["metadata"], compact=compact)
+                        for compact in (True, False))
+        for message in messages:
+            for internal in ("PREMIUM CONFIRMATIONS", "EMA9", "MACD", "RSI14", "Evidence:"):
+                self.assertNotIn(internal, message)
+            self.assertIn("Breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
+            self.assertIn("Band: ITM+1", message)
+            self.assertLess(len(message), 4096)
 
-    def test_service_alert_escapes_indicator_text(self):
-        confirmations = {"passed": {}, "values": {}, "ema9_position": "<b>x</b>",
-                         "continuation": {"mode": "<i>m</i>"}}
+    def test_service_alert_escapes_contract_text_and_uses_observed_breakout_price(self):
+        confirmations = {"passed": {}, "values": {}, "ema9_position": "<b>x</b>"}
         message = SignalNotifier(_Handler()).format_strategy_signal(
-            _queue_signal(indicator_confirmations=confirmations)
+            _queue_signal(indicator_confirmations=confirmations, option_symbol="<i>contract</i>",
+                          breakout_price=170.80, premium_ltp=999)
         )
-        self.assertIn("&lt;b&gt;x&lt;/b&gt;", message)
-        self.assertIn("&lt;i&gt;m&lt;/i&gt;", message)
-        self.assertIn("✗ EMA9: trigger N/A", message)
+        self.assertNotIn("x</b>", message)
+        self.assertIn("&lt;i&gt;contract&lt;/i&gt;", message)
+        self.assertIn("@ 170.80", message)
+        self.assertNotIn("@ 999", message)
 
     def test_screener_payload_feeds_formatter(self):
         from types import SimpleNamespace

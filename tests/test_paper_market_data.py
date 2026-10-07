@@ -42,11 +42,13 @@ def test_depth_best_prices_and_cache_timestamp_are_preserved(feed):
         "sell": [{"price": 102}, {"price": 101}],
     }})
     first = manager.fetch_quotes({"NSE_FNO": [42, 42]})[("NSE_FNO", 42)]
-    assert first == {"price": 100, "bid": 99, "ask": 101, "timestamp": clock[0], "model": "depth"}
+    assert first == {"price": 100, "bid": 99, "ask": 101, "timestamp": clock[0],
+                     "trade_timestamp": clock[0], "model": "depth"}
     first["bid"] = 1
     clock[0] += .5
     cached = manager.fetch_quotes({"NSE_FNO": [42]})[("NSE_FNO", 42)]
     assert cached["timestamp"] == clock[0] - .5
+    assert cached["trade_timestamp"] == clock[0] - .5
     assert cached["bid"] == 99
     assert post.call_count == 1
     assert post.call_args.args[0] == market.DHAN_QUOTE_URL
@@ -60,6 +62,18 @@ def test_quote_timestamp_uses_request_start_not_receipt(feed):
         return response({"last_price": 100})
     post.side_effect = slow_request
     assert manager.fetch_quotes({"NSE_FNO": [42]})[("NSE_FNO", 42)]["timestamp"] == started
+
+
+def test_trade_during_request_preserves_trade_time_and_conservative_book_time(feed):
+    manager, post, clock = feed
+    started = clock[0]
+    def slow_request(*args, **kwargs):
+        clock[0] += 2
+        return response({"last_price": 100, "last_trade_time": clock[0]})
+    post.side_effect = slow_request
+    quote = manager.fetch_quotes({"NSE_FNO": [42]})[("NSE_FNO", 42)]
+    assert quote["timestamp"] == started
+    assert quote["trade_timestamp"] == clock[0]
 
 
 def test_multiple_managers_and_workers_share_one_quote_request(feed):
