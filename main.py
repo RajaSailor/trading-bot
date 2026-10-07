@@ -299,8 +299,11 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True, *,
                 signal_notifier.notify_service_alert("Risk check rejected signal", reason)
             return None, (reason, 400)
 
-    if not signal_queue_processor.enqueue_signal(signal):
+    queued_retry = scanner_origin and payload.get("metadata", {}).get("_queue_accepted") is True
+    if not queued_retry and not signal_queue_processor.enqueue_signal(signal):
         return None, ("Signal rejected by queue", 409)
+    if scanner_origin:
+        payload.setdefault("metadata", {})["_queue_accepted"] = True
 
     latency_marks = signal.get("metadata", {}).get("latency_marks")
     if isinstance(latency_marks, dict):
@@ -308,9 +311,14 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True, *,
 
     # Screener alert goes out first (latency-sensitive); persistence follows.
     if signal_notifier is not None and signal.get("metadata", {}).get("source") == "scanner":
-        signal_notifier.notify_strategy_signal(signal)
+        sent = signal_notifier.notify_strategy_signal(signal)
+        if scanner_origin:
+            payload["metadata"]["alert_sent"] = bool(sent)
+            payload["metadata"]["sent_at"] = signal.get("metadata", {}).get("sent_at")
+    elif scanner_origin:
+        payload["metadata"]["alert_sent"] = False
 
-    if trading_db is not None:
+    if trading_db is not None and not queued_retry:
         try:
             trading_db.log_signal(signal)
         except Exception as db_error:

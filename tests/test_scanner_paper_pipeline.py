@@ -76,8 +76,9 @@ def pipeline(tmp_path, monkeypatch):
     data.get_instruments.return_value = {"index_options": [instrument]}
     scanner = PremiumScreener(
         data, handler, Mock(),
-        signal_callback=lambda payload: main._queue_signal_from_payload(payload, False)[1] is None,
+        signal_callback=lambda payload: main._queue_signal_from_payload(payload, False, scanner_origin=True)[1] is None,
         clock=lambda: datetime.fromtimestamp(clock.now, IST),
+        alert_state_file=str(tmp_path / "alerts.json"),
     )
     contracts = [{
         "security_id": sid, "exchange_segment": "NSE_FNO",
@@ -113,6 +114,8 @@ def scan(p, live=True):
         return refreshed
     # Trigger with an actual fresh quote, then restore the execution quote.
     original = p.data.fetch_quotes.side_effect
+    _live_quotes(p, 110)
+    assert _live_poll(p) == 0
     _live_quotes(p, 113)
     result = _live_poll(p)
     p.data.fetch_quotes.side_effect = original
@@ -142,7 +145,7 @@ def test_actual_ce_pe_scanner_to_main_queue_portfolio_formatter(pipeline, action
         assert signal["metadata"]["display_timeframe"] == "10-MINUTE BREAKOUT"
         assert signal["metadata"]["option_type"] in {"CE", "PE"}
         assert signal["metadata"]["strike_band"] == "ITM+1"
-        assert signal["metadata"]["indicator_confirmations"]["ready"]
+        assert "indicator_confirmations" not in signal["metadata"]
         assert signal["timestamp"] == signal["detected_at"]
         assert datetime.fromisoformat(signal["breakout_timestamp"]).timestamp() == p.clock.now
         assert signal["metadata"]["trigger"] == "live_ltp"
@@ -283,6 +286,8 @@ def test_history_load_is_silent_then_detection_uses_live_observation_clock(pipel
     p.clock.now += 10
     assert p.scanner._refresh_instrument(p.instrument, "10min", start, spot=24450) == 0
     assert p.queue.queue_size() == 0
+    _live_quotes(p, 110)
+    assert _live_poll(p) == 0
     _live_quotes(p, 113)
     assert _live_poll(p) == 2
     assert datetime.fromisoformat(p.queue._queue[0]["detected_at"]).timestamp() == p.clock.now
@@ -355,6 +360,8 @@ def test_narrow_range_first_live_quote_emits_once_without_fill(pipeline):
     assert scan(p, live=False) == 0
     assert len(p.scanner.armed_contracts()) == 2
     assert p.queue.queue_size() == 0
+    _live_quotes(p, 110)
+    assert _live_poll(p) == 0
     _live_quotes(p, 113)
     assert _live_poll(p) == 2
     assert _live_poll(p) == 0
@@ -363,7 +370,7 @@ def test_narrow_range_first_live_quote_emits_once_without_fill(pipeline):
     for signal in queued:
         meta = signal["metadata"]
         assert meta["strike_band"] == "ITM+1" and meta["trigger"] == "live_ltp"
-        assert meta["indicator_confirmations"]["ready"]
+        assert "indicator_confirmations" not in meta
         assert meta["breakout_price"] == 113
     p.clock.now += 1
     assert _live_poll(p) == 0                # reference consumed: no duplicate
@@ -378,6 +385,7 @@ def test_narrow_range_first_live_quote_emits_once_without_fill(pipeline):
     restarted = PremiumScreener(
         p.data, p.handler, Mock(), signal_callback=p.scanner.signal_callback,
         clock=p.scanner.clock,
+        alert_state_file=p.scanner._alert_state.state_file,
     )
     restarted.fetcher = p.scanner.fetcher
     p.clock.now += 1
@@ -403,6 +411,8 @@ def test_stale_quote_stays_blocked_then_first_fresh_quote_alerts(pipeline):
         for segment, ids in request.items() for sid in ids
     }
     assert _live_poll(p) == 0                # stale quote evidence never triggers
+    _live_quotes(p, 110)
+    assert _live_poll(p) == 0
     _live_quotes(p, 113)
     assert _live_poll(p) == 2
     assert {s["metadata"]["breakout_price"] for s in p.queue._queue} == {113}
@@ -413,3 +423,22 @@ def test_historical_startup_breakout_is_not_freshened(pipeline):
     p.clock.now += 120
     assert scan(p, live=False) == 0
     assert p.queue.queue_size() == 0
+
+
+def test_failed_telegram_delivery_retries_evidence_without_requeue(pipeline):
+    p = pipeline
+    p.handler.send_to_channel.return_value = False
+    assert scan(p) == 0
+    assert p.queue.queue_size() == 2
+    assert not p.scanner._last_entries
+    original = [dict(s["metadata"]) for s in p.queue._queue]
+    p.clock.now += 20
+    p.handler.send_to_channel.return_value = True
+    _live_quotes(p, 120)
+    assert _live_poll(p) == 2
+    assert p.queue.queue_size() == 2
+    assert set(p.scanner._last_entries.values()) == {113}
+    for before, queued in zip(original, p.queue._queue):
+        assert queued["metadata"]["breakout_timestamp"] == before["breakout_timestamp"]
+        assert queued["metadata"]["breakout_price"] == 113
+    p.broker.place_trade.assert_not_called()

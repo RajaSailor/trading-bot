@@ -167,7 +167,11 @@ class PremiumStrategyEngine:
             price = float(live_price)
         except (TypeError, ValueError, OverflowError):
             return None
-        if not math.isfinite(price) or price <= 0 or price <= float(reference["high"]):
+        if not math.isfinite(price) or price <= 0:
+            return None
+        previous = reference.get("previous_price")
+        reference["previous_price"] = price
+        if previous is None or previous > float(reference["high"]) or price <= float(reference["high"]):
             return None
         logger.info(
             "🚀 [%s] %s BREAKOUT (live) above RED HIGH %.2f → %.2f",
@@ -176,9 +180,12 @@ class PremiumStrategyEngine:
             reference["high"],
             price,
         )
-        return self.build_signal(
+        signal = self.build_signal(
             symbol, option_type, category, reference, price, timestamp, trigger=TRIGGER_LIVE
         )
+        signal["previous_observed_price"] = previous
+        signal["first_crossing_timestamp"] = timestamp
+        return signal
 
     # ------------------------------------------------- backward compatibility
     def add_ce_candle(self, symbol: str, candle: dict) -> bool:
@@ -210,7 +217,6 @@ class PremiumStrategyEngine:
             "high": float(candle["high"]),
             "low": float(candle["low"]),
             "close": float(candle["close"]),
-            "volume": float(candle.get("volume", 0) or 0),
             "timestamp": candle.get("timestamp", ""),
         }
         for index, existing in enumerate(bucket):

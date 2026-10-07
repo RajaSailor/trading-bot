@@ -85,6 +85,8 @@ class RedCandleReferenceTests(unittest.TestCase):
     def test_historical_high_does_not_consume_live_reference(self):
         reference = self.engine.find_reference([_c(0, 105, 110, 100, 102), _c(1, 102, 111, 101, 110.5)])
         self.assertTrue(reference["armed"])
+        self.assertIsNone(self.engine.evaluate_live_price("GOLD", reference, 200.0, "CE", "commodity_options"))
+        self.assertIsNone(self.engine.evaluate_live_price("GOLD", reference, 110, "CE", "commodity_options"))
         self.assertIsNotNone(self.engine.evaluate_live_price("GOLD", reference, 200.0, "CE", "commodity_options"))
 
     def test_consumed_reference_and_nonfinite_prices_cannot_trigger(self):
