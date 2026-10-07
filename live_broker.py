@@ -6,8 +6,8 @@ Read dictionaries require verified=True and timestamp (epoch seconds).
 Authoritative snapshots must include complete current-account order history,
 including externally submitted BUYs that have already been closed. Filtering
 snapshots to only this engine's orders is unsafe and not an adapter contract.
-Production is deliberately unavailable pending independently verified account
-snapshots, funds/margin adapters and exchange-side protection.
+Production writes require an explicitly enabled Dhan Super Order adapter.
+Legacy ordinary-order adapters remain simulation-only.
 """
 
 import math
@@ -59,19 +59,24 @@ def canonical_expiry(value):
 
 
 class LiveBroker:
-    """Only explicitly opted-in simulation adapters can write in this release."""
+    """Separate explicit simulation and production Super Order boundaries."""
 
-    def __init__(self, adapter, *, allow_simulation=False, clock=time.time,
+    def __init__(self, adapter, *, allow_simulation=False, allow_production=False, clock=time.time,
                  max_age=5):
         self.adapter = adapter
         self.allow_simulation = allow_simulation
+        self.allow_production = allow_production
         self.clock = clock
         self.max_age = max_age
 
     def readiness(self):
         simulation = self.allow_simulation is True and getattr(self.adapter, "simulation", False) is True
-        return {"production_ready": False, "simulation_ready": simulation,
-                "blockers": list(PRODUCTION_BLOCKERS)}
+        from dhan_super_order import DhanSuperOrderAdapter
+        production = self.allow_production is True and isinstance(self.adapter, DhanSuperOrderAdapter)
+        readiness = self.adapter.readiness() if production else {}
+        return {"production_ready": production and readiness.get("production_ready") is True,
+                "simulation_ready": simulation,
+                "blockers": readiness.get("blockers", list(PRODUCTION_BLOCKERS))}
 
     def evidence(self, data):
         if not isinstance(data, dict) or data.get("verified") is not True:
@@ -105,6 +110,9 @@ class LiveBroker:
                 or master["instrument_type"] != "OPTIDX"
                 or master["option_type"] not in ("CE", "PE")):
             raise LiveBlocked("contract outside NIFTY index option whitelist")
+        if self.allow_production and (master.get("underlying_kind") != "INDEX"
+                or supplied.get("underlying_kind", "INDEX") != "INDEX"):
+            raise LiveBlocked("NIFTY INDEX underlying evidence required")
         try:
             expiry = date.fromisoformat(master["expiry"])
         except (ValueError, TypeError) as exc:
@@ -154,6 +162,10 @@ class LiveBroker:
             raise LiveBlocked("missing snapshot sequence")
         if not isinstance(data.get("positions"), dict) or not isinstance(data.get("orders"), dict):
             raise LiveBlocked("invalid snapshot shape")
+        if self.allow_production:
+            if not isinstance(data.get("super_orders"), dict) or not isinstance(data.get("trades"), dict):
+                raise LiveBlocked("Super order/trade reconciliation evidence unavailable")
+            return data
         for quantity in data["positions"].values():
             if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 0:
                 raise LiveBlocked("invalid authoritative position quantity")
@@ -183,6 +195,9 @@ class LiveBroker:
         quantity = positive(order["quantity"])
         if not quantity.is_integer():
             raise LiveBlocked("invalid quantity")
+        if self.allow_production and (not entry or quantity != order["lot_size"]
+                or order.get("product_type") != "MARGIN"):
+            raise LiveBlocked("production requires exactly one lot BUY MARGIN Super Order")
         if entry and (quantity % order["lot_size"] or not 1 <= quantity / order["lot_size"] <= 5):
             raise LiveBlocked("entry requires 1..5 complete lots")
         if order["order_type"] not in ("MARKET", "LIMIT"):
@@ -197,6 +212,29 @@ class LiveBroker:
                 raise LiveBlocked("price off tick")
         else:
             price = premium
+        if self.allow_production:
+            from dhan_super_order import tick_price
+            stop, target = positive(order["initial_stop_loss"]), positive(order["target_price"])
+            high, low = positive(order.get("reference_high")), positive(order.get("reference_low"))
+            detected, breakout_time = positive(order.get("detected_at")), positive(order.get("breakout_timestamp"))
+            reference_time = positive(order.get("reference_timestamp"))
+            if (order.get("_scanner_origin") is not True or order.get("source") != "scanner"
+                    or order.get("strategy") != "premium_screener"
+                    or order.get("trigger") != "live_ltp" or order.get("premium_strategy") is not True
+                    or not 0 <= self.clock() - detected <= 10
+                    or not 0 <= self.clock() - breakout_time <= 10
+                    or not reference_time < breakout_time <= detected
+                    or low > high or positive(order.get("breakout_price")) <= high
+                    or stop != tick_price(low * .95, order["tick_size"])):
+                raise LiveBlocked("fresh reference-derived internal scanner evidence required")
+            # SDK MARKET validation still requires a positive indicative price.
+            if order["order_type"] == "MARKET":
+                price = tick_price(price, order["tick_size"], up=True)
+                order["limit_price"] = price
+            if (not stop < price < target
+                    or tick_price(stop, order["tick_size"]) != stop
+                    or tick_price(target, order["tick_size"]) != target):
+                raise LiveBlocked("invalid tick-rounded Super protection")
         if entry:
             funds = self.read("funds")
             margin = self.read("margin", order)
@@ -205,8 +243,14 @@ class LiveBroker:
             except (TypeError, ValueError, OverflowError) as exc:
                 raise LiveBlocked("unavailable available funds") from exc
             required = positive(margin.get("required"))
-            if not math.isfinite(available) or available < max(required, price * quantity):
+            if (isinstance(funds.get("available"), bool) or not math.isfinite(available)
+                    or available <= 0 or available < max(required, price * quantity)):
                 raise LiveBlocked("insufficient funds")
+            if self.allow_production:
+                order["capital_context"] = {
+                    "available_before": available, "available_asof": funds["timestamp"],
+                    "required_margin": required, "premium_notional": price * quantity,
+                }
         return max(price * quantity, required if entry else 0)
 
     def write(self, order, *, known_correlations=()):
@@ -221,12 +265,25 @@ class LiveBroker:
             raise LiveBlocked("adapter write outcome cannot prove non-submission") from exc
 
     def _validate_write(self, order, known_correlations):
-        if not self.readiness()["simulation_ready"]:
+        ready = self.readiness()
+        if not (ready["simulation_ready"] or ready["production_ready"]):
             raise LiveBlocked("production execution BLOCKED")
         if not 1 <= len(order["correlation_id"]) <= 30:
             raise LiveBlocked("invalid correlation id")
         self.preflight(order)
         snapshot = self.snapshot()
+        if self.allow_production:
+            if any(qty != 0 for qty in snapshot["positions"].values()):
+                raise LiveBlocked("account exposure prevents entry")
+            if any(o.get("correlation_id") not in known_correlations
+                   and o["order_id"] not in known_correlations
+                   and (o["filled_quantity"] or o["status"] in ("UNKNOWN", "PENDING"))
+                   for o in snapshot["orders"].values()):
+                raise LiveBlocked("external account order activity prevents entry")
+            if (not 0 <= self.clock() - order["detected_at"] <= 10
+                    or not 0 <= self.clock() - order["breakout_timestamp"] <= 10):
+                raise LiveBlocked("scanner evidence expired during write preflight")
+            return
         if order["side"] == "BUY":
             if self.external_buy_activity(snapshot, known_correlations):
                 raise LiveBlocked("unknown external BUY activity prevents entry")

@@ -1,10 +1,10 @@
 # DhanHQ Trading Bot - Comprehensive README
 
-**Paper trading and option alerts; real-money activation BLOCKED** | Telegram + DhanHQ Integration
+**Option alerts, paper trading and guarded NIFTY-only auto execution** | Telegram + DhanHQ Integration
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-brightgreen.svg)](https://www.python.org/downloads/)
-[![Status: Live Blocked](https://img.shields.io/badge/Status-Live%20Blocked-orange.svg)]()
+[![Status: Default Off](https://img.shields.io/badge/Status-Real%20Trading%20Default%20Off-orange.svg)]()
 
 ---
 
@@ -16,17 +16,33 @@ integration modules are not the paper execution path. Compact strategy alerts
 remain on `service_alerts`; approvals, simulated fills, protection, and account
 reports go to `trade_control`.
 
-### Separate NIFTY route — implementation present, production BLOCKED
+### Automatic NIFTY-only Super Orders — default OFF
 
-`NIFTY_LIVE_ENABLED=false` is the default. When deliberately configured, NIFTY
-signals are routed exclusively to the isolated approval architecture, not to
-duplicate paper approvals. All other scanner categories retain paper behavior.
-The isolated engine has mocked execution tests, a separate SQLite ledger,
-versioned authenticated controls, reservations, and conservative reconciliation.
-**This release cannot send real orders:** the production adapter is fail-closed.
-It is not a working real-money deployment, even with all three flags set.
-See [the activation blockers and official-source evidence](docs/DEPLOYMENT_GUIDE.md).
-Human review and completed production safeguards are required before activation.
+`NIFTY_LIVE_ENABLED=false`, `PRACTICE_MODE=true` and `AUTO_TRADING_ENABLED=false`
+are the safety defaults. The dedicated real route requires all three guards to
+permit execution; changing the paper runtime's flags alone is insufficient.
+Only selected NIFTY INDEX ITM+1 CE/PE long entries are eligible, exactly one
+security-master lot. Other indices, stock options and commodities remain
+signal-only in auto-live mode.
+
+The entry uses a Dhan Super Order with F&O carry-forward product `MARGIN`, a LIMIT
+entry and broker-managed stop/target. Unknown submissions never cause blind
+resends. MARKET fallback requires confirmed zero-fill rejection and reconciliation;
+MARKET may be broker-protected or converted and does not guarantee a fill.
+Fresh funds/margin checks precede every entry; ₹25,000 is **not assumed sufficient**.
+At most two first-filled logical entries per IST day and one open/reserved position
+are permitted. SL is tick-rounded `0.95 × red candle low`; after actual fill E,
+target is `E + 2 × (E − SL)`. First +5 points moves SL to entry, then each additional
++5 favorable points raises it another 5, monotonically.
+
+IITS Scalping Options (`service_alerts`) keeps compact signals across categories.
+In auto-live mode Trade Control gets only actual NIFTY entry and completed-exit
+messages with funds context and realized P&L, not approvals or paper reports.
+Diagnostics stay in logs. See the [deployment runbook](docs/DEPLOYMENT_GUIDE.md)
+for broker capability gates and operational prerequisites.
+Carry-forward Super Order account eligibility/overnight recovery is a deployment
+**BLOCKER** until verified; SDK enum availability alone does not prove support.
+**Real options trading can lose capital; this strategy has no profit guarantee.**
 
 ### Persistence and controls
 
@@ -422,12 +438,13 @@ TELEGRAM_TEST_SECRET=your_private_telegram_test_secret
 # TRADING PARAMETERS
 # ============================================================================
 PRACTICE_MODE=true                # Keep true for safe practice trading
-AUTO_TRADING_ENABLED=false        # Conscious guard; does not enable production execution
-NIFTY_LIVE_ENABLED=false          # Separate opt-in route; production currently BLOCKED
+AUTO_TRADING_ENABLED=false        # Requires both dedicated live and practice-off guards
+NIFTY_LIVE_ENABLED=false          # Dedicated NIFTY-only Super Order route
+DHAN_SUPER_CARRY_FORWARD_CONFIRMED=false # Block until account/overnight capability verified
 ENABLE_MARKET_SCANNER=false       # Enable only after market-data config is verified
 ENABLE_DHAN_TOKEN_RENEWAL=true    # Runtime-only renewal; secrets still live in Render
 MAX_LOSS_PER_TRADE=500            # Maximum loss per trade (₹)
-MAX_POSITION_SIZE=5               # Maximum position size (lots)
+MAX_POSITION_SIZE=5               # Legacy/paper setting; auto-live always uses one metadata lot
 MIN_RR_RATIO=1.0                  # Minimum risk-reward ratio
 
 # ============================================================================
@@ -1222,4 +1239,4 @@ This project is inspired by and integrates with:
 
 **Made with ❤️ by RajaSailor**
 
-*Status: paper runtime available; real-money activation BLOCKED*
+*Status: paper runtime available; NIFTY auto-live default OFF and capability-gated*

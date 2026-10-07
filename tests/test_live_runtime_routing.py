@@ -77,7 +77,9 @@ def test_disabled_factory_does_not_create_live_database(tmp_path):
 
 
 @pytest.mark.parametrize("practice,auto", [(True, False), (True, True), (False, False), (False, True)])
-def test_all_flag_combinations_remain_production_blocked(tmp_path, practice, auto):
+def test_flag_combinations_without_credentials_remain_production_blocked(tmp_path, monkeypatch, practice, auto):
+    for name in ("DHAN_CLIENT_ID", "API_KEY", "ACCESS_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
     route = build_live_route(
         config(tmp_path / "live.db", practice=practice, auto=auto),
         paper_db_path=tmp_path / "paper.db",
@@ -149,3 +151,21 @@ def test_authorization_setup_does_not_claim_webhook_registration(tmp_path):
     )
     assert route.status()["telegram_authorization_configured"] is True
     assert route.status()["inbound_registration_verified"] is False
+
+
+def test_verified_margin_sdk_and_credentials_construct_real_auto_adapter(tmp_path, monkeypatch):
+    from tests.test_dhan_super_order import sdk
+    from live_execution import AutoSuperExecution
+    from dhan_super_order import DhanSuperOrderAdapter
+    client = sdk()
+    monkeypatch.setenv("DHAN_CLIENT_ID", "sdk-test-client")
+    monkeypatch.setenv("ACCESS_TOKEN", "sdk-test-placeholder")
+    monkeypatch.setattr("dhanhq.DhanContext", Mock())
+    monkeypatch.setattr("dhanhq.dhanhq", Mock(return_value=client))
+    route = build_live_route(config(tmp_path / "live.db", practice=False, auto=True),
+                             tmp_path / "paper.db")
+    assert isinstance(route.execution, AutoSuperExecution)
+    assert isinstance(route.execution.broker.adapter, DhanSuperOrderAdapter)
+    assert route.status()["production_ready"] is True
+    assert route.status()["mode"] == "auto_super"
+    client.place_super_order.assert_not_called()

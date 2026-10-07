@@ -7,7 +7,7 @@ import unittest
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class _DummyDhanIntegration:
@@ -193,6 +193,67 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                 json={"symbol": "NIFTY", "action": "buy", "price": "bad-number"},
                             )
                             self.assertEqual(bad_webhook_response.status_code, 400)
+
+    def test_auto_live_requires_separate_explicit_bot_channels(self):
+        main_module = _load_main()
+        config = {
+            "nifty_live": {"enabled": True, "practice": False, "auto": True},
+            "channels": {"trade_control": "-1001", "service_alerts": "-1002"},
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError):
+                main_module._validate_auto_live_channels(config)
+        with patch.dict(os.environ, {
+            "BOT_TRADE_CONTROL_TOKEN": "same", "BOT_SERVICE_ALERTS_TOKEN": "same",
+        }):
+            with self.assertRaises(RuntimeError):
+                main_module._validate_auto_live_channels(config)
+        with patch.dict(os.environ, {
+            "BOT_TRADE_CONTROL_TOKEN": "trade", "BOT_SERVICE_ALERTS_TOKEN": "signal",
+        }):
+            main_module._validate_auto_live_channels(config)
+            config["channels"]["service_alerts"] = "-1001"
+            with self.assertRaises(RuntimeError):
+                main_module._validate_auto_live_channels(config)
+            config["channels"]["service_alerts"] = " -01001"
+            with self.assertRaises(RuntimeError):
+                main_module._validate_auto_live_channels(config)
+
+    def test_auto_live_disables_legacy_bridge_paper_worker_and_controls(self):
+        main_module = _load_main()
+        with _workspace() as tmpdir:
+            env = {
+                "NIFTY_LIVE_ENABLED": "true", "PRACTICE_MODE": "false",
+                "AUTO_TRADING_ENABLED": "true", "ENABLE_MARKET_SCANNER": "false",
+                "ENABLE_DHAN_TOKEN_RENEWAL": "false",
+                "BOT_TRADE_CONTROL_TOKEN": "trade", "BOT_SERVICE_ALERTS_TOKEN": "signal",
+                "CHANNEL_TRADE_CONTROL_ID": "-1001", "CHANNEL_SERVICE_ALERTS_ID": "-1002",
+                "TRADING_DB_PATH": os.path.join(tmpdir, "paper.db"),
+                "LIVE_DB_PATH": os.path.join(tmpdir, "live.db"),
+                "STATE_FILE": os.path.join(tmpdir, "state.json"),
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with patch.object(main_module, "get_dhan_integration", return_value=_DummyDhanIntegration()), \
+                        patch.object(main_module, "DhanTelegramBridge") as bridge, \
+                        patch.object(main_module, "DhanPostbackHandler", _DummyPostbackHandler), \
+                        patch.object(main_module.PaperPortfolioWorker, "start") as paper_start, \
+                        patch.object(main_module.QueueConsumerWorker, "start", return_value=False):
+                    self.assertTrue(main_module.initialize_app())
+                    bridge.assert_not_called()
+                    paper_start.assert_not_called()
+                    self.assertIsNone(main_module.paper_portfolio.notify)
+                    self.assertEqual([], main_module.alert_manager.channels)
+                    self.assertEqual(
+                        403, main_module.app.test_client().post("/telegram/paper", json={}).status_code,
+                    )
+
+    def test_token_renewal_reaches_live_route_without_legacy_integration(self):
+        main_module = _load_main()
+        route = Mock()
+        with patch.object(main_module, "live_route", route), \
+                patch.object(main_module, "dhan_integration", None):
+            main_module._apply_refreshed_token("renewed")
+            route.refresh_token.assert_called_once_with("renewed")
 
     def test_alert_manager_routes_to_trade_control_not_service_alerts(self):
         main_module = _load_main()

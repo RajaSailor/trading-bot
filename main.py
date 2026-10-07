@@ -217,8 +217,38 @@ def _load_runtime_config() -> dict:
     }
 
 
+def _auto_live_nifty(config: dict) -> bool:
+    live = config.get("nifty_live", {})
+    return (live.get("enabled") is True and live.get("practice") is False
+            and live.get("auto") is True)
+
+
+def _validate_auto_live_channels(config: dict) -> None:
+    if not _auto_live_nifty(config):
+        return
+    trade_token = os.getenv("BOT_TRADE_CONTROL_TOKEN")
+    signal_token = os.getenv("BOT_SERVICE_ALERTS_TOKEN")
+    channels = config.get("channels", {})
+    trade_chat = channels.get("trade_control")
+    signal_chat = channels.get("service_alerts")
+    if not all((trade_token, signal_token, trade_chat, signal_chat)):
+        raise RuntimeError("Auto-live requires explicit execution and signal bot/channel credentials")
+    try:
+        trade_chat, signal_chat = int(trade_chat), int(signal_chat)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Auto-live requires numeric Telegram channel IDs") from exc
+    if not trade_chat or not signal_chat:
+        raise RuntimeError("Auto-live requires nonzero Telegram channel IDs")
+    if trade_token.strip() == signal_token.strip() or trade_chat == signal_chat:
+        raise RuntimeError("Auto-live execution and signal bots/channels must be separate")
+
+
 def _apply_refreshed_token(token: str) -> None:
-    if not token or dhan_integration is None:
+    if not token:
+        return
+    if live_route is not None:
+        live_route.refresh_token(token)
+    if dhan_integration is None:
         return
     api_client = getattr(dhan_integration, "api_client", None)
     if api_client is None:
@@ -409,6 +439,7 @@ def initialize_app(force: bool = False):
     
     try:
         runtime_config = _load_runtime_config()
+        _validate_auto_live_channels(runtime_config)
 
         # 1. Initialize DhanHQ Integration
         logger.info("1️⃣ Initializing DhanHQ Integration...")
@@ -422,9 +453,14 @@ def initialize_app(force: bool = False):
         
         # 2. Initialize Telegram Bridge
         logger.info("2️⃣ Initializing Telegram Bridge...")
-        dhan_bridge = DhanTelegramBridge(dhan_integration)
-        phase_components["telegram_bridge"] = True
-        logger.info("   ✅ Telegram Bridge initialized")
+        if _auto_live_nifty(runtime_config):
+            dhan_bridge = None
+            phase_components["telegram_bridge"] = False
+            logger.info("   Legacy Telegram bridge disabled in auto-live mode")
+        else:
+            dhan_bridge = DhanTelegramBridge(dhan_integration)
+            phase_components["telegram_bridge"] = True
+            logger.info("   ✅ Telegram Bridge initialized")
         
         # 3. Initialize Postback Handler
         logger.info("3️⃣ Initializing Postback Handler...")
@@ -518,7 +554,10 @@ def initialize_app(force: bool = False):
                 SignalNotifier(
                     telegram_handler,
                     metrics_collector,
-                    practice_mode=bool(runtime_config.get("practice_mode", True)),
+                    practice_mode=False if _auto_live_nifty(runtime_config) else bool(
+                        runtime_config.get("practice_mode", True)
+                    ),
+                    execution_only=_auto_live_nifty(runtime_config),
                 )
                 if SignalNotifier is not None
                 else None
@@ -536,12 +575,16 @@ def initialize_app(force: bool = False):
             approval_expiry_seconds=max(1, float(os.getenv("PAPER_APPROVAL_EXPIRY_SECONDS", "60"))),
         )
         paper_telegram_control = PaperTelegramControl(paper_portfolio, telegram_handler)
-        paper_portfolio.notify = paper_telegram_control.send_event
+        auto_live = _auto_live_nifty(runtime_config)
+        paper_portfolio.notify = None if auto_live else paper_telegram_control.send_event
         paper_portfolio.auto_deliver = False
         paper_portfolio_worker = PaperPortfolioWorker(paper_portfolio)
-        paper_portfolio_worker.start()
+        if not auto_live:
+            paper_portfolio_worker.start()
         phase_components["paper_portfolio"] = True
         live_route = build_live_route(runtime_config["nifty_live"], paper_db_path=paper_db_path)
+        if live_route is not None and signal_notifier is not None:
+            live_route.notifier = lambda _event_id, event: signal_notifier.notify_live_execution(event)
         phase_components["nifty_live"] = live_route is not None
 
         channels = []
@@ -550,6 +593,7 @@ def initialize_app(force: bool = False):
             and TelegramAlertChannel is not None
             and os.getenv("BOT_TRADE_CONTROL_TOKEN")
             and runtime_config["channels"].get("trade_control")
+            and not auto_live
         ):
             channels.append(
                 TelegramAlertChannel(
@@ -676,6 +720,8 @@ def live_telegram_webhook():
 
 @app.route('/telegram/paper', methods=['POST'])
 def paper_telegram_webhook():
+    if _auto_live_nifty(runtime_config):
+        return jsonify({"ok": False, "error": "paper_controls_disabled_in_auto_live"}), 403
     if paper_telegram_control is None:
         return jsonify({"ok": False, "error": "unavailable"}), 503
     if request.content_length is not None and request.content_length > 65536:
