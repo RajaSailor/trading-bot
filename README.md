@@ -25,7 +25,7 @@ Only selected NIFTY INDEX ITM+1 CE/PE long entries are eligible, exactly one
 security-master lot. Other indices, stock options and commodities remain
 signal-only in auto-live mode.
 
-The entry uses a Dhan Super Order with carry-forward product mapping, a LIMIT
+The entry uses a Dhan Super Order with F&O carry-forward product `MARGIN`, a LIMIT
 entry and broker-managed stop/target. Unknown submissions never cause blind
 resends. MARKET fallback requires confirmed zero-fill rejection and reconciliation;
 MARKET may be broker-protected or converted and does not guarantee a fill.
@@ -40,6 +40,8 @@ In auto-live mode Trade Control gets only actual NIFTY entry and completed-exit
 messages with funds context and realized P&L, not approvals or paper reports.
 Diagnostics stay in logs. See the [deployment runbook](docs/DEPLOYMENT_GUIDE.md)
 for broker capability gates and operational prerequisites.
+Carry-forward Super Order account eligibility/overnight recovery is a deployment
+**BLOCKER** until verified; SDK enum availability alone does not prove support.
 **Real options trading can lose capital; this strategy has no profit guarantee.**
 
 ### Persistence and controls
@@ -436,12 +438,13 @@ TELEGRAM_TEST_SECRET=your_private_telegram_test_secret
 # TRADING PARAMETERS
 # ============================================================================
 PRACTICE_MODE=true                # Keep true for safe practice trading
-AUTO_TRADING_ENABLED=false        # Conscious guard; does not enable production execution
-NIFTY_LIVE_ENABLED=false          # Separate opt-in route; production currently BLOCKED
+AUTO_TRADING_ENABLED=false        # Requires both dedicated live and practice-off guards
+NIFTY_LIVE_ENABLED=false          # Dedicated NIFTY-only Super Order route
+DHAN_SUPER_CARRY_FORWARD_CONFIRMED=false # Block until account/overnight capability verified
 ENABLE_MARKET_SCANNER=false       # Enable only after market-data config is verified
 ENABLE_DHAN_TOKEN_RENEWAL=true    # Runtime-only renewal; secrets still live in Render
 MAX_LOSS_PER_TRADE=500            # Maximum loss per trade (₹)
-MAX_POSITION_SIZE=5               # Maximum position size (lots)
+MAX_POSITION_SIZE=5               # Legacy/paper setting; auto-live always uses one metadata lot
 MIN_RR_RATIO=1.0                  # Minimum risk-reward ratio
 
 # ============================================================================
@@ -1236,4 +1239,4 @@ This project is inspired by and integrates with:
 
 **Made with ❤️ by RajaSailor**
 
-*Status: paper runtime available; real-money activation BLOCKED*
+*Status: paper runtime available; NIFTY auto-live default OFF and capability-gated*

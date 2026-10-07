@@ -82,3 +82,22 @@ def test_reconciliation_runs_without_a_new_signal():
     route.tick.side_effect = worker._stop_event.set
     worker.run_forever()
     route.tick.assert_called_once()
+
+
+def test_durable_super_order_outbox_schema_keeps_original_funds_requirement():
+    sender, handler = notifier()
+    item = {
+        "underlying": "NIFTY", "security_id": "123",
+        "average_price": 100, "filled_quantity": 75, "reserved_cash": 0,
+        "first_fill_timestamp": 1791347400,
+        "capital_context": {
+            "available_before": 25000, "required_margin": 7000, "premium_notional": 7500,
+        },
+        "exit_price": 110, "gross_pnl": 750, "exit_timestamp": 1791348000,
+    }
+    assert sender.notify_live_execution({"kind": "entry_fill", "proposal": item})
+    assert sender.notify_live_execution({"kind": "exit_complete", "proposal": item})
+    entry, exit_ = [call.args[1] for call in handler.send_to_channel.call_args_list]
+    assert "Required amount: ₹7500.00" in entry
+    assert "IST" in entry and "IST" in exit_
+    assert "₹750.00" in exit_

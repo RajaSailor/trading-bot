@@ -25,6 +25,7 @@ from telegram_handler import (
     SCREENER_CATEGORIES,
     SCREENER_CATEGORY_ALIASES,
     TelegramHandler,
+    format_ist_timestamp,
     format_option_breakout_alert,
 )
 from timezone_utils import ensure_timezone, now_local_iso
@@ -295,24 +296,34 @@ class SignalNotifier:
         return self._deliver(channel, message)
 
     def notify_live_execution(self, event: dict) -> bool:
-        kind = event.get("kind")
+        kind = {"entry_fill": "entry_executed", "exit_complete": "exit_executed"}.get(
+            event.get("kind"), event.get("kind")
+        )
         item = event.get("proposal") or {}
         if kind not in {"entry_executed", "exit_executed"} or item.get("underlying") != "NIFTY":
             return False
         entry = kind == "entry_executed"
-        price = item.get("average_price") if entry else item.get("exit_average_price")
+        price = item.get("average_price") if entry else item.get("exit_average_price", item.get("exit_price"))
+        context = item.get("capital_context") or {}
+        moment = (item.get("entry_time", item.get("first_fill_timestamp")) if entry
+                  else item.get("exit_time", item.get("exit_timestamp")))
         lines = [
             "ENTRY EXECUTED | NIFTY" if entry else "EXIT EXECUTED | NIFTY",
             f"Contract: {html.escape(str(item.get('option_symbol') or item.get('security_id')))}",
             f"Side: {'BUY' if entry else 'SELL'} | Fill: ₹{float(price):.2f}",
             f"Lots: 1 | Units: {item.get('filled_quantity')}",
-            f"Time: {html.escape(str(item.get('entry_time') if entry else item.get('exit_time')))}",
+            f"Time: {html.escape(format_ist_timestamp(moment, with_seconds=True))}",
         ]
         if entry:
-            lines.append(f"Available funds before entry: ₹{float(item['available_funds']):.2f}")
-            lines.append(f"Required amount: ₹{float(item['reserved_cash']):.2f}")
+            available = item.get("available_funds", context.get("available_before"))
+            required = (max(context["required_margin"], context["premium_notional"])
+                        if "required_margin" in context and "premium_notional" in context
+                        else item.get("reserved_cash"))
+            lines.append(f"Available funds before entry: ₹{float(available):.2f}")
+            lines.append(f"Required amount: ₹{float(required):.2f}")
         else:
-            lines.append(f"Realized P&L (before charges): ₹{float(item['realized_pnl']):.2f}")
+            pnl = item.get("realized_pnl", item.get("gross_pnl"))
+            lines.append(f"Realized P&L (before charges): ₹{float(pnl):.2f}")
         return self._deliver(TRADE_CONTROL_CHANNEL, "\n".join(lines))
 
     def _deliver(self, channel: str, message: str) -> bool:
@@ -394,7 +405,9 @@ class QueueConsumerWorker:
         while not self._stop_event.is_set():
             if self.live_route is not None:
                 try:
-                    self.live_route.tick()
+                    result = self.live_route.tick()
+                    if isinstance(result, dict) and result.get("status") == "blocked":
+                        logger.warning("Live reconciliation blocked: %s", result.get("reason", "live guard"))
                 except Exception as exc:
                     logger.error("Live reconciliation blocked: %s", exc.__class__.__name__)
             processed = self.process_one()
@@ -440,7 +453,10 @@ class QueueConsumerWorker:
 
     def _execute_signal(self, signal: dict):
         if self.live_route is not None and self.live_route.targets(signal):
-            return self.live_route.propose(signal)
+            result = self.live_route.propose(signal)
+            if isinstance(result, dict) and result.get("status") in {"blocked", "rejected"}:
+                logger.warning("NIFTY entry skipped: %s", result.get("reason", "live guard"))
+            return result
         live_config = self.runtime_config.get("nifty_live", {})
         if (live_config.get("enabled") is True and live_config.get("practice") is False
                 and live_config.get("auto") is True):

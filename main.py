@@ -233,12 +233,22 @@ def _validate_auto_live_channels(config: dict) -> None:
     signal_chat = channels.get("service_alerts")
     if not all((trade_token, signal_token, trade_chat, signal_chat)):
         raise RuntimeError("Auto-live requires explicit execution and signal bot/channel credentials")
-    if trade_token == signal_token or trade_chat == signal_chat:
+    try:
+        trade_chat, signal_chat = int(trade_chat), int(signal_chat)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Auto-live requires numeric Telegram channel IDs") from exc
+    if not trade_chat or not signal_chat:
+        raise RuntimeError("Auto-live requires nonzero Telegram channel IDs")
+    if trade_token.strip() == signal_token.strip() or trade_chat == signal_chat:
         raise RuntimeError("Auto-live execution and signal bots/channels must be separate")
 
 
 def _apply_refreshed_token(token: str) -> None:
-    if not token or dhan_integration is None:
+    if not token:
+        return
+    if live_route is not None:
+        live_route.refresh_token(token)
+    if dhan_integration is None:
         return
     api_client = getattr(dhan_integration, "api_client", None)
     if api_client is None:
@@ -443,9 +453,14 @@ def initialize_app(force: bool = False):
         
         # 2. Initialize Telegram Bridge
         logger.info("2️⃣ Initializing Telegram Bridge...")
-        dhan_bridge = DhanTelegramBridge(dhan_integration)
-        phase_components["telegram_bridge"] = True
-        logger.info("   ✅ Telegram Bridge initialized")
+        if _auto_live_nifty(runtime_config):
+            dhan_bridge = None
+            phase_components["telegram_bridge"] = False
+            logger.info("   Legacy Telegram bridge disabled in auto-live mode")
+        else:
+            dhan_bridge = DhanTelegramBridge(dhan_integration)
+            phase_components["telegram_bridge"] = True
+            logger.info("   ✅ Telegram Bridge initialized")
         
         # 3. Initialize Postback Handler
         logger.info("3️⃣ Initializing Postback Handler...")
@@ -569,7 +584,7 @@ def initialize_app(force: bool = False):
         phase_components["paper_portfolio"] = True
         live_route = build_live_route(runtime_config["nifty_live"], paper_db_path=paper_db_path)
         if live_route is not None and signal_notifier is not None:
-            live_route.notify = signal_notifier.notify_live_execution
+            live_route.notifier = lambda _event_id, event: signal_notifier.notify_live_execution(event)
         phase_components["nifty_live"] = live_route is not None
 
         channels = []

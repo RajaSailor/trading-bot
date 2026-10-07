@@ -1,7 +1,10 @@
 """DhanHQ 2.2 Super Orders, with strict read-side schema reconciliation.
 
-CNC is the SDK's carry-forward enum (not a made-up DELIVERY enum). The SDK
-supports Super entry/target/SL placement and individual protective-leg modify.
+CNC is a real SDK enum (not a made-up DELIVERY enum), but the published Dhan
+annexure describes CNC as equity delivery and MARGIN as F&O carry-forward.
+The requested CNC OPTIDX path therefore remains explicitly blocked pending
+authoritative broker clarification; never silently substitute MARGIN.
+The SDK supports Super entry/target/SL placement and protective-leg modify.
 No HTTP failure proves a placement rejection: only the reconciled order book
 can authorize the single MARKET fallback.
 
@@ -21,7 +24,10 @@ from zoneinfo import ZoneInfo
 from live_broker import LiveBlocked, positive
 
 IST = ZoneInfo("Asia/Kolkata")
-TERMINAL = {"FILLED", "CANCELLED", "REJECTED", "CLOSED"}
+CNC_OPTIONS_BLOCKER = (
+    "CNC OPTIDX carry-forward eligibility unverified: Dhan annexure specifies "
+    "CNC for equity and MARGIN for F&O; authoritative broker clarification required"
+)
 STATUS = {"TRANSIT": "UNKNOWN", "PENDING": "PENDING",
           "PART_TRADED": "PENDING", "TRADED": "FILLED",
           "CANCELLED": "CANCELLED", "REJECTED": "REJECTED",
@@ -83,6 +89,10 @@ class DhanSuperOrderAdapter:
                 self.blockers.append("verified CNC product enum unavailable")
             if any(not callable(getattr(self.client, name, None)) for name in self.REQUIRED):
                 self.blockers.append("required Super Order/read SDK capabilities unavailable")
+        self.read_blockers = list(self.blockers)
+        # TODO: Remove only after authoritative CNC/NSE_FNO/OPTIDX eligibility
+        # is verified. An SDK enum or indicative margin is not product approval.
+        self.blockers.append(CNC_OPTIONS_BLOCKER)
 
     def readiness(self):
         return {"production_ready": not self.blockers, "blockers": list(self.blockers)}
@@ -97,8 +107,8 @@ class DhanSuperOrderAdapter:
         return data
 
     def _read(self, method, shape, *args, **kwargs):
-        if self.blockers:
-            raise LiveBlocked("; ".join(self.blockers))
+        if self.read_blockers:
+            raise LiveBlocked("; ".join(self.read_blockers))
         start = self.clock()
         data = self._result(getattr(self.client, method)(*args, **kwargs), shape)
         if not 0 <= self.clock() - start <= 5:
@@ -134,6 +144,7 @@ class DhanSuperOrderAdapter:
                     "security_id": str(c.security_id), "underlying": "NIFTY",
                     "underlying_kind": "INDEX", "exchange_segment": c.exchange_segment,
                     "instrument_type": c.instrument_type, "option_type": c.option_type,
+                    "trading_symbol": c.trading_symbol,
                     "expiry": c.expiry.isoformat(), "strike": c.strike,
                     "lot_size": units(c.lot_size), "tick_size": positive(c.tick_size),
                 })
@@ -179,7 +190,14 @@ class DhanSuperOrderAdapter:
     def funds(self):
         data = self._read("get_fund_limits", dict)
         # The misspelling is the documented Dhan wire field.
-        return self._evidence(available=positive(data.get("availabelBalance")))
+        raw = data.get("availabelBalance")
+        try:
+            available = float(raw)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise LiveBlocked("available Dhan funds unavailable") from exc
+        if isinstance(raw, bool) or not math.isfinite(available) or available < 0:
+            raise LiveBlocked("invalid available Dhan funds")
+        return self._evidence(available=available)
 
     def margin(self, order):
         data = self._read(
@@ -278,10 +296,16 @@ class DhanSuperOrderAdapter:
                 if child is not None and (child["side"] != "SELL"
                         or child["security_id"] != record["security_id"]
                         or child["product_type"] != record["product_type"]
-                        or child["exchange_segment"] != record["exchange_segment"]):
+                        or child["exchange_segment"] != record["exchange_segment"]
+                        or child["quantity"] > record["filled_quantity"]):
                     raise LiveBlocked("Super child identity mismatch")
+                if record["legs"][name]["triggered_quantity"] > record["filled_quantity"]:
+                    raise LiveBlocked("Super protective quantity exceeds actual entry fill")
                 if record["legs"][name]["triggered_quantity"] and child is None:
                     raise LiveBlocked("triggered Super child order linkage ambiguous")
+            triggered = [l for l in record["legs"].values() if l["triggered_quantity"]]
+            if triggered and len({l["order_id"] for l in record["legs"].values()}) != len(record["legs"]):
+                raise LiveBlocked("triggered Super protective order IDs ambiguous")
             if record["status"] not in ("REJECTED", "CANCELLED"):
                 if set(record["legs"]) != {"TARGET_LEG", "STOP_LOSS_LEG"}:
                     raise LiveBlocked("Super protection evidence incomplete")
@@ -316,6 +340,8 @@ class DhanSuperOrderAdapter:
         return self._evidence(authoritative=True, sequence=time.time_ns(), **second)
 
     def place(self, order):
+        if self.blockers:
+            raise LiveBlocked("; ".join(self.blockers))
         if (order.get("side") != "BUY" or order.get("product_type") != "CNC"
                 or order.get("quantity") != order.get("lot_size")
                 or order.get("underlying") != "NIFTY"
@@ -334,6 +360,8 @@ class DhanSuperOrderAdapter:
         return {"order_id": str(data["orderId"])}
 
     def modify_protection(self, order_id, leg_name, price):
+        if self.blockers:
+            raise LiveBlocked("; ".join(self.blockers))
         if leg_name not in ("TARGET_LEG", "STOP_LOSS_LEG"):
             raise LiveBlocked("only broker-managed protective legs may be modified")
         kwargs = {"targetPrice": price} if leg_name == "TARGET_LEG" else {

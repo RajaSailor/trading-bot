@@ -215,6 +215,18 @@ class LiveBroker:
         if self.allow_production:
             from dhan_super_order import tick_price
             stop, target = positive(order["initial_stop_loss"]), positive(order["target_price"])
+            high, low = positive(order.get("reference_high")), positive(order.get("reference_low"))
+            detected, breakout_time = positive(order.get("detected_at")), positive(order.get("breakout_timestamp"))
+            reference_time = positive(order.get("reference_timestamp"))
+            if (order.get("_scanner_origin") is not True or order.get("source") != "scanner"
+                    or order.get("strategy") != "premium_screener"
+                    or order.get("trigger") != "live_ltp" or order.get("premium_strategy") is not True
+                    or not 0 <= self.clock() - detected <= 10
+                    or not 0 <= self.clock() - breakout_time <= 10
+                    or not reference_time < breakout_time <= detected
+                    or low > high or positive(order.get("breakout_price")) <= high
+                    or stop != tick_price(low * .95, order["tick_size"])):
+                raise LiveBlocked("fresh reference-derived internal scanner evidence required")
             if (not stop < price < target
                     or tick_price(stop, order["tick_size"]) != stop
                     or tick_price(target, order["tick_size"]) != target):
@@ -263,9 +275,13 @@ class LiveBroker:
             if any(qty != 0 for qty in snapshot["positions"].values()):
                 raise LiveBlocked("account exposure prevents entry")
             if any(o.get("correlation_id") not in known_correlations
+                   and o["order_id"] not in known_correlations
                    and (o["filled_quantity"] or o["status"] in ("UNKNOWN", "PENDING"))
                    for o in snapshot["orders"].values()):
                 raise LiveBlocked("external account order activity prevents entry")
+            if (not 0 <= self.clock() - order["detected_at"] <= 10
+                    or not 0 <= self.clock() - order["breakout_timestamp"] <= 10):
+                raise LiveBlocked("scanner evidence expired during write preflight")
             return
         if order["side"] == "BUY":
             if self.external_buy_activity(snapshot, known_correlations):
