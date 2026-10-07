@@ -28,6 +28,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from live_broker import LiveBlocked, LiveNotSent, canonical_expiry, positive
+from dhan_super_order import CARRY_FORWARD_PRODUCT
 
 
 class LiveExecution:
@@ -611,7 +612,7 @@ class LiveExecution:
 
 
 class AutoSuperExecution(LiveExecution):
-    """Durable, approval-free, one-lot CNC Super Order lifecycle.
+    """Durable, approval-free, one-lot MARGIN Super Order lifecycle.
 
     Ordinary SELLs and Telegram approvals are deliberately unavailable here.
     Missing/ambiguous broker evidence keeps the logical intent reserved across
@@ -627,7 +628,8 @@ class AutoSuperExecution(LiveExecution):
             required = {"attempts", "trades", "legs", "product_type", "reference_timestamp",
                         "breakout_price", "option_type", "security_id", "expiry"}
             state = self._state(db)
-            if any(not required.issubset(item) for item in items):
+            if any(not required.issubset(item)
+                   or item.get("product_type") != CARRY_FORWARD_PRODUCT for item in items):
                 state.update(halted=True, schema_blocker=(
                     "legacy live state cannot prove Super Order ownership; "
                     "a new dedicated persistent live database is required"))
@@ -755,6 +757,9 @@ class AutoSuperExecution(LiveExecution):
             raise LiveBlocked("fresh internal NIFTY INDEX scanner live_ltp evidence required")
         if any(data.get(field, "BUY") != "BUY" for field in ("side", "action")):
             raise LiveBlocked("long BUY entries only")
+        if any(field in data and data[field] != CARRY_FORWARD_PRODUCT
+               for field in ("product_type", "productType")):
+            raise LiveBlocked("MARGIN F&O carry-forward product required")
         lots = data.get("lots", 1)
         if isinstance(lots, bool) or not isinstance(lots, int) or lots != 1:
             raise LiveBlocked("auto Super entry requires exactly one lot")
@@ -815,7 +820,7 @@ class AutoSuperExecution(LiveExecution):
                     "security_id", "underlying", "exchange_segment", "instrument_type",
                     "option_type", "expiry", "strike", "lot_size", "tick_size")}
                 item.update(id=uuid.uuid4().hex[:20], signal_key=key, reference_key=reference, side="BUY",
-                           underlying_kind="INDEX", product_type="CNC", lots=1,
+                           underlying_kind="INDEX", product_type=CARRY_FORWARD_PRODUCT, lots=1,
                            option_symbol=contract.get("trading_symbol", contract["security_id"]),
                            _scanner_origin=True, source="scanner", strategy="premium_screener",
                            trigger="live_ltp", premium_strategy=True,
@@ -924,7 +929,7 @@ class AutoSuperExecution(LiveExecution):
                        if attempt["status"] in ("UNKNOWN", "PENDING", "FILLED") and item["status"] != "CLOSED":
                            item["reconciliation_uncertain"] = True
                        continue
-                    if (record["side"] != "BUY" or record["product_type"] != "CNC"
+                    if (record["side"] != "BUY" or record["product_type"] != CARRY_FORWARD_PRODUCT
                            or record["exchange_segment"] != "NSE_FNO"
                            or record["security_id"] != item["security_id"]
                            or record["quantity"] != item["quantity"]
@@ -949,7 +954,8 @@ class AutoSuperExecution(LiveExecution):
                     for trade_id, trade in snap["trades"].items():
                        if trade["order_id"] not in ids | child_ids:
                            continue
-                       if (trade["security_id"] != item["security_id"] or trade["product_type"] != "CNC"
+                       if (trade["security_id"] != item["security_id"]
+                               or trade["product_type"] != CARRY_FORWARD_PRODUCT
                                or trade["exchange_segment"] != "NSE_FNO"
                                or trade["side"] != ("BUY" if trade["order_id"] in ids else "SELL")):
                            raise LiveBlocked("managed trade ownership mismatch")
@@ -1016,7 +1022,7 @@ class AutoSuperExecution(LiveExecution):
                 for item in items:
                     if item.get("owned_quantity") or item.get("filled_quantity"):
                        item["reconciliation_uncertain"] = True
-            if any(p["product_type"] != "CNC" or p["exchange_segment"] != "NSE_FNO"
+            if any(p["product_type"] != CARRY_FORWARD_PRODUCT or p["exchange_segment"] != "NSE_FNO"
                    for p in snap["position_details"].values()):
                 state["halted"] = True
             for item in items:

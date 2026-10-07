@@ -1,9 +1,7 @@
 """DhanHQ 2.2 Super Orders, with strict read-side schema reconciliation.
 
-CNC is a real SDK enum (not a made-up DELIVERY enum), but the published Dhan
-annexure describes CNC as equity delivery and MARGIN as F&O carry-forward.
-The requested CNC OPTIDX path therefore remains explicitly blocked pending
-authoritative broker clarification; never silently substitute MARGIN.
+The SDK and published Dhan product annexure identify MARGIN as F&O
+carry-forward; CNC is equity delivery and is never used for OPTIDX.
 The SDK supports Super entry/target/SL placement and protective-leg modify.
 No HTTP failure proves a placement rejection: only the reconciled order book
 can authorize the single MARKET fallback.
@@ -11,7 +9,7 @@ can authorize the single MARKET fallback.
 Deployment blockers are surfaced, not worked around: missing credentials,
 unsupported response schemas, ambiguous child order IDs, non-coherent books,
 and previous-day Super orders missing from Dhan's day-only Super endpoint.
-Static-IP whitelisting and CNC option entitlement remain broker prerequisites.
+Static-IP whitelisting and account trading entitlement remain prerequisites.
 """
 
 import math
@@ -24,10 +22,7 @@ from zoneinfo import ZoneInfo
 from live_broker import LiveBlocked, positive
 
 IST = ZoneInfo("Asia/Kolkata")
-CNC_OPTIONS_BLOCKER = (
-    "CNC OPTIDX carry-forward eligibility unverified: Dhan annexure specifies "
-    "CNC for equity and MARGIN for F&O; authoritative broker clarification required"
-)
+CARRY_FORWARD_PRODUCT = "MARGIN"
 STATUS = {"TRANSIT": "UNKNOWN", "PENDING": "PENDING",
           "PART_TRADED": "PENDING", "TRADED": "FILLED",
           "CANCELLED": "CANCELLED", "REJECTED": "REJECTED",
@@ -85,14 +80,11 @@ class DhanSuperOrderAdapter:
                 except Exception:
                     self.blockers.append("DhanHQ 2.2 Super Order SDK unavailable")
         if self.client is not None:
-            if getattr(self.client, "CNC", None) != "CNC":
-                self.blockers.append("verified CNC product enum unavailable")
+            if getattr(self.client, "MARGIN", None) != CARRY_FORWARD_PRODUCT:
+                self.blockers.append("verified MARGIN F&O carry-forward enum unavailable")
             if any(not callable(getattr(self.client, name, None)) for name in self.REQUIRED):
                 self.blockers.append("required Super Order/read SDK capabilities unavailable")
         self.read_blockers = list(self.blockers)
-        # TODO: Remove only after authoritative CNC/NSE_FNO/OPTIDX eligibility
-        # is verified. An SDK enum or indicative margin is not product approval.
-        self.blockers.append(CNC_OPTIONS_BLOCKER)
 
     def readiness(self):
         return {"production_ready": not self.blockers, "blockers": list(self.blockers)}
@@ -203,7 +195,7 @@ class DhanSuperOrderAdapter:
         data = self._read(
             "margin_calculator", dict, security_id=str(order["security_id"]),
             exchange_segment="NSE_FNO", transaction_type="BUY",
-            quantity=order["quantity"], product_type="CNC", price=order["limit_price"])
+            quantity=order["quantity"], product_type=CARRY_FORWARD_PRODUCT, price=order["limit_price"])
         return self._evidence(required=positive(data.get("totalMargin")))
 
     @staticmethod
@@ -342,7 +334,7 @@ class DhanSuperOrderAdapter:
     def place(self, order):
         if self.blockers:
             raise LiveBlocked("; ".join(self.blockers))
-        if (order.get("side") != "BUY" or order.get("product_type") != "CNC"
+        if (order.get("side") != "BUY" or order.get("product_type") != CARRY_FORWARD_PRODUCT
                 or order.get("quantity") != order.get("lot_size")
                 or order.get("underlying") != "NIFTY"
                 or order.get("exchange_segment") != "NSE_FNO"
@@ -351,7 +343,8 @@ class DhanSuperOrderAdapter:
         response = self.client.place_super_order(
             security_id=str(order["security_id"]), exchange_segment="NSE_FNO",
             transaction_type="BUY", quantity=order["quantity"],
-            order_type=order["order_type"], product_type="CNC", price=order["limit_price"],
+            order_type=order["order_type"], product_type=CARRY_FORWARD_PRODUCT,
+            price=positive(order["limit_price"]),
             targetPrice=order["target_price"], stopLossPrice=order["initial_stop_loss"],
             trailingJump=0, tag=order["correlation_id"])
         data = self._result(response, dict)

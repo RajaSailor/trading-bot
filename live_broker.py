@@ -196,8 +196,8 @@ class LiveBroker:
         if not quantity.is_integer():
             raise LiveBlocked("invalid quantity")
         if self.allow_production and (not entry or quantity != order["lot_size"]
-                or order.get("product_type") != "CNC"):
-            raise LiveBlocked("production requires exactly one lot BUY CNC Super Order")
+                or order.get("product_type") != "MARGIN"):
+            raise LiveBlocked("production requires exactly one lot BUY MARGIN Super Order")
         if entry and (quantity % order["lot_size"] or not 1 <= quantity / order["lot_size"] <= 5):
             raise LiveBlocked("entry requires 1..5 complete lots")
         if order["order_type"] not in ("MARKET", "LIMIT"):
@@ -227,13 +227,14 @@ class LiveBroker:
                     or low > high or positive(order.get("breakout_price")) <= high
                     or stop != tick_price(low * .95, order["tick_size"])):
                 raise LiveBlocked("fresh reference-derived internal scanner evidence required")
+            # SDK MARKET validation still requires a positive indicative price.
+            if order["order_type"] == "MARKET":
+                price = tick_price(price, order["tick_size"], up=True)
+                order["limit_price"] = price
             if (not stop < price < target
                     or tick_price(stop, order["tick_size"]) != stop
                     or tick_price(target, order["tick_size"]) != target):
                 raise LiveBlocked("invalid tick-rounded Super protection")
-            # SDK MARKET requires a positive price for its leg validation.
-            if order["order_type"] == "MARKET":
-                order["limit_price"] = tick_price(price, order["tick_size"], up=True)
         if entry:
             funds = self.read("funds")
             margin = self.read("margin", order)

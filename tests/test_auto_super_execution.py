@@ -38,7 +38,7 @@ class SuperAdapter(FakeAdapter, DhanSuperOrderAdapter):
             authoritative=True, sequence=self.sequence, orders=copy.deepcopy(self.orders),
             super_orders=copy.deepcopy(self.super_book), trades=copy.deepcopy(self.trade_book),
             positions=copy.deepcopy(self.positions),
-            position_details={s: {"quantity": q, "product_type": "CNC",
+            position_details={s: {"quantity": q, "product_type": "MARGIN",
                                   "exchange_segment": "NSE_FNO"} for s, q in self.positions.items() if q})
 
     def place(self, order):
@@ -63,7 +63,7 @@ class SuperAdapter(FakeAdapter, DhanSuperOrderAdapter):
         record = {
             "order_id": order_id, "security_id": item["security_id"], "side": "BUY",
             "quantity": 65, "filled_quantity": quantity, "status": status,
-            "product_type": "CNC", "exchange_segment": "NSE_FNO",
+            "product_type": "MARGIN", "exchange_segment": "NSE_FNO",
         }
         self.orders[order_id] = {**record, "correlation_id": correlation}
         previous = self.super_book.get(correlation, {}).get("filled_quantity", 0)
@@ -71,7 +71,7 @@ class SuperAdapter(FakeAdapter, DhanSuperOrderAdapter):
             self.trade_book[f"E{order_id}:{quantity}"] = {
                 "id": f"E{order_id}:{quantity}", "order_id": order_id, "security_id": item["security_id"],
                 "side": "BUY", "quantity": quantity - previous, "price": price,
-                "product_type": "CNC", "exchange_segment": "NSE_FNO", "timestamp": self.now}
+                "product_type": "MARGIN", "exchange_segment": "NSE_FNO", "timestamp": self.now}
         legs = {name: {"order_id": order_id + suffix, "status": "PENDING", "triggered_quantity": 0,
                        "price": leg_price}
                 for name, suffix, leg_price in (
@@ -97,11 +97,11 @@ class SuperAdapter(FakeAdapter, DhanSuperOrderAdapter):
             "order_id": child_id, "correlation_id": None, "side": "SELL",
             "security_id": item["security_id"], "quantity": quantity,
             "filled_quantity": quantity, "status": "FILLED",
-            "product_type": "CNC", "exchange_segment": "NSE_FNO"}
+            "product_type": "MARGIN", "exchange_segment": "NSE_FNO"}
         self.trade_book["X" + child_id] = {
             "id": "X" + child_id, "order_id": child_id, "side": "SELL",
             "security_id": item["security_id"], "quantity": quantity, "price": price,
-            "timestamp": self.now, "product_type": "CNC", "exchange_segment": "NSE_FNO"}
+            "timestamp": self.now, "product_type": "MARGIN", "exchange_segment": "NSE_FNO"}
         record["status"] = "CLOSED"
         record["legs"]["TARGET_LEG"].update(status="FILLED", triggered_quantity=quantity)
         record["legs"]["STOP_LOSS_LEG"]["status"] = "CANCELLED"
@@ -153,7 +153,7 @@ def test_default_off_guards(engine, adapter, flags):
 
 
 @pytest.mark.parametrize("side,strike", [("CE", 24950), ("PE", 25050)])
-def test_auto_one_lot_cnc_super_limit_without_indicators(engine, adapter, side, strike):
+def test_auto_one_lot_margin_super_limit_without_indicators(engine, adapter, side, strike):
     adapter.contract.update(option_type=side, strike=strike)
     def before_place(order):
         with sqlite3.connect(engine.db_path) as db:
@@ -164,7 +164,7 @@ def test_auto_one_lot_cnc_super_limit_without_indicators(engine, adapter, side, 
     item = submitted(engine, adapter)
     order = adapter.writes[0]
     assert (order["side"], order["quantity"], order["product_type"], order["order_type"]) == (
-        "BUY", 65, "CNC", "LIMIT")
+        "BUY", 65, "MARGIN", "LIMIT")
     assert order["initial_stop_loss"] == 85.5
     assert order["target_price"] == 126
     assert item["status"] == "PENDING" and item["filled_quantity"] == 0
@@ -178,6 +178,7 @@ def test_auto_one_lot_cnc_super_limit_without_indicators(engine, adapter, side, 
     {"lots": 2}, {"quantity": 130}, {"underlying_kind": "STOCK"}, {"side": "SELL"},
     {"underlying": "BANKNIFTY"}, {"exchange_segment": "BSE_FNO"}, {"instrument_type": "FUTIDX"},
     {"breakout_timestamp": 1}, {"detected_at": 1}, {"breakout_price": 99},
+    {"product_type": "CNC"}, {"productType": "INTRADAY"},
 ])
 def test_whitelist_freshness_and_one_lot(engine, adapter, change):
     item = scanner(adapter)
@@ -243,6 +244,25 @@ def test_unknown_market_fallback_does_not_use_old_rejection_as_ack(engine, adapt
     assert state["intents"][0]["status"] == "UNKNOWN"
     assert state["account"]["write_busy"] == item["id"]
     assert len(adapter.writes) == 2
+
+
+def test_market_fallback_has_fresh_positive_tick_ceil_indicative_price(engine, adapter):
+    item = submitted(engine, adapter)
+    adapter.price = 100.03
+    adapter.report_entry(item, 0, status="REJECTED")
+    engine.tick()
+    assert adapter.writes[-1]["order_type"] == "MARKET"
+    assert adapter.writes[-1]["product_type"] == "MARGIN"
+    assert adapter.writes[-1]["limit_price"] == 100.05
+
+
+def test_market_fallback_budgets_conservative_rounded_indicative_notional(engine, adapter):
+    adapter.price, adapter.available = 100.03, 6502
+    item = submitted(engine, adapter)
+    adapter.report_entry(item, 0, status="REJECTED")
+    with pytest.raises(LiveBlocked, match="insufficient"):
+        engine.tick()
+    assert len(adapter.writes) == 1
 
 
 @pytest.mark.parametrize("quantity,status", [(0, "PENDING"), (10, "REJECTED"), (0, "CANCELLED")])
@@ -458,6 +478,18 @@ def test_legacy_live_database_does_not_claim_super_order_ownership(engine, adapt
     with pytest.raises(LiveBlocked, match="legacy live state"):
         submitted(restarted, adapter)
     assert not adapter.writes
+
+
+def test_equity_cnc_live_state_is_not_silently_migrated_to_derivatives_margin(engine, adapter):
+    item = submitted(engine, adapter)
+    with engine._db() as db:
+        item["product_type"] = "CNC"
+        engine._save(db, item)
+    restarted = AutoSuperExecution(engine.db_path, engine.broker, enabled=True,
+                                    practice=False, auto=True, clock=lambda: adapter.now)
+    with pytest.raises(LiveBlocked, match="legacy live state"):
+        restarted.tick()
+    assert len(adapter.writes) == 1
 
 
 def test_triggered_nested_leg_requires_actual_child_fill_to_complete_exit(engine, adapter):

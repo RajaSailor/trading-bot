@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from dhan_super_order import DhanSuperOrderAdapter, IST, tick_price, CNC_OPTIONS_BLOCKER
+from dhan_super_order import DhanSuperOrderAdapter, IST, tick_price, CARRY_FORWARD_PRODUCT
 from live_broker import LiveBlocked, LiveBroker
 from security_master import SecurityMasterIndex, UniverseSpec, UniverseEntry, KIND_INDEX
 
@@ -18,7 +18,7 @@ def success(data):
 
 
 def sdk():
-    client = SimpleNamespace(CNC="CNC")
+    client = SimpleNamespace(CNC="CNC", MARGIN="MARGIN")
     for name in DhanSuperOrderAdapter.REQUIRED:
         setattr(client, name, Mock())
     client.get_super_order_list.return_value = success([])
@@ -54,17 +54,13 @@ def master():
 
 @pytest.fixture
 def adapter():
-    result = DhanSuperOrderAdapter(sdk(), clock=lambda: NOW, master_provider=lambda _: master())
-    # These wire-schema tests model eligibility after broker verification.
-    # The production constructor never clears the product eligibility blocker.
-    result.blockers = []
-    return result
+    return DhanSuperOrderAdapter(sdk(), clock=lambda: NOW, master_provider=lambda _: master())
 
 
 def wire_entry():
     return {
         "orderId": "entry", "correlationId": "Llogical", "securityId": "101",
-        "transactionType": "BUY", "exchangeSegment": "NSE_FNO", "productType": "CNC",
+        "transactionType": "BUY", "exchangeSegment": "NSE_FNO", "productType": "MARGIN",
         "quantity": 65, "filledQty": 65, "orderStatus": "TRADED", "legName": "ENTRY_LEG",
         "legDetails": [
             {"orderId": "target", "legName": "TARGET_LEG", "price": 135,
@@ -78,7 +74,7 @@ def wire_entry():
 def wire_trade(order_id="entry", side="BUY", quantity=65, price=102):
     return {
         "exchangeTradeId": "trade-" + order_id, "orderId": order_id, "securityId": "101",
-        "transactionType": side, "exchangeSegment": "NSE_FNO", "productType": "CNC",
+        "transactionType": side, "exchangeSegment": "NSE_FNO", "productType": "MARGIN",
         "tradedQuantity": quantity, "tradedPrice": price, "exchangeTime": "2026-10-07 12:00:00",
     }
 
@@ -89,44 +85,53 @@ def set_filled_books(adapter):
     adapter.client.get_order_list.return_value = success([{k: v for k, v in s.items() if k != "legDetails"}])
     adapter.client.get_trade_book.return_value = success([wire_trade()])
     adapter.client.get_positions.return_value = success([
-        {"securityId": "101", "netQty": 65, "productType": "CNC", "exchangeSegment": "NSE_FNO"}])
+        {"securityId": "101", "netQty": 65, "productType": "MARGIN", "exchangeSegment": "NSE_FNO"}])
 
 
 def order():
     return {
         "security_id": "101", "side": "BUY", "underlying": "NIFTY", "underlying_kind": "INDEX",
-        "exchange_segment": "NSE_FNO", "instrument_type": "OPTIDX", "product_type": "CNC",
+        "exchange_segment": "NSE_FNO", "instrument_type": "OPTIDX", "product_type": "MARGIN",
         "quantity": 65, "lot_size": 65, "limit_price": 99, "target_price": 126,
         "initial_stop_loss": 85.5, "order_type": "LIMIT", "correlation_id": "Llogical",
     }
 
 
-def test_verified_installed_sdk_cnc_and_methods(adapter):
+def test_verified_installed_sdk_margin_and_methods(adapter):
     from dhanhq import dhanhq
     assert dhanhq.CNC == "CNC"
+    assert dhanhq.MARGIN == CARRY_FORWARD_PRODUCT == "MARGIN"
     for name in DhanSuperOrderAdapter.REQUIRED:
         assert callable(getattr(dhanhq, name))
     assert adapter.readiness()["production_ready"]
     assert LiveBroker(adapter).readiness()["production_ready"] is False
 
 
-def test_real_constructor_blocks_unverified_cnc_options_without_fake_enum():
+def test_real_constructor_uses_verified_derivatives_margin_enum_without_fake_substitution():
     client = sdk()
     real = DhanSuperOrderAdapter(client, clock=lambda: NOW)
-    assert real.readiness()["production_ready"] is False
-    assert CNC_OPTIONS_BLOCKER in real.readiness()["blockers"]
+    assert real.readiness()["production_ready"] is True
     assert real.funds()["available"] == 100000
-    with pytest.raises(LiveBlocked, match="CNC OPTIDX"):
+    assert real.place(order())["order_id"] == "entry"
+    assert client.place_super_order.call_args.kwargs["product_type"] == "MARGIN"
+
+
+def test_missing_margin_enum_blocks_writes_even_when_equity_cnc_available():
+    client = sdk()
+    del client.MARGIN
+    real = DhanSuperOrderAdapter(client, clock=lambda: NOW)
+    assert not real.readiness()["production_ready"]
+    with pytest.raises(LiveBlocked, match="MARGIN"):
         real.place(order())
     client.place_super_order.assert_not_called()
 
 
-def test_sdk_super_payload_cnc_and_no_native_trailing(adapter):
+def test_sdk_super_payload_margin_and_no_native_trailing(adapter):
     assert adapter.place(order()) == {"order_id": "entry"}
     kwargs = adapter.client.place_super_order.call_args.kwargs
     assert kwargs == {
         "security_id": "101", "exchange_segment": "NSE_FNO", "transaction_type": "BUY",
-        "quantity": 65, "order_type": "LIMIT", "product_type": "CNC", "price": 99,
+        "quantity": 65, "order_type": "LIMIT", "product_type": "MARGIN", "price": 99,
         "targetPrice": 126, "stopLossPrice": 85.5, "trailingJump": 0, "tag": "Llogical",
     }
     adapter.modify_protection("entry", "STOP_LOSS_LEG", 99)
@@ -135,8 +140,16 @@ def test_sdk_super_payload_cnc_and_no_native_trailing(adapter):
         stopLossPrice=99, trailingJump=0)
 
 
+def test_market_super_requires_positive_indicative_price_before_sdk_call(adapter):
+    with pytest.raises(LiveBlocked, match="positive"):
+        adapter.place({**order(), "order_type": "MARKET", "limit_price": 0})
+    adapter.client.place_super_order.assert_not_called()
+    adapter.place({**order(), "order_type": "MARKET", "limit_price": 100.05})
+    assert adapter.client.place_super_order.call_args.kwargs["price"] == 100.05
+
+
 @pytest.mark.parametrize("side,product,quantity", [
-    ("SELL", "CNC", 65), ("BUY", "MARGIN", 65), ("BUY", "CNC", 130),
+    ("SELL", "MARGIN", 65), ("BUY", "CNC", 65), ("BUY", "MARGIN", 130),
 ])
 def test_adapter_rejects_ordinary_sells_wrong_product_and_multiple_lots(adapter, side, product, quantity):
     with pytest.raises(LiveBlocked):
@@ -149,7 +162,7 @@ def test_fund_wire_typo_margin_and_current_master_units(adapter):
     assert adapter.margin(order())["required"] == 6500
     adapter.client.margin_calculator.assert_called_once_with(
         security_id="101", exchange_segment="NSE_FNO", transaction_type="BUY",
-        quantity=65, product_type="CNC", price=99)
+        quantity=65, product_type="MARGIN", price=99)
     c = adapter.master_lookup("101")
     assert c["underlying_kind"] == "INDEX" and c["lot_size"] == 65 and c["tick_size"] == .05
 
@@ -208,7 +221,7 @@ def test_schema_identity_fill_and_child_ambiguities_fail_closed(adapter, change)
 def test_unstable_books_do_not_claim_atomic_snapshot(adapter):
     adapter.client.get_positions.side_effect = [
         success([]), success([{"securityId": "101", "netQty": 65,
-                              "productType": "CNC", "exchangeSegment": "NSE_FNO"}])]
+                              "productType": "MARGIN", "exchangeSegment": "NSE_FNO"}])]
     with pytest.raises(LiveBlocked, match="unstable"):
         adapter.snapshot()
 
