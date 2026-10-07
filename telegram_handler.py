@@ -144,13 +144,6 @@ def format_option_breakout_alert(
     if isinstance(confirmations, dict):
         values = confirmations.get("values") or {}
         passed = confirmations.get("passed") or {}
-        checks = (
-            ("above_vwap", "VWAP", "premium", "vwap"),
-            ("rsi14_above_30_and_rising", "RSI14", "rsi14", "rsi14_previous"),
-            ("above_ema9", "EMA9", "premium", "ema9"),
-            ("macd_above_signal", "MACD", "macd12_26", "macd_signal9"),
-            ("psar_below_premium", "PSAR", "psar_0_02_0_2", "premium"),
-        )
 
         def indicator_number(value):
             try:
@@ -158,15 +151,50 @@ def format_option_breakout_alert(
             except (TypeError, ValueError):
                 return "N/A"
 
+        def mark(key):
+            return "✓" if passed.get(key) is True else "✗"
+
         lines.extend(["", "🧭 <b>PREMIUM CONFIRMATIONS</b>"])
-        for key, label, left, right in checks:
-            mark = "✓" if passed.get(key) is True else "✗"
+        lines.append(
+            f"{mark('trigger_above_or_straddles_ema9')} EMA9: trigger {esc(indicator_number(values.get('premium')))} "
+            f"{esc(confirmations.get('ema9_position') or 'N/A')} EMA {esc(indicator_number(values.get('ema9')))} "
+            f"(L {esc(indicator_number(values.get('trigger_low')))} / H {esc(indicator_number(values.get('trigger_high')))})"
+        )
+        lines.append(
+            f"{mark('macd_above_signal')} MACD 12/26/9: {esc(indicator_number(values.get('macd12_26')))} vs signal "
+            f"{esc(indicator_number(values.get('macd_signal9')))}"
+        )
+        lines.append(
+            f"{mark('rsi14_above_25_and_rising')} RSI14 (&gt;25, rising): {esc(indicator_number(values.get('rsi14')))} "
+            f"vs prev {esc(indicator_number(values.get('rsi14_previous')))}"
+        )
+        anti_chop = confirmations.get("anti_chop")
+        continuation = confirmations.get("continuation")
+        if isinstance(anti_chop, dict):
+            try:
+                range_pct = f"{float(anti_chop.get('range_fraction')) * 100:.1f}%"
+            except (TypeError, ValueError):
+                range_pct = "N/A"
+            regime = "SIDEWAYS" if anti_chop.get("sideways") is True else "normal"
+            try:
+                limit_pct = f"{float(anti_chop.get('max_range_fraction')) * 100:g}%"
+            except (TypeError, ValueError):
+                limit_pct = "N/A"
             lines.append(
-                f"{mark} {label}: {esc(indicator_number(values.get(left)))} / "
-                f"{esc(indicator_number(values.get(right)))}"
+                f"Range {esc(anti_chop.get('bars'))} bars: {esc(indicator_number(anti_chop.get('window_low')))}–"
+                f"{esc(indicator_number(anti_chop.get('window_high')))} ({esc(range_pct)}, ≤{esc(limit_pct)} sideways) → {esc(regime)}"
+            )
+        if isinstance(continuation, dict):
+            mode_labels = {"normal": "normal", "two_fresh_polls": "two fresh polls", "momentum_0_3r": "0.3R momentum"}
+            lines.append(
+                f"Confirmation: {esc(mode_labels.get(continuation.get('mode'), continuation.get('mode')))} | "
+                f"Ref high {esc(indicator_number(continuation.get('reference_high')))} | "
+                f"Stop {esc(indicator_number(continuation.get('initial_stop')))} | "
+                f"R {esc(indicator_number(continuation.get('r')))} | "
+                f"0.3R {esc(indicator_number(continuation.get('momentum_threshold')))}"
             )
         live = confirmations.get("evidence_mode") == "live_provisional_ltp"
-        mode = "Live provisional close; VWAP uses completed volume" if live else "Completed candles"
+        mode = "Live provisional (observed LTP ticks)" if live else "Completed candles"
         lines.append(
             f"Evidence: {esc(mode)} | indicators {esc(format_ist_timestamp(confirmations.get('indicator_as_of'), True))}"
         )
@@ -174,7 +202,6 @@ def format_option_breakout_alert(
             lines.append(
                 f"Fresh option LTP as of {esc(format_ist_timestamp(confirmations.get('live_quote_as_of'), True))}"
             )
-        lines.append(f"VWAP volume as of {esc(format_ist_timestamp(confirmations.get('vwap_as_of'), True))}")
     if practice_mode:
         lines.append("🧪 PRACTICE MODE: alert only, no live order placed")
     lines.extend(["", "📢 DISCLAIMER: Educational purposes only."])
