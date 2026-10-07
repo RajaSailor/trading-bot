@@ -16,7 +16,7 @@ SECRET = "s" * 40
 IST = ZoneInfo("Asia/Kolkata")
 
 
-SESSION_START = datetime(2026, 10, 5, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+SESSION_START = datetime(2026, 10, 5, 9, 15, tzinfo=IST)
 # Trending day: the 8 bars before the 10:35 trigger span 84-110 (>20%, normal mode);
 # most recent RED 105/110/98/100, trigger 100/113/99/112. No volume field at all.
 NORMAL_DAY = [

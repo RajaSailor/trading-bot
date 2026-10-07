@@ -490,6 +490,7 @@ class PremiumScreener:
                 not isinstance(tracker, dict)
                 or tracker.get("key") != key
                 or observed_at - tracker["last_observed_at"] > LIVE_CONFIRMATION_MAX_GAP_SECONDS
+                or observed_at < tracker["last_observed_at"]
             ):
                 tracker = {"key": key, "count": 0, "last_observed_at": float("-inf")}
                 state["continuation"] = tracker
