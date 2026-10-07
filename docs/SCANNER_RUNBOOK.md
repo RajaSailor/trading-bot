@@ -19,6 +19,37 @@ This runbook covers the premium breakout scanner that sends option alerts to the
 | Target | Entry + 2 × Risk (single 2R target) |
 | Duplicates | One alert per option contract per reference red candle. |
 
+## NIFTY automatic execution (production blocked)
+
+`NIFTY_LIVE_ENABLED=true` plus `AUTO_TRADING_ENABLED=true` selects the NIFTY
+auto-mode boundary. Only NIFTY index ITM+1 CE/PE may route there. Stocks,
+commodities, and other indices remain signals on the options-screener channel;
+they do not submit to paper or real execution while this mode is active.
+Auto mode exposes no trade-approval buttons and suppresses paper/system noise
+from trade_control. Intended trade_control events are actual entry fills with
+capital/funds details and completed exits with realized P&L only; the production
+event-delivery worker is not yet connected.
+
+This checkout **cannot send real Dhan orders**. It has no verified Super Order
+adapter, funds/margin wire adapter, authoritative production reconciliation, or
+exchange-side protection worker. Auto proposals fail closed; never treat a
+signal, preview, or acknowledgment as a fill. Verify those prerequisites,
+including Dhan's current carry-forward `MARGIN` product/order enums and static
+outbound IP, before any production deployment.
+
+Policy for a future verified route: one metadata lot, funds/margin check before
+entry, at most two filled entries per IST day, and one managed position. Initial
+SL = `0.95 ×` the reference red candle low. After actual fill E, R = `E − SL`,
+target = `E + 2R`; at +5 premium points move SL to E, then trail upward by 5
+points for each additional +5 favorable move. SL never loosens and all prices
+respect contract tick size. LIMIT is preferred; MARKET fallback requires
+confirmed non-submission/rejection. An ambiguous order is reconciled, never
+resent blindly.
+
+**Risk disclaimer:** Options may lose the full premium quickly. A planned 1:2
+reward/risk, stop, target, and trailing rule do not guarantee fills, winning
+trades, or profit.
+
 ### Crossing and timing evidence
 
 - No indicator warmup is required. Valid completed OHLC determines the reference;
@@ -106,8 +137,8 @@ Flask app, including `/health`, keeps running.
    Cross-check entry/SL/target against the red candle on the Dhan chart.
 4. Latency: `⏱️ Latency <stage> (n=..): p50/p95/p99` log lines report internal timings
    from price receipt to evaluate, queue and Telegram send start.
-5. Verify the paper approval pipeline below. Do not enable live trading as a
-   workaround for missing approvals.
+5. Verify the paper approval pipeline below only with live/auto flags OFF. Do not
+   enable real-money auto mode as a workaround for missing practice approvals.
 
 ## Persistent paper approval pipeline
 
@@ -160,7 +191,7 @@ cutoffs and unresolved-exit blocks still apply.
    - `paper_outbox`: notifier configured, pending backlog, oldest age, failed
      attempts and latest sanitized failure. Health reads do not send or freshen
      requests.
-4. During market hours, an eligible ITM+1 CE **and** PE fresh crossing outside the
+4. In PRACTICE mode with NIFTY auto mode OFF, an eligible ITM+1 CE **and** PE fresh crossing outside the
    successful-entry re-entry band should produce
    `#PAPER #APPROVAL`, exact contract/one-lot units, and **Approve Limit / Approve
    Market / Modify / Reject** buttons in trade_control, with no position or
@@ -168,6 +199,9 @@ cutoffs and unresolved-exit blocks still apply.
    authorized approval with fresh quotes should produce only a PAPER fill.
    Limit approval may remain pending until a fresh executable quote reaches
    its limit; approval is not a fill guarantee.
+   With both NIFTY live and auto flags ON, no approval card should appear; the
+   NIFTY route reports blocked until the verified Super Order adapter exists,
+   and non-NIFTY signals must not reach paper submission.
 5. Rejected requests produce `#PAPER #REJECTED`, original signal key, known exact
    contract and a fixed reason, not a fabricated trade/fill ID. Re-submit of the
    same key does not create another business rejection or approval. Examples:

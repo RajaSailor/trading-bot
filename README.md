@@ -11,22 +11,26 @@
 ## Persistent PRACTICE portfolio (`main.py`)
 
 The default application runtime is **PRACTICE-only**. Changing `PRACTICE_MODE` or
-`AUTO_TRADING_ENABLED` alone does not enable real trading. It never sends paper orders to Dhan. Existing broker
-integration modules are not the paper execution path. Compact strategy alerts
-remain on `service_alerts`; approvals, simulated fills, protection, and account
-reports go to `trade_control`.
+`AUTO_TRADING_ENABLED` alone does not enable real trading. It never sends paper
+orders to Dhan. Compact option strategy alerts remain on `service_alerts`;
+practice lifecycle messages normally go to `trade_control`.
 
 ### Separate NIFTY route — implementation present, production BLOCKED
 
-`NIFTY_LIVE_ENABLED=false` is the default. When deliberately configured, NIFTY
-signals are routed exclusively to the isolated approval architecture, not to
-duplicate paper approvals. All other scanner categories retain paper behavior.
-The isolated engine has mocked execution tests, a separate SQLite ledger,
-versioned authenticated controls, reservations, and conservative reconciliation.
-**This release cannot send real orders:** the production adapter is fail-closed.
-It is not a working real-money deployment, even with all three flags set.
-See [the activation blockers and official-source evidence](docs/DEPLOYMENT_GUIDE.md).
-Human review and completed production safeguards are required before activation.
+`NIFTY_LIVE_ENABLED=false` and `AUTO_TRADING_ENABLED=false` are the defaults.
+When both are enabled, only canonical NIFTY index ITM+1 CE/PE signals may enter
+the NIFTY route; stocks, commodities, and other indices remain service-channel
+signals and are not submitted to the paper or real order paths. Auto mode
+suppresses paper/manual approval controls and non-execution trade-control
+messages.
+
+**This release cannot send real orders.** Its production adapter and Dhan Super
+Order support are fail-closed; auto-mode proposals are rejected until verified
+broker placement, funds/margin, authoritative reconciliation, and exchange-side
+protection are implemented. The isolated ledger has mock-only execution tests;
+it is not a working real-money deployment, even with all flags set. Do not
+interpret a signal or acknowledgment as a fill. See [the activation blockers and
+official-source evidence](docs/DEPLOYMENT_GUIDE.md).
 
 ### Persistence and controls
 
@@ -62,6 +66,29 @@ a usable fresh source last-trade timestamp. Cached quotes keep their original ti
 Missing, stale, nonpositive, nonfinite, or invalid evidence never fills.
 Partial books also require fresh LTP evidence, because the missing execution
 side would otherwise fall back to LTP.
+
+### NIFTY automatic-trade policy (not production enabled)
+
+- One lot exactly, from the contract's current lot-size metadata; product intent
+  is carry-forward (`MARGIN`). Fresh broker funds and per-order margin must both
+  cover the trade; no fixed ₹25,000 sufficiency assumption is made.
+- Initial SL = `0.95 ×` the selected completed 10-minute red candle low. After
+  the actual average fill E, R = `E − SL` and target = `E + 2R` (E=100 and SL=85.5
+  gives target 129). At +5 points, SL moves to E; each further +5-point move
+  raises SL another 5 points. Stops only tighten and are rounded to tick size.
+- At most two filled entries per IST day and one managed open position. Unclear
+  order state, stale quotes, missing funds, or unknown exposure blocks new entry;
+  acknowledgments never count as fills and uncertain writes are never resent.
+- Super Order placement/trigger/exit semantics, product enums, static-IP
+  requirements, and restart reconciliation remain unverified in this sandbox.
+  The live path is therefore deliberately unavailable. No approval cards are
+  offered in auto mode. Trade-control event filtering allows only actual entry
+  fills with capital details and completed exits with realized P&L; the production
+  delivery worker is still a prerequisite.
+
+**Risk disclaimer:** Options can lose the full premium and may incur additional
+execution risk. A 1:2 planned reward/risk, stop, target, and trailing rule do not
+guarantee fills, a win rate, or profit. Trade only money you can afford to lose.
 
 BUY LIMIT is fillable only at a fresh ask/LTP at or below its limit (SELL uses
 bid/LTP at or above). After five seconds an unfilled limit requires new quote

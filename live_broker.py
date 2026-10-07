@@ -28,7 +28,7 @@ class LiveNotSent(LiveBlocked):
 PRODUCTION_BLOCKERS = (
     "verified production funds and margin schemas/adapters",
     "authoritative production ownership/order/trade reconciliation adapter",
-    "exchange-side protection and restart recovery verification",
+    "verified Dhan Super Order placement and protection/restart recovery",
     "static IP and production credentials deployment verification",
 )
 
@@ -71,6 +71,7 @@ class LiveBroker:
     def readiness(self):
         simulation = self.allow_simulation is True and getattr(self.adapter, "simulation", False) is True
         return {"production_ready": False, "simulation_ready": simulation,
+                "super_order_ready": False,
                 "blockers": list(PRODUCTION_BLOCKERS)}
 
     def evidence(self, data):

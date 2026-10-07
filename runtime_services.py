@@ -60,10 +60,12 @@ class SignalNotifier:
         telegram_handler: TelegramHandler,
         metrics_collector=None,
         practice_mode: Optional[bool] = None,
+        trade_control_lifecycle_only: bool = False,
     ) -> None:
         self.telegram_handler = telegram_handler
         self.metrics_collector = metrics_collector
         self.practice_mode = practice_mode
+        self.trade_control_lifecycle_only = trade_control_lifecycle_only
         self.delivery_attempts = 0
         self.delivery_failures = 0
         self._paper_option_trades: dict[str, dict] = {}
@@ -285,6 +287,8 @@ class SignalNotifier:
         return "nifty50_options"
 
     def _send(self, channel: str, message: str) -> bool:
+        if self.trade_control_lifecycle_only and channel == TRADE_CONTROL_CHANNEL:
+            return False
         self.delivery_attempts += 1
         if self.telegram_handler.send_to_channel(channel, message):
             return True
@@ -403,6 +407,17 @@ class QueueConsumerWorker:
             return True
 
     def _execute_signal(self, signal: dict):
+        live_config = self.runtime_config.get("nifty_live") or {}
+        if live_config.get("enabled") and live_config.get("auto"):
+            metadata = signal.get("metadata") or {}
+            is_nifty = signal.get("symbol") == "NIFTY" or (
+                isinstance(metadata, dict) and metadata.get("underlying") == "NIFTY"
+            )
+            if self.live_route is not None and self.live_route.targets(signal):
+                return self.live_route.propose(signal)
+            if is_nifty:
+                return {"status": "blocked", "reason": "NIFTY auto route metadata or adapter unavailable"}
+            return {"status": "signal_only", "reason": "non-NIFTY instruments are never live-routed"}
         if self.live_route is not None and self.live_route.targets(signal):
             return self.live_route.propose(signal)
         if self.paper_portfolio is not None:

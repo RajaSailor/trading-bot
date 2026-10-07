@@ -23,7 +23,7 @@ class LiveRoute:
     def targets(self, signal):
         metadata = signal.get("metadata")
         underlying = metadata.get("underlying") if isinstance(metadata, dict) else None
-        return self.execution.enabled and (signal.get("symbol") == "NIFTY" or underlying == "NIFTY")
+        return self.execution.enabled and signal.get("symbol") == "NIFTY" and underlying == "NIFTY"
 
     def propose(self, signal):
         metadata = signal.get("metadata") or {}
@@ -72,7 +72,8 @@ def build_live_route(config, *, paper_db_path):
     # None is deliberately not a production adapter; no startup broker writes.
     broker = LiveBroker(None)
     execution = LiveExecution(
-        path, broker, enabled=True, practice=config["practice"], auto=config["auto"]
+        path, broker, enabled=True, practice=config["practice"], auto=config["auto"],
+        auto_mode=config["auto"],
     )
     control = LiveTelegram(
         execution, secret=config["webhook_secret"],

@@ -214,6 +214,14 @@ class SignalNotifierRoutingTests(unittest.TestCase):
 
         self.assertEqual(["trade_control"], [channel for channel, _ in handler.calls])
 
+    def test_nifty_auto_mode_suppresses_non_execution_trade_control_messages(self):
+        handler = _FakeTelegramHandler()
+        notifier = SignalNotifier(handler, trade_control_lifecycle_only=True)
+        notifier.notify_service_alert("Queue consumer error", "boom")
+        notifier.notify_signal_accepted(self._signal())
+
+        self.assertEqual([], handler.calls)
+
     def test_order_and_position_updates_route_only_to_trade_control(self):
         handler = _FakeTelegramHandler()
         notifier = SignalNotifier(handler)

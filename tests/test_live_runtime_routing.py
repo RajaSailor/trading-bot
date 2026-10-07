@@ -131,6 +131,42 @@ def test_caller_claiming_scanner_source_without_internal_origin_cannot_propose()
     execution.propose.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "signal,expected",
+    [
+        ({"symbol": "NIFTY", "metadata": {"underlying": "NIFTY"}}, True),
+        ({"symbol": "BANKNIFTY", "metadata": {"underlying": "NIFTY"}}, False),
+        ({"symbol": "NIFTY", "metadata": {"underlying": "BANKNIFTY"}}, False),
+        ({"symbol": "RELIANCE", "metadata": {"underlying": "RELIANCE"}}, False),
+    ],
+)
+def test_real_live_route_target_requires_exact_nifty_underlying(signal, expected):
+    route = LiveRoute(Mock(enabled=True), Mock())
+    assert route.targets(signal) is expected
+
+
+def test_nifty_auto_mode_keeps_non_nifty_signal_only_and_never_submits_paper():
+    route = Mock()
+    route.targets.return_value = False
+    consumer = worker(route)
+    consumer.runtime_config["nifty_live"] = {"enabled": True, "auto": True}
+
+    result = consumer._execute_signal({
+        "symbol": "GOLD", "metadata": {"underlying": "GOLD", "category": "commodity_options"},
+    })
+    assert result["status"] == "signal_only"
+    consumer.paper_portfolio.submit.assert_not_called()
+    route.propose.assert_not_called()
+
+
+def test_nifty_auto_mode_blocks_missing_route_instead_of_paper_fallback():
+    consumer = worker()
+    consumer.runtime_config["nifty_live"] = {"enabled": True, "auto": True}
+    result = consumer._execute_signal({"symbol": "NIFTY", "metadata": {}})
+    assert result["status"] == "blocked"
+    consumer.paper_portfolio.submit.assert_not_called()
+
+
 @pytest.mark.parametrize("value", ["", "123,bad", "True", "1.5", "-123"])
 def test_live_user_allowlist_rejects_non_numeric_or_non_positive_ids(value):
     assert not _ids(value, users=True)

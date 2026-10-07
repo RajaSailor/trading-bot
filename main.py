@@ -409,6 +409,9 @@ def initialize_app(force: bool = False):
     
     try:
         runtime_config = _load_runtime_config()
+        nifty_auto_mode = bool(
+            runtime_config["nifty_live"]["enabled"] and runtime_config["nifty_live"]["auto"]
+        )
 
         # 1. Initialize DhanHQ Integration
         logger.info("1️⃣ Initializing DhanHQ Integration...")
@@ -519,6 +522,7 @@ def initialize_app(force: bool = False):
                     telegram_handler,
                     metrics_collector,
                     practice_mode=bool(runtime_config.get("practice_mode", True)),
+                    trade_control_lifecycle_only=nifty_auto_mode,
                 )
                 if SignalNotifier is not None
                 else None
@@ -536,7 +540,9 @@ def initialize_app(force: bool = False):
             approval_expiry_seconds=max(1, float(os.getenv("PAPER_APPROVAL_EXPIRY_SECONDS", "60"))),
         )
         paper_telegram_control = PaperTelegramControl(paper_portfolio, telegram_handler)
-        paper_portfolio.notify = paper_telegram_control.send_event
+        paper_portfolio.notify = (
+            (lambda _event: True) if nifty_auto_mode else paper_telegram_control.send_event
+        )
         paper_portfolio.auto_deliver = False
         paper_portfolio_worker = PaperPortfolioWorker(paper_portfolio)
         paper_portfolio_worker.start()
@@ -548,6 +554,7 @@ def initialize_app(force: bool = False):
         if (
             AlertManager is not None
             and TelegramAlertChannel is not None
+            and not nifty_auto_mode
             and os.getenv("BOT_TRADE_CONTROL_TOKEN")
             and runtime_config["channels"].get("trade_control")
         ):
@@ -676,6 +683,9 @@ def live_telegram_webhook():
 
 @app.route('/telegram/paper', methods=['POST'])
 def paper_telegram_webhook():
+    if (runtime_config.get("nifty_live", {}).get("enabled")
+            and runtime_config.get("nifty_live", {}).get("auto")):
+        return jsonify({"ok": False, "error": "paper controls disabled in NIFTY auto mode"}), 403
     if paper_telegram_control is None:
         return jsonify({"ok": False, "error": "unavailable"}), 503
     if request.content_length is not None and request.content_length > 65536:
