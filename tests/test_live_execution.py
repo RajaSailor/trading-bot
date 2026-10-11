@@ -93,7 +93,9 @@ def test_version_actor_chat_expiry_binding(engine, adapter):
             engine.approve(item["id"], 1, actor, chat)
     with pytest.raises(LiveBlocked, match="exactly one lot"):
         engine.modify(item["id"], 1, 7, -9, lots=3)
-    changed = engine.modify(item["id"], 1, 7, -9, order_type="MARKET")
+    with pytest.raises(LiveBlocked, match="LIMIT only"):
+        engine.modify(item["id"], 1, 7, -9, order_type="MARKET")
+    changed = engine.modify(item["id"], 1, 7, -9, order_type="LIMIT")
     assert changed["quantity"] == 65 and changed["version"] == 2
     with pytest.raises(LiveBlocked):
         engine.approve(item["id"], 1, 7, -9)
@@ -222,14 +224,15 @@ def test_outbox_retries_delivery_only_never_orders(engine, adapter):
     assert len(adapter.writes) == 1
 
 
-def test_t1_trailing_and_t2_exit_preview(engine, adapter):
+def test_fixed_stop_and_t2_limit_exit_preview(engine, adapter):
     entry = filled(engine, adapter)
     adapter.price = 125
     assert engine.protection_preview(entry["id"]) is None
-    assert engine.status()["intents"][0]["stop_loss"] == pytest.approx(117)
+    assert engine.status()["intents"][0]["stop_loss"] == pytest.approx(85.5)
     adapter.price = 140
     preview = engine.protection_preview(entry["id"])
     assert preview["reason"] == "target_2" and preview["side"] == "SELL"
+    assert preview["order_type"] == "LIMIT" and preview["limit_price"] == 140
     assert len(adapter.writes) == 1  # preview is never an automatic protective write
 
 
@@ -382,25 +385,65 @@ def test_expiry_display_and_iso_conflicts_blocked(engine, adapter):
         engine.propose(payload)
 
 
-def test_step_trailing_moves_to_breakeven_then_up_five_points(engine, adapter):
+def test_profit_steps_never_trail_or_move_to_breakeven(engine, adapter):
     entry = filled(engine, adapter)
-    adapter.price = 106.99
-    assert engine.protection_preview(entry["id"]) is None
-    assert engine.status()["intents"][0]["stop_loss"] == 85.5
-    adapter.price = 107
-    assert engine.protection_preview(entry["id"]) is None
-    assert engine.status()["intents"][0]["stop_loss"] == 102
-    adapter.price = 112
-    assert engine.protection_preview(entry["id"]) is None
-    assert engine.status()["intents"][0]["stop_loss"] == 107
-    adapter.price = 117
-    assert engine.protection_preview(entry["id"]) is None
-    assert engine.status()["intents"][0]["stop_loss"] == 112
-    adapter.price = 109
+    for price in (106.99, 107, 112, 117, 109, 102):
+        adapter.price = price
+        assert engine.protection_preview(entry["id"]) is None
+        position = engine.status()["intents"][0]
+        assert position["stop_loss"] == position["initial_stop_loss"] == 85.5
+        assert "trail_steps" not in position
+    adapter.price = 85.5
     preview = engine.protection_preview(entry["id"])
-    assert preview["reason"] == "trailing_stop"
-    assert engine.status()["intents"][0]["stop_loss"] == 112
+    assert preview["reason"] == "stop_loss" and preview["order_type"] == "LIMIT"
+    assert engine.status()["intents"][0]["stop_loss"] == 85.5
     assert len(adapter.writes) == 1
+
+
+@pytest.mark.parametrize("field", ["order_type", "entry_order_type", "stop_order_type", "target_order_type"])
+def test_signal_market_policy_cannot_be_silently_ignored(engine, adapter, field):
+    payload = signal(adapter)
+    payload["metadata"][field] = "MARKET"
+    with pytest.raises(LiveBlocked, match="LIMIT only"):
+        engine.propose(payload)
+    assert not engine.status()["intents"]
+    assert not adapter.writes
+
+
+def test_restart_removes_legacy_trailing_stop(engine, adapter, broker):
+    entry = filled(engine, adapter)
+    with engine._db() as db:
+        persisted = engine._get(db, entry["id"])
+        persisted.update(stop_loss=112, trail_steps=3)
+        engine._save(db, persisted)
+    restarted = LiveExecution(engine.db_path, broker, enabled=True, practice=False,
+                              auto=True, clock=lambda: adapter.now)
+    adapter.sequence += 1
+    adapter.price = 109
+    assert restarted.protection_preview(entry["id"]) is None
+    position = restarted.status()["intents"][0]
+    assert position["stop_loss"] == 85.5 and "trail_steps" not in position
+
+
+@pytest.mark.parametrize("edit", [{"order_type": "MARKET"}, {"limit_price": 101}])
+def test_app_order_policy_or_limit_edit_is_not_accepted_as_fill(engine, adapter, edit):
+    item = approved(engine, adapter)
+    adapter.report(item, 65, "FILLED", actual=65)
+    adapter.orders[item["correlation_id"]].update(edit)
+    with pytest.raises(LiveBlocked, match="LIMIT"):
+        engine.reconcile()
+    assert engine.status()["intents"][0]["filled_quantity"] == 0
+    assert len(adapter.writes) == 1
+
+
+@pytest.mark.parametrize("reason", ["manual", "time_limit", "stop_loss", "target_2"])
+def test_all_exit_reasons_remain_limit_only(engine, adapter, reason):
+    entry = filled(engine, adapter)
+    preview = engine.request_exit(entry["id"], reason=reason)
+    assert preview["order_type"] == "LIMIT"
+    engine.bind(preview["id"], 7, -9)
+    assert engine.approve(preview["id"], 1, 7, -9)["status"] == "PENDING"
+    assert all(item["order_type"] == "LIMIT" for item in adapter.writes)
 
 
 def test_lagging_position_snapshot_conservatively_halts_later_catchup(engine, adapter):

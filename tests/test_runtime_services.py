@@ -109,7 +109,7 @@ class QueueConsumerWorkerTests(unittest.TestCase):
             self.assertEqual(1, len(db.fetch_latest_positions()))
             self.assertEqual(0, len(worker.dhan_integration.calls))
             self.assertEqual(
-                {"trade_control"},
+                set(),
                 {channel for channel, _ in notifier.telegram_handler.calls},
             )
 
@@ -173,7 +173,7 @@ class QueueConsumerWorkerTests(unittest.TestCase):
             )
 
             self.assertTrue(worker.process_one())
-            self.assertEqual([("telegram", "delivery_failed")], metrics.errors)
+            self.assertEqual([], metrics.errors)
 
     def test_failures_are_requeued_with_retry_metadata(self):
         queue = SignalQueueProcessor()
@@ -208,11 +208,11 @@ class SignalNotifierRoutingTests(unittest.TestCase):
         signal.update(overrides)
         return signal
 
-    def test_service_alerts_route_only_to_trade_control(self):
+    def test_service_alerts_never_route_to_trade_control(self):
         handler = _FakeTelegramHandler()
         SignalNotifier(handler).notify_service_alert("Queue consumer error", "boom")
 
-        self.assertEqual(["trade_control"], [channel for channel, _ in handler.calls])
+        self.assertEqual([], handler.calls)
 
     def test_nifty_auto_mode_suppresses_non_execution_trade_control_messages(self):
         handler = _FakeTelegramHandler()
@@ -237,9 +237,7 @@ class SignalNotifierRoutingTests(unittest.TestCase):
         notifier.notify_order(self._signal(category="commodity_options"), order, True)
         notifier.notify_position_update(self._signal(category="commodity_options"), 1, 100.0)
 
-        self.assertEqual(["trade_control"], [channel for channel, _ in handler.calls])
-        self.assertIn("Position updated", handler.calls[0][1])
-        self.assertNotIn("Order FILLED", handler.calls[0][1])
+        self.assertEqual([], handler.calls)
 
     def test_paper_option_lifecycle_reports_open_and_all_close_reasons(self):
         for exit_price, reason, expected_rupees in (
@@ -274,37 +272,16 @@ class SignalNotifierRoutingTests(unittest.TestCase):
                     updated_at="2026-10-05T10:00:00+05:30",
                 )
 
-                self.assertTrue(notifier.notify_paper_trade_opened(signal, order))
+                self.assertFalse(notifier.notify_paper_trade_opened(signal, order))
+                self.assertEqual([], notifier.paper_option_contracts())
                 self.assertEqual(
-                    [{"security_id": 123, "exchange_segment": "NSE_FNO"}],
-                    notifier.paper_option_contracts(),
-                )
-                opened = handler.calls[0][1]
-                for field in (
-                    "PAPER TRADE OPENED",
-                    "NIFTY-Oct2026-25000-CE",
-                    "Entry Premium: ₹100.00",
-                    "Stop Loss: ₹90.00",
-                    "Target 1 (1R): ₹110.00",
-                    "Target 2 (2R): ₹120.00",
-                    "Qty/Lots: 100 units (2 lot(s) × 50)",
-                    "Time: 2026-10-05T10:00:00+05:30",
-                ):
-                    self.assertIn(field, opened)
-
-                self.assertEqual(
-                    1,
+                    0,
                     notifier.update_paper_trades(
                         {("NSE_FNO", 123): exit_price},
                         exit_time="2026-10-05T10:05:00+05:30",
                     ),
                 )
-                closed = handler.calls[1][1]
-                self.assertIn("PAPER TRADE CLOSED", closed)
-                self.assertIn(f"Reason: {reason}", closed)
-                self.assertIn(f"P&L: {exit_price - 100:+.2f} points | {expected_rupees}", closed)
-                self.assertIn("Entry Time: 2026-10-05T10:00:00+05:30", closed)
-                self.assertIn("Exit Time: 2026-10-05T10:05:00+05:30", closed)
+                self.assertEqual([], handler.calls)
                 self.assertEqual([], notifier.paper_option_contracts())
 
     def test_option_strategy_signals_route_only_to_service_alerts(self):
@@ -320,7 +297,10 @@ class SignalNotifierRoutingTests(unittest.TestCase):
             with self.subTest(category=category):
                 handler = _FakeTelegramHandler()
                 SignalNotifier(handler).notify_strategy_signal(self._signal(category=category))
-                self.assertEqual(["service_alerts"], [channel for channel, _ in handler.calls])
+                self.assertEqual(
+                    [TelegramHandler.CHANNEL_ALIASES.get(category, category)],
+                    [channel for channel, _ in handler.calls],
+                )
 
     def test_option_strategy_signals_route_by_metadata_or_symbol(self):
         signals = [
@@ -329,11 +309,13 @@ class SignalNotifierRoutingTests(unittest.TestCase):
             self._signal(symbol="MCXGOLD"),
             self._signal(symbol="RELIANCE"),
         ]
-        for signal in signals:
+        for signal, expected in zip(signals, [
+            "commodity_options", "index_options", "commodity_options", "nifty50_stock_options",
+        ]):
             with self.subTest(signal=signal):
                 handler = _FakeTelegramHandler()
                 SignalNotifier(handler).notify_strategy_signal(signal)
-                self.assertEqual(["service_alerts"], [channel for channel, _ in handler.calls])
+                self.assertEqual([expected], [channel for channel, _ in handler.calls])
 
     def test_disabled_strategy_categories_are_not_sent(self):
         categories = [
@@ -364,24 +346,26 @@ class SignalNotifierRoutingTests(unittest.TestCase):
             "BOT_SERVICE_ALERTS_TOKEN": "alerts-token",
             "CHANNEL_SERVICE_ALERTS_ID": "-1002",
         }
-        with patch.dict(os.environ, env), patch("telegram_handler.requests.Session.post") as post:
+        with patch.dict(os.environ, env, clear=True), patch("telegram_handler.requests.Session.post") as post:
             post.return_value = SimpleNamespace(status_code=200)
             notifier = SignalNotifier(TelegramHandler())
-            self.assertTrue(notifier.send_test_message("trade_control", "probe"))
+            self.assertFalse(notifier.send_test_message("trade_control", "probe"))
             self.assertTrue(notifier.send_test_message("service_alerts", "probe"))
             self.assertFalse(notifier.send_test_message("crypto", "probe"))
 
         sent = [(call.args[0], call.kwargs["json"]["chat_id"]) for call in post.call_args_list]
         self.assertEqual(
             [
-                ("https://api.telegram.org/bottrade-token/sendMessage", -1001),
                 ("https://api.telegram.org/botalerts-token/sendMessage", -1002),
             ],
             sent,
         )
 
-    def test_only_two_channels_are_active(self):
-        self.assertEqual({"trade_control", "service_alerts"}, set(TelegramHandler.BOT_CONFIG))
+    def test_only_category_and_execution_channels_are_active(self):
+        self.assertEqual(
+            {"trade_control", "index_options", "commodity_options", "nifty50_stock_options"},
+            set(TelegramHandler.BOT_CONFIG),
+        )
 
 
 class MarketScannerWorkerTests(unittest.TestCase):

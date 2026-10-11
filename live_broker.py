@@ -26,6 +26,7 @@ class LiveNotSent(LiveBlocked):
 
 
 PRODUCTION_BLOCKERS = (
+    "Super Order stop leg has no independently configurable LIMIT price/type; LIMIT entry does not verify LIMIT stop execution",
     "verified production funds and margin schemas/adapters",
     "authoritative production ownership/order/trade reconciliation adapter",
     "verified Dhan Super Order placement and protection/restart recovery",
@@ -184,20 +185,16 @@ class LiveBroker:
         quantity = positive(order["quantity"])
         if not quantity.is_integer():
             raise LiveBlocked("invalid quantity")
-        if entry and (quantity % order["lot_size"] or not 1 <= quantity / order["lot_size"] <= 5):
-            raise LiveBlocked("entry requires 1..5 complete lots")
-        if order["order_type"] not in ("MARKET", "LIMIT"):
-            raise LiveBlocked("unsupported order type")
+        if entry and quantity != order["lot_size"]:
+            raise LiveBlocked("entry requires exactly one complete lot")
+        self.limit_only(order)
         quote = self.read("quote", str(order["security_id"]))
         premium = positive(quote.get("price"))
         if entry and "reference_high" in order and premium <= positive(order["reference_high"]):
             raise LiveBlocked("current actual premium not above reference high")
-        if order["order_type"] == "LIMIT":
-            price = positive(order["limit_price"])
-            if Decimal(str(price)) % Decimal(str(order["tick_size"])):
-                raise LiveBlocked("price off tick")
-        else:
-            price = premium
+        price = positive(order["limit_price"])
+        if Decimal(str(price)) % Decimal(str(order["tick_size"])):
+            raise LiveBlocked("price off tick")
         if entry:
             funds = self.read("funds")
             margin = self.read("margin", order)
@@ -209,6 +206,13 @@ class LiveBroker:
             if not math.isfinite(available) or available < max(required, price * quantity):
                 raise LiveBlocked("insufficient funds")
         return max(price * quantity, required if entry else 0)
+
+    @staticmethod
+    def limit_only(order):
+        if order.get("order_type", "LIMIT") != "LIMIT" or any(
+                order.get(field, "LIMIT") != "LIMIT"
+                for field in ("entry_order_type", "stop_order_type", "target_order_type")):
+            raise LiveBlocked("LIMIT only for every leg; MARKET fallback is forbidden")
 
     def write(self, order, *, known_correlations=()):
         try:

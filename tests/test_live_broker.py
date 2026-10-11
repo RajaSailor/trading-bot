@@ -120,7 +120,7 @@ def test_master_itself_must_be_whitelisted(broker, adapter):
         broker.write(order(adapter))
 
 
-@pytest.mark.parametrize("quantity", [1, 64, 66, 390, True, 65.5])
+@pytest.mark.parametrize("quantity", [1, 64, 66, 130, 325, 390, True, 65.5])
 def test_invalid_entry_units(broker, adapter, quantity):
     with pytest.raises(LiveBlocked):
         broker.write(order(adapter, quantity=quantity))
@@ -171,12 +171,20 @@ def test_sell_only_authoritative_owned_residual_less_pending(broker, adapter):
         broker.write(order(adapter, side="SELL", quantity=30, owned_quantity=65))
 
 
-def test_market_uses_current_funds_and_quote(broker, adapter):
-    adapter.price = 120
-    assert broker.preflight(order(adapter, order_type="MARKET")) == 7800
-    adapter.available = 7700
-    with pytest.raises(LiveBlocked, match="funds"):
-        broker.write(order(adapter, order_type="MARKET"))
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+@pytest.mark.parametrize("field", ["order_type", "entry_order_type", "stop_order_type", "target_order_type"])
+def test_market_is_forbidden_on_every_leg(broker, adapter, side, field):
+    adapter.positions["123"] = 65 if side == "SELL" else 0
+    with pytest.raises(LiveBlocked, match="LIMIT only"):
+        broker.write(order(adapter, side=side, owned_quantity=65, **{field: "MARKET"}))
+    assert not adapter.writes
+
+
+def test_limit_entry_does_not_prove_limit_stop(broker):
+    status = broker.readiness()
+    assert status["super_order_ready"] is False
+    assert status["production_ready"] is False
+    assert "Super Order stop leg has no independently configurable LIMIT price/type; LIMIT entry does not verify LIMIT stop execution" in status["blockers"]
 
 
 @pytest.mark.parametrize("quantity", [float("nan"), float("inf"), -1, True, "65"])

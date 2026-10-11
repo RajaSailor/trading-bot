@@ -43,27 +43,19 @@ Build Command:
 pip install -r requirements.txt
 
 Start Command:
-python main.py
+gunicorn main:app --workers 1 --threads 4 --bind 0.0.0.0:$PORT
 
 Instance Type: Starter (Free tier OK for testing)
 Auto-Deploy: Enabled
 ```
 
-### Step 2: Critical - Update Start Command
+### Step 2: One deployed scanner process
 
-⚠️ **IMPORTANT:** Your Render dashboard currently has the wrong start command!
-
-**Current (WRONG):**
-```
-gunicorn main:app --bind 0.0.0.0:$PORT
-```
-
-**Update to (CORRECT):**
-```
-python main.py
-```
-
-**Why?** The trading bot runs as a persistent Telegram bot, not a web server. It doesn't use Gunicorn.
+`main:app` is the Flask API and starts the background workers. Use exactly one
+Gunicorn worker so scanner observations and the process-local quote budget are
+not duplicated. Do not also start `unified_main.py` or a second scanner service.
+Persistent storage is required for lifecycle/report recovery; free ephemeral
+storage is not suitable for that requirement.
 
 ---
 
@@ -76,14 +68,30 @@ python main.py
 3. Click "Add Environment Variable"
 4. Add these variables:
 
-#### **REQUIRED - Telegram Configuration**
+#### **REQUIRED - Telegram Configuration (finalized category migration)**
 ```
-TELEGRAM_BOT_TOKEN = your_default_telegram_bot_token
-TELEGRAM_CHAT_ID = your_default_telegram_chat_id
+BOT_SERVICE_ALERTS_TOKEN = <IITS bot token in Render secrets>
+BOT_TRADE_CONTROL_TOKEN = <separate execution bot token in Render secrets>
 TELEGRAM_TEST_SECRET = your_private_telegram_test_secret
-CHANNEL_TRADE_CONTROL_ID = your_trade_control_channel_id
-CHANNEL_SERVICE_ALERTS_ID = your_service_alerts_channel_id
+INDEX_OPTIONS_CHANNEL_ID = -1004402571102
+COMMODITY_OPTIONS_CHANNEL_ID = -1004492725416
+STOCK_OPTIONS_CHANNEL_ID = -1004496485914
+CHANNEL_TRADE_CONTROL_ID = -1003704821776
+CHANNEL_SERVICE_ALERTS_ID = -1004402571102
 ```
+
+The destinations above are user configuration examples, not code defaults. Give
+the **same IITS bot** posting permission in all three signal channels. Keep the
+old `CHANNEL_SERVICE_ALERTS_ID` during migration; verify independent category
+readiness in `/health` and a routing probe in each category, then remove it.
+Only an **absent** `INDEX_OPTIONS_CHANNEL_ID` permits the old index fallback.
+An empty/invalid new key fails closed. Both keys never cause a double send.
+Missing stock/commodity routes never fall back to index or Trade Control.
+
+Trade Control is reserved for actual real NIFTY fills and insufficient balance.
+Paper controls, approval cards, practice probes, routine service alerts and
+summaries cannot post there. Paper testing uses logs; `/telegram/paper` is
+disabled. `/telegram/test` permits only signal routes with the test secret.
 
 #### **REQUIRED - DhanHQ Configuration**
 ```
@@ -103,7 +111,53 @@ ENABLE_DHAN_TOKEN_RENEWAL = true
 LOG_LEVEL = INFO
 TIMEZONE = Asia/Kolkata
 TRADING_DB_PATH = /var/data/trading.db
+SIGNAL_DB_PATH = /var/data/signals.db
+PREMIUM_ALERT_STATE_FILE = /var/data/premium_alert_state.json
+NIFTY_LIVE_ENABLED = false
+LIVE_DB_PATH = /var/data/live_trading.db
 ```
+
+Use persistent disk storage for both the signal SQLite database and anti-chop
+state, and one scanner process. Signal/report outbox delivery retries with
+backoff; Telegram has no idempotent-send primitive, so an ambiguous accepted
+send followed by a crash may repeat the **same event ID**, never open a new
+signal. Monitor undelivered events in `/health`. Do not deploy multiple scanner
+workers via Gunicorn.
+
+### Pre-live verification checklist
+
+- [ ] Keep `PRACTICE_MODE=true`, `AUTO_TRADING_ENABLED=false`,
+      `NIFTY_LIVE_ENABLED=false` during verification.
+- [ ] Verify all three channel permissions, no cross-category fallback, and no
+      Trade Control paper/service/report output.
+- [ ] Verify fresh live quotes and completed 10-minute history during an open
+      exchange session, including stale/out-of-order and 429 behavior.
+- [ ] Restart with an unresolved signal; verify the original contract and
+      single underlying lock survive, and reports/outbox do not reopen it.
+- [ ] Verify current IST exchange holidays and MCX DST/half-day schedules;
+      maintain `EXCHANGE_EXTRA_HOLIDAYS` and the calendar for future years.
+- [ ] Independently verify official Dhan funds/margin and complete account
+      order/trade/position schemas, one-lot units, static egress IP and token
+      validity, with no real order during tests.
+- [ ] Verify **every** protection leg is LIMIT-only. This release cannot prove
+      Dhan Super Order stop-leg LIMIT execution and has no verified alternative
+      protection adapter; `/health` therefore remains production-blocked.
+- [ ] Verify partial/unknown orders block entry, actual fills determine 2R,
+      broker app edits are respected, and a 15:25 IST LIMIT-only exit attempt
+      never marks an unfilled position closed or creates a duplicate sell.
+
+There is **no flag-only live activation in this release**. A future independently
+verified adapter must resolve every reported capability blocker before the
+user explicitly sets all three live flags (`PRACTICE_MODE=false`,
+`AUTO_TRADING_ENABLED=true`, `NIFTY_LIVE_ENABLED=true`). Changing one or even all
+flags now does not enable production. A LIMIT stop/exit may not fill in a gap;
+monitoring and manual closure in the Dhan app remain necessary.
+
+The subscription screenshot and updated Render token are not authenticated API
+evidence. The [official data API](https://dhanhq.co/docs/v2/market-quote/) and
+[rate limits](https://dhanhq.co/docs/v2/) still apply; an upgraded subscription
+does not remove 429s or improve strategy win rate by itself. Reuse batched quotes
+and existing bounded data retries; never log access tokens or full auth errors.
 
 #### **OPTIONAL - Risk Management**
 ```

@@ -103,6 +103,12 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             client = main_module.app.test_client()
 
                             self.assertEqual(client.get("/health").status_code, 200)
+                            health = client.get("/health").get_json()
+                            self.assertIn("signal_lifecycle", health)
+                            self.assertFalse(health["nifty_live"]["production_ready"])
+                            self.assertFalse(health["nifty_live"]["trailing_enabled"])
+                            self.assertIsNone(main_module.dhan_bridge.alert_chat_id)
+                            self.assertEqual(403, client.post("/telegram/paper", json={}).status_code)
                             self.assertEqual(client.get("/dhan/health").status_code, 200)
                             self.assertEqual(client.get("/strategy").status_code, 200)
                             risk_response = client.get("/risk")
@@ -155,9 +161,9 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                     headers={"X-Webhook-Secret": "admin-secret"},
                                     json={"channel": "trade_control", "message": "probe"},
                                 )
-                                self.assertEqual(200, trade_control_response.status_code)
+                                self.assertEqual(400, trade_control_response.status_code)
                                 self.assertEqual("trade_control", trade_control_response.get_json()["channel"])
-                                send_test_message.assert_called_once_with("trade_control", "probe")
+                                send_test_message.assert_not_called()
                             with patch.object(
                                 main_module.signal_notifier, "send_test_message", return_value=True
                             ) as unsupported_send:
@@ -194,7 +200,7 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             )
                             self.assertEqual(bad_webhook_response.status_code, 400)
 
-    def test_alert_manager_routes_to_trade_control_not_service_alerts(self):
+    def test_alert_manager_never_routes_routine_alerts_to_trade_control(self):
         main_module = _load_main()
         created_channels = []
 
@@ -224,13 +230,9 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                             with patch.object(main_module, "TelegramAlertChannel", _RecordingTelegramAlertChannel):
                                 self.assertTrue(main_module.initialize_app())
 
-                                self.assertTrue(main_module.phase_components["alert_manager"])
-                                self.assertEqual(1, len(created_channels))
+                                self.assertFalse(main_module.phase_components["alert_manager"])
+                                self.assertEqual(0, len(created_channels))
                                 self.assertEqual(created_channels, main_module.alert_manager.channels)
-                                self.assertEqual("trade-token", created_channels[0].bot_token)
-                                self.assertEqual("-1001111111111", created_channels[0].chat_id)
-                                self.assertNotEqual("service-token", created_channels[0].bot_token)
-                                self.assertNotEqual("-1002222222222", created_channels[0].chat_id)
 
                                 client = main_module.app.test_client()
                                 for channel in ("trade_control", "service_alerts"):
@@ -242,9 +244,12 @@ class MainPhaseIntegrationTests(unittest.TestCase):
                                             headers={"X-Webhook-Secret": "admin-secret"},
                                             json={"channel": channel, "message": "probe"},
                                         )
-                                        self.assertEqual(200, response.status_code)
+                                        self.assertEqual(400 if channel == "trade_control" else 200, response.status_code)
                                         self.assertEqual(channel, response.get_json()["channel"])
-                                        send_test_message.assert_called_once_with(channel, "probe")
+                                        if channel == "trade_control":
+                                            send_test_message.assert_not_called()
+                                        else:
+                                            send_test_message.assert_called_once_with(channel, "probe")
 
     def test_alert_manager_ignores_service_alerts_only_configuration(self):
         main_module = _load_main()

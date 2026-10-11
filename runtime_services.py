@@ -11,6 +11,7 @@ from typing import Callable, Optional
 from data_manager import (
     REQUIRED_SCANNER_DEPENDENCIES,
     DataManager,
+    NIFTY_50_STOCKS,
     get_shared_data_manager,
     log_market_data_dependency_status,
     market_data_dependency_status,
@@ -32,20 +33,15 @@ from timezone_utils import ensure_timezone, now_local_iso
 
 logger = logging.getLogger(__name__)
 
-INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "SENSEX"}
+INDEX_SYMBOLS = {"NIFTY", "NIFTY50", "BANKNIFTY", "SENSEX"}
 COMMODITY_SYMBOLS = {"GOLD", "SILVER", "CRUDE", "CRUDEOIL", "NATURALGAS", "MCXGOLD", "MCXSILVER", "MCXCRUDE", "MCXNATURALGAS"}
 # Retained only to classify crypto symbols into the disabled "crypto" category
 # so their signals are dropped instead of being treated as option alerts.
 CRYPTO_SYMBOLS = {"BTC", "ETH", "BTCUSD", "ETHUSD"}
 
-# Final two-bot operating model:
-# - trade_control: automated/paper trade lifecycle updates + all system/service alerts
-# - service_alerts: combined options market screener (strategy) alerts
+# Strategy signals have separate category destinations; Trade Control is execution-only.
 TRADE_CONTROL_CHANNEL = "trade_control"
-# The "service_alerts" key and its BOT_SERVICE_ALERTS_TOKEN / CHANNEL_SERVICE_ALERTS_ID
-# env names are intentionally retained for deployment compatibility; the route now
-# carries the combined options screener alerts.
-SCREENER_ALERTS_CHANNEL = "service_alerts"
+SCREENER_ALERTS_CHANNEL = "index_options"
 
 # Only the three screener segments are supported (canonical names + legacy spellings).
 SUPPORTED_STRATEGY_CATEGORIES = SCREENER_CATEGORIES | SCREENER_CATEGORY_ALIASES
@@ -90,16 +86,18 @@ class SignalNotifier:
 
     def notify_strategy_signal(self, signal: dict) -> bool:
         metadata = signal.get("metadata") or {}
+        if signal.get("_lifecycle_managed") or metadata.get("_lifecycle_managed"):
+            return True
         message = self.format_strategy_signal(signal)
         latency_marks = metadata.get("latency_marks")
         delivered = False
         for channel in self.channels_for_signal(signal):
-            if latency_marks and channel == SCREENER_ALERTS_CHANNEL:
+            if latency_marks and channel in SCREENER_CATEGORIES:
                 marks = dict(latency_marks)
                 marks["send_start"] = now_mark()
                 get_latency_tracker().record(marks)
             sent = self._send(channel, message)
-            if channel == SCREENER_ALERTS_CHANNEL and sent:
+            if channel in SCREENER_CATEGORIES and sent:
                 metadata["sent_at"] = now_local_iso()
                 delivered = True
         metadata["alert_sent"] = delivered
@@ -111,6 +109,7 @@ class SignalNotifier:
             compact = SCREENER_ALERTS_CHANNEL in self.channels_for_signal(signal)
             alert = {
                 **metadata,
+                "signal_id": signal.get("signal_id") or metadata.get("signal_id"),
                 "symbol": signal.get("symbol"),
                 "underlying": metadata.get("underlying") or signal.get("symbol"),
                 "category": metadata.get("category") or signal.get("category") or metadata.get("route_category"),
@@ -121,7 +120,8 @@ class SignalNotifier:
             }
             return format_option_breakout_alert(alert, practice_mode=self.practice_mode, compact=compact)
         lines = [
-            "📡 Strategy signal queued",
+            "📡 POSITION OPEN TRIGGER",
+            f"Signal ID: {signal.get('signal_id', 'N/A')}",
             f"Symbol: {signal['symbol']}",
             f"Action: {signal['action']}",
         ]
@@ -132,73 +132,31 @@ class SignalNotifier:
             lines.append(f"Timeframe: {metadata['timeframe']}")
         lines.append(f"Source: {metadata.get('source', 'unknown')}")
         lines.append(f"Time: {signal.get('timestamp', now_local_iso())}")
+        lines.append("Observed strategy signal only; no broker execution implied")
         return "\n".join(lines)
 
     def notify_order(self, signal: dict, order: Order, practice_mode: bool) -> None:
-        if practice_mode and order.status.value == "FILLED":
+        if practice_mode or self.practice_mode is True:
             return
-        state = "practice" if practice_mode else "live"
+        if order.status.value not in {"FILLED", "PARTIALLY_FILLED"}:
+            return
+        if not getattr(order, "filled_quantity", 0) or order.price <= 0:
+            return
+        heading = "EXIT EXECUTED" if signal.get("action") == "EXIT" else "ENTRY EXECUTED"
         message = (
-            f"📈 Order {order.status.value}\n"
+            f"📈 {heading}\n"
             f"Symbol: {order.symbol}\n"
             f"Side: {order.side}\n"
-            f"Quantity: {order.quantity}\n"
-            f"Mode: {state}\n"
+            f"Actual filled quantity: {order.filled_quantity}\n"
+            f"Broker fill price: {order.price:.2f}\n"
+            f"Signal ID: {signal.get('signal_id', 'N/A')}\n"
             f"Order ID: {order.order_id}\n"
             f"Time: {order.updated_at}"
         )
-        self._send(TRADE_CONTROL_CHANNEL, message)
+        self._deliver(TRADE_CONTROL_CHANNEL, message)
 
     def notify_paper_trade_opened(self, signal: dict, order: Order) -> bool:
-        metadata = signal.get("metadata") or {}
-        if not metadata.get("premium_strategy") or order.status.value != "FILLED":
-            return False
-
-        try:
-            security_id = int(metadata["security_id"])
-            quantity = max(1, int(order.filled_quantity or order.quantity))
-            lot_size = max(1, int(metadata.get("lot_size") or 1))
-            entry = float(order.price)
-            stop_loss = float(metadata.get("stop_loss", signal.get("stop_loss")))
-        except (KeyError, TypeError, ValueError):
-            return False
-        option_symbol = metadata.get("option_symbol")
-        exchange_segment = metadata.get("exchange_segment")
-        if not option_symbol or not exchange_segment or entry <= stop_loss:
-            return False
-
-        risk = entry - stop_loss
-        trade = {
-            "trade_id": order.order_id,
-            "symbol": metadata.get("underlying") or signal.get("symbol", ""),
-            "option_symbol": option_symbol,
-            "security_id": security_id,
-            "exchange_segment": exchange_segment,
-            "entry": entry,
-            "stop_loss": stop_loss,
-            "target_1": round(entry + risk, 2),
-            "target_2": round(entry + 2 * risk, 2),
-            "quantity": quantity,
-            "lot_size": lot_size,
-            "entry_time": order.updated_at or now_local_iso(),
-        }
-        with self._paper_trades_lock:
-            if trade["trade_id"] in self._paper_option_trades:
-                return False
-            self._paper_option_trades[trade["trade_id"]] = trade
-
-        message = (
-            "🧪 PAPER TRADE OPENED\n"
-            f"Symbol: {html.escape(str(trade['symbol']))}\n"
-            f"Option: {html.escape(str(option_symbol))}\n"
-            f"Entry Premium: ₹{entry:.2f}\n"
-            f"Stop Loss: ₹{stop_loss:.2f}\n"
-            f"Target 1 (1R): ₹{trade['target_1']:.2f}\n"
-            f"Target 2 (2R): ₹{trade['target_2']:.2f}\n"
-            f"Qty/Lots: {quantity * lot_size} units ({quantity} lot(s) × {lot_size})\n"
-            f"Time: {trade['entry_time']}"
-        )
-        return self._send(TRADE_CONTROL_CHANNEL, message)
+        return False
 
     def paper_option_contracts(self) -> list[dict]:
         with self._paper_trades_lock:
@@ -265,30 +223,37 @@ class SignalNotifier:
     def channels_for_signal(self, signal: dict) -> list[str]:
         category = (
             signal.get("category")
-            or signal.get("metadata", {}).get("route_category")
-            or self._category_from_symbol(signal.get("symbol", ""))
+            or (signal.get("metadata") or {}).get("category")
+            or (signal.get("metadata") or {}).get("route_category")
+            or self._category_from_symbol(
+                (signal.get("metadata") or {}).get("underlying") or signal.get("symbol", "")
+            )
         )
         if category in DISABLED_STRATEGY_CATEGORIES:
             logger.info("Strategy category '%s' is disabled; alert not routed", category)
             return []
         if category in SUPPORTED_STRATEGY_CATEGORIES:
-            return [SCREENER_ALERTS_CHANNEL]
-        # Anything else (manual/unknown categories) stays on the control channel.
-        return [TRADE_CONTROL_CHANNEL]
+            return [TelegramHandler.CHANNEL_ALIASES.get(category, category)]
+        return []
 
     def _category_from_symbol(self, symbol: str) -> str:
-        normalized = "".join(ch for ch in symbol.upper() if ch.isalnum())
-        if any(token in normalized for token in ("GOLD", "SILVER", "CRUDE", "NATURALGAS", "MCX")):
-            return "commodity"
-        if any(token in normalized for token in INDEX_SYMBOLS):
-            return "index"
-        if any(token in normalized for token in CRYPTO_SYMBOLS):
+        normalized = str(symbol).strip().upper()
+        if normalized in COMMODITY_SYMBOLS:
+            return "commodity_options"
+        if normalized in INDEX_SYMBOLS:
+            return "index_options"
+        if normalized in CRYPTO_SYMBOLS:
             return "crypto"
-        return "nifty50_options"
+        if normalized in NIFTY_50_STOCKS:
+            return "nifty50_stock_options"
+        return ""
 
     def _send(self, channel: str, message: str) -> bool:
-        if self.trade_control_lifecycle_only and channel == TRADE_CONTROL_CHANNEL:
+        if TelegramHandler.CHANNEL_ALIASES.get(channel, channel) == TRADE_CONTROL_CHANNEL:
             return False
+        return self._deliver(channel, message)
+
+    def _deliver(self, channel: str, message: str) -> bool:
         self.delivery_attempts += 1
         if self.telegram_handler.send_to_channel(channel, message):
             return True
@@ -420,6 +385,9 @@ class QueueConsumerWorker:
             return {"status": "signal_only", "reason": "non-NIFTY instruments are never live-routed"}
         if self.live_route is not None and self.live_route.targets(signal):
             return self.live_route.propose(signal)
+        metadata = signal.get("metadata") or {}
+        if metadata.get("premium_strategy") or signal.get("strategy") == "premium_screener":
+            return {"status": "signal_only", "reason": "premium strategy signals do not create paper trades"}
         if self.paper_portfolio is not None:
             metadata = signal.get("metadata") or {}
             quote = None
@@ -635,10 +603,19 @@ class MarketScannerWorker:
         signal_acceptor: Callable[[dict, bool], bool],
         runtime_config: dict,
         paper_trade_notifier: SignalNotifier | None = None,
+        signal_lifecycle=None,
+        lifecycle_maintenance_enabled: bool = True,
     ) -> None:
         self.signal_acceptor = signal_acceptor
         self.runtime_config = runtime_config
         self.paper_trade_notifier = paper_trade_notifier
+        self.signal_lifecycle = signal_lifecycle
+        self.lifecycle_maintenance_enabled = lifecycle_maintenance_enabled
+        try:
+            maintenance_seconds = float(runtime_config.get("scanner_poll_seconds", 5.0))
+        except (TypeError, ValueError):
+            maintenance_seconds = 5.0
+        self.lifecycle_poll_seconds = max(1.0, min(5.0, maintenance_seconds))
         self.enabled = bool(runtime_config.get("scanner_enabled"))
         self.idle_seconds = _env_seconds("SCANNER_IDLE_SECONDS", 300.0, 5.0)
         self.live_poll_seconds = _env_seconds("LIVE_TRIGGER_POLL_SECONDS", 1.0, 1.0)
@@ -648,6 +625,7 @@ class MarketScannerWorker:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._live_thread: Optional[threading.Thread] = None
+        self._maintenance_thread: Optional[threading.Thread] = None
         self._scanner: Optional[PremiumScreener] = None
         self._data_manager: Optional[DataManager] = None
         self._last_run_at: str | None = None
@@ -675,6 +653,16 @@ class MarketScannerWorker:
         return True
 
     def start(self, poll_seconds: float = 5.0) -> bool:
+        if self.lifecycle_maintenance_enabled and self.signal_lifecycle is not None and not (
+            self._maintenance_thread and self._maintenance_thread.is_alive()
+        ):
+            self._stop_event.clear()
+            self._maintenance_thread = threading.Thread(
+                target=self._maintain_lifecycle,
+                daemon=True,
+                name="signal-lifecycle-maintenance",
+            )
+            self._maintenance_thread.start()
         if not self.enabled:
             return False
         if self._thread and self._thread.is_alive():
@@ -699,7 +687,7 @@ class MarketScannerWorker:
 
     def stop(self) -> None:
         self._stop_event.set()
-        for thread in (self._thread, self._live_thread):
+        for thread in (self._thread, self._live_thread, self._maintenance_thread):
             if thread and thread is not threading.current_thread():
                 thread.join(timeout=5)
 
@@ -710,6 +698,9 @@ class MarketScannerWorker:
             "enabled": self.enabled,
             "running": bool(self._thread and self._thread.is_alive()),
             "live_trigger_running": bool(self._live_thread and self._live_thread.is_alive()),
+            "lifecycle_maintenance_running": bool(
+                self._maintenance_thread and self._maintenance_thread.is_alive()
+            ),
             "market_state": self._market_state,
             "submitted_signals": self._submitted_signals,
             "last_run_at": self._last_run_at,
@@ -721,6 +712,15 @@ class MarketScannerWorker:
             "latency_ms": get_latency_tracker().summary(),
             "rss_mb": current_rss_mb(),
         }
+
+    def _maintain_lifecycle(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                data_manager = self._data_manager or get_shared_data_manager()
+                self.signal_lifecycle.maintenance(data_manager)
+            except Exception as exc:
+                logger.error("Signal lifecycle maintenance failed: %s", exc.__class__.__name__)
+            self._stop_event.wait(self.lifecycle_poll_seconds)
 
     def _idle_wait(self) -> None:
         """Sleep while every exchange is closed; free the security master once."""
@@ -794,6 +794,7 @@ class MarketScannerWorker:
             _NullPositionManager(),
             signal_callback=self._enqueue_signal,
             paper_trade_notifier=self.paper_trade_notifier,
+            **({"signal_lifecycle": self.signal_lifecycle} if self.signal_lifecycle is not None else {}),
         )
 
     def _enqueue_signal(self, payload: dict) -> bool:

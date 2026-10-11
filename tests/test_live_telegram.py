@@ -58,15 +58,15 @@ def test_modify_version_lots_market_limit_and_reject(controller, engine, adapter
     changed = controller.handle_update(update(item, "lots:5"), SECRET)
     assert not changed["ok"]
     market = controller.handle_update(update(item, "market", update_id=2), SECRET)
-    assert market["result"]["proposal"]["order_type"] == "MARKET"
+    assert not market["ok"]
     message = {"update_id": 3, "message": {
         "from": {"id": 7}, "chat": {"id": -9},
-        "text": f"/live_limit {item['id']} 2 101.05",
+        "text": f"/live_limit {item['id']} 1 101.05",
     }}
     limit = controller.handle_update(message, SECRET)
-    assert limit["result"]["proposal"]["version"] == 3
+    assert limit["result"]["proposal"]["version"] == 2
     assert limit["result"]["proposal"]["limit_price"] == 101.05
-    result = controller.handle_update(update(item, "reject", version=3, update_id=4), SECRET)
+    result = controller.handle_update(update(item, "reject", version=2, update_id=4), SECRET)
     assert result["result"]["status"] == "REJECTED"
     assert not adapter.writes
 
@@ -143,22 +143,20 @@ def test_card_reports_unavailable_balance_without_claiming_value(controller, eng
     assert rendered["context"]["estimated_funds"] == 6500
 
 
-def test_market_selection_only_modifies_then_requires_fresh_authenticated_approval(controller, engine, adapter):
+def test_legacy_library_market_selection_denied_without_changing_limit_approval(controller, engine, adapter):
     item = card(controller, engine, adapter)
     modified = controller.handle_update(update(item, "market", update_id=1), SECRET)
-    assert modified["ok"]
-    preview = modified["result"]
-    assert preview["proposal"]["order_type"] == "MARKET"
-    assert preview["proposal"]["version"] == 2
-    assert preview["reply_markup"]["inline_keyboard"][0][0]["text"] == "Approve Market"
-    assert "approve its new version separately" in preview["text"]
+    assert not modified["ok"]
+    assert "LIMIT only" in modified["error"]
+    proposal = engine.status()["intents"][0]
+    assert proposal["order_type"] == "LIMIT" and proposal["version"] == 1
     assert not adapter.writes
-    assert not controller.handle_update(update(item, version=1, update_id=2), SECRET)["ok"]
-    assert not controller.handle_update(update(item, version=2, update_id=3), "wrong-secret")["ok"]
+    assert not controller.handle_update(update(item, version=2, update_id=2), SECRET)["ok"]
+    assert not controller.handle_update(update(item, version=1, update_id=3), "wrong-secret")["ok"]
     assert not adapter.writes
-    approved = controller.handle_update(update(item, version=2, update_id=4), SECRET)
+    approved = controller.handle_update(update(item, version=1, update_id=4), SECRET)
     assert approved["ok"] and approved["result"]["status"] == "PENDING"
-    assert len(adapter.writes) == 1 and adapter.writes[0]["order_type"] == "MARKET"
+    assert len(adapter.writes) == 1 and adapter.writes[0]["order_type"] == "LIMIT"
 
 
 def test_auto_mode_exposes_no_approval_card_or_manual_control(controller, engine, adapter):

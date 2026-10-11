@@ -71,7 +71,7 @@ def test_candles_remain_separate_for_each_contract_timeframe():
     }
 
 
-def test_main_forces_practice_and_forwards_webhook_header(monkeypatch):
+def test_main_forces_practice_and_never_forwards_disabled_paper_control(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.setenv("PRACTICE_MODE", "false")
     monkeypatch.setenv("AUTO_TRADING_ENABLED", "true")
@@ -87,12 +87,12 @@ def test_main_forces_practice_and_forwards_webhook_header(monkeypatch):
         headers={"X-Telegram-Bot-Api-Secret-Token": "test-header"},
     )
     assert response.status_code == 403
-    control.handle_update.assert_called_once_with({"update_id": 1}, "test-header")
+    control.handle_update.assert_not_called()
     control.reset_mock()
     oversized = main.app.test_client().post(
         "/telegram/paper", data=b"x" * 65537, content_type="application/json",
     )
-    assert oversized.status_code == 413
+    assert oversized.status_code == 403
     control.handle_update.assert_not_called()
 
 
