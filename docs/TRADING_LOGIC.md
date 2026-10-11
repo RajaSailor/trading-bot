@@ -41,6 +41,8 @@
   events, report cursors and a durable outbox. Opening and terminal notifications
   are atomically enqueued with state transitions. Telegram delivery is
   at-least-once: ambiguous sends may repeat an event ID, not a signal opening.
+  Retries preserve event ordering within each category without blocking healthy
+  categories. Large reports use bounded, stable-ID parts.
 - Category reports run after the last applicable calendar session close:
   index NSE/BSE, stocks NSE, commodities MCX (DST and half-day aware).
   Calendar holidays/weekends are skipped and report cursors survive restarts.

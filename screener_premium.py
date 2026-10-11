@@ -608,17 +608,20 @@ class PremiumScreener:
         # or any broker fill. Callback failure must never release the OPEN lock.
         delivered = durable_accepted or delivered
         if delivered:
-            signal["sent_at"] = (
-                signal.get("_delivery_payload", {}).get("metadata", {}).get("sent_at")
-                or self._as_ist(self.clock()).isoformat()
-            )
+            callback_sent_at = signal.get("_delivery_payload", {}).get("metadata", {}).get("sent_at")
+            if durable_accepted:
+                signal["durable_accepted_at"] = self._as_ist(self.clock()).isoformat()
+                signal["sent_at"] = callback_sent_at
+            else:
+                signal["sent_at"] = callback_sent_at or self._as_ist(self.clock()).isoformat()
             self._last_entries[entry_key] = signal["breakout_price"]
             self._alert_state.state["configuration"].update({
                 "last_entries": self._last_entries,
                 "emitted_references": self._processed_signal_order,
                 "last_delivery": {
                     key: signal.get(key) for key in (
-                        "reference_timestamp", "first_crossing_timestamp", "detected_at", "sent_at",
+                        "reference_timestamp", "first_crossing_timestamp", "detected_at",
+                        "durable_accepted_at", "sent_at",
                         "reference_high", "breakout_price",
                     )
                 },
@@ -732,8 +735,7 @@ class PremiumScreener:
             logger.warning("⚠️ Unsupported screener category '%s', alert skipped", category)
             return False
 
-        # Single combined options screener channel: no fan-out to retired
-        # NIFTY50 5X / pay-later routes.
+        # Route only to this category; never fan out to other or retired channels.
         return self.telegram_handler.send_signal_alert(category, signal, telegram_payload)
 
     @staticmethod

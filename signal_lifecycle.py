@@ -341,20 +341,19 @@ class SignalLifecycle:
                         db.execute("INSERT INTO lifecycle_reports VALUES(?,?,?)",
                                    (category, day.isoformat(), json.dumps(report)))
                         event_id = f"REPORT:{category}:{day.isoformat()}"
-                        details = "\n".join(
+                        details = [
                             f"{_text(underlying)}: Opened {outcomes['opened']} | "
                             f"Targets {outcomes['targets']} | Stops {outcomes['stops']} | "
                             f"Unresolved {outcomes['unresolved']} | Win rate {outcomes['winrate']}"
-                            for underlying, outcomes in per_underlying.items())
-                        self._enqueue(db, event_id, category,
-                                      f"<b>DAILY SIGNAL REPORT</b>\n{_text(category)} | {day.isoformat()}\n"
-                                      f"Event ID: {_text(event_id)}\n"
-                                      f"Opened: {totals['opened']}\n"
-                                      f"Target achieved: {totals['targets']}\n"
-                                      f"Stop triggered: {totals['stops']}\n"
-                                      f"Unresolved as of close: {totals['unresolved']}\n"
-                                      f"Win rate: {totals['winrate']}\n"
-                                      f"{details}\nHypothetical signal outcomes, not execution fills or realized P&amp;L.")
+                            for underlying, outcomes in per_underlying.items()]
+                        header = (
+                            f"<b>DAILY SIGNAL REPORT</b>\n{_text(category)} | {day.isoformat()}\n"
+                            f"Opened: {totals['opened']}\n"
+                            f"Target achieved: {totals['targets']}\n"
+                            f"Stop triggered: {totals['stops']}\n"
+                            f"Unresolved as of close: {totals['unresolved']}\n"
+                            f"Win rate: {totals['winrate']}\n")
+                        self._enqueue_report(db, event_id, category, header, details)
                     db.execute("UPDATE lifecycle_meta SET value=? WHERE key=?",
                                (day.isoformat(), cursor_key))
                     day += timedelta(days=1)
@@ -370,6 +369,25 @@ class SignalLifecycle:
             row["closed_at"] is None or row["closed_at"] > cutoff) for row in rows)
         return dict(opened=opened, targets=targets, stops=stops, unresolved=unresolved,
                     winrate=f"{100 * targets / (targets + stops):.2f}%" if targets + stops else "N/A")
+
+    def _enqueue_report(self, db, event_id, category, header, details):
+        disclaimer = "\nHypothetical signal outcomes, not execution fills or realized P&amp;L."
+        # Reserve room for stable part IDs, including any practical part count.
+        budget = 3500 - len(header) - len(disclaimer) - len(event_id) - 80
+        chunks = [""]
+        for line in details:
+            if len(line) > budget:
+                raise ValueError("underlying report row exceeds notification size budget")
+            candidate = chunks[-1] + ("\n" if chunks[-1] else "") + line
+            if len(candidate) > budget:
+                chunks.append(line)
+            else:
+                chunks[-1] = candidate
+        for index, chunk in enumerate(chunks, 1):
+            part_id = f"{event_id}:PART:{index:04d}"
+            message = (header + f"Part {index}/{len(chunks)}\nEvent ID: {_text(part_id)}\n"
+                       + chunk + disclaimer)
+            self._enqueue(db, part_id, category, message)
 
     def dispatch_notifications(self, now=None, limit=100):
         """Serialize send+ack via SQLite write transaction, including across processes.
@@ -420,7 +438,9 @@ class SignalLifecycle:
                 quotes = data_manager.fetch_quotes(request) or {}
             except Exception:
                 quotes = {}
-            self.observe_quotes(quotes, current if now is not None else self._now())
+            if now is None:
+                current = self._now()
+            self.observe_quotes(quotes, current)
         self._schedule_reports(current)
         self.dispatch_notifications(current)
         return self.status()

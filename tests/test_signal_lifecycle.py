@@ -327,6 +327,47 @@ class LifecycleTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 SignalLifecycle(path, clock=lambda: self.now)
 
+    def test_maintenance_accepts_source_trade_advanced_during_fetch(self):
+        self.lifecycle.open_once(payload())
+        self.now += timedelta(seconds=1)
+        data = MagicMock()
+
+        def fetch(request):
+            self.now += timedelta(seconds=2)
+            return self.quote(200)
+
+        data.fetch_quotes.side_effect = fetch
+        self.lifecycle.maintenance(data)
+        self.assertEqual(0, self.lifecycle.status()["open"])
+        self.assertEqual(1, self.lifecycle.status()["target"])
+        self.assertIn("TARGET ACHIEVED", self.sent[-1][1])
+
+    def test_many_underlying_reports_chunk_deterministically_once_across_restart(self):
+        symbols = [f"STOCK{index:03d}" for index in range(50)]
+        for symbol in symbols:
+            self.assertIsNotNone(self.lifecycle.open_once(payload(
+                underlying=symbol, category="nifty50_stock_options", key=symbol)))
+        self.lifecycle.dispatch_notifications()
+        self.sent.clear()
+        self.now = NOW.replace(hour=16)
+        self.lifecycle.maintenance(MagicMock(), self.now)
+        stock_messages = [message for category, message in self.sent
+                          if category == "nifty50_stock_options"]
+        self.assertGreater(len(stock_messages), 1)
+        self.assertTrue(all(len(message) <= 3500 for message in stock_messages))
+        self.assertIn(":PART:0001", stock_messages[0])
+        self.assertIn(":PART:0002", stock_messages[1])
+        combined = "\n".join(stock_messages)
+        self.assertTrue(all(combined.count(symbol + ":") == 1 for symbol in symbols))
+        report = next(report for report in self.reports()
+                      if report["category"] == "nifty50_stock_options")
+        self.assertEqual(50, len(report["per_underlying"]))
+        self.assertEqual(50, report["unresolved"])
+        sent_before = list(self.sent)
+        self.restart().maintenance(MagicMock(), self.now)
+        self.assertEqual(sent_before, self.sent)
+        self.assertEqual(2, len(self.reports()))
+
 
 if __name__ == "__main__":
     unittest.main()

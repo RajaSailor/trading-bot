@@ -174,6 +174,9 @@ class BreakoutFlowTests(_Base):
         self.assertEqual(1, self.screener.live_check_once(self.clock_now))
         self.assertEqual(112.45, callback_payloads[0]["entry_price"])
         self.assertEqual(1, lifecycle.status()["pending_notifications"])
+        timing = self.screener._alert_state.get_config("last_delivery")
+        self.assertEqual(self.clock_now.isoformat(), timing["durable_accepted_at"])
+        self.assertIsNone(timing["sent_at"])
         self.assertEqual(112.41, next(iter(self.screener._last_entries.values())))
         with patch.object(self.screener.fetcher, "resolve_strike_band") as select:
             self.assertEqual(0, self.screener._refresh_instrument(self.index, "10min", self.clock_now))
