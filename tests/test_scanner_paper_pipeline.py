@@ -69,6 +69,7 @@ def pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "signal_notifier", notifier)
     monkeypatch.setattr(main, "paper_portfolio", portfolio)
     monkeypatch.setattr(main, "trading_db", None)
+    monkeypatch.setattr(main, "signal_lifecycle", None)
     monkeypatch.setattr(main, "runtime_config", {"max_position_size": 100})
     monkeypatch.setattr("signal_processor.now_local_iso", lambda: datetime.fromtimestamp(clock.now, IST).isoformat())
     instrument = SimpleNamespace(symbol="NIFTY", category="index_options", exchange="NSE")
@@ -275,6 +276,7 @@ def test_health_separates_configuration_outbox_and_submission_state(pipeline, mo
     assert response.status_code == 200
     health = response.get_json()
     assert health["revision"] == "a" * 40
+    assert health["signal_lifecycle"] == {}
     assert health["paper_telegram"]["enabled"] is False
     assert "logs only" in health["paper_telegram"]["reason"]
     assert health["paper_outbox"]["pending"] == 0
