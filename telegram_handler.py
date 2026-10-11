@@ -15,10 +15,10 @@ import requests
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
-# Canonical screener segments carried by the combined screener channel.
+# Canonical screener segments, each with an independently configured destination.
 SCREENER_CATEGORIES = frozenset({"index_options", "commodity_options", "nifty50_stock_options"})
 # Legacy spellings of the same three segments.
-SCREENER_CATEGORY_ALIASES = frozenset({"index", "commodity", "nifty50_options"})
+SCREENER_CATEGORY_ALIASES = frozenset({"index", "commodity", "nifty50_options", "stock_options"})
 # Retired segments: alerts for these categories are rejected, never delivered.
 DISABLED_CATEGORIES = frozenset(
     {"crypto", "nifty50_intraday_5x", "nifty50_5x", "nifty50_pay_later", "nifty50_paylater"}
@@ -83,19 +83,11 @@ def format_option_breakout_alert(
     icon = "🚀"
     category = str(alert.get("category") or alert.get("route_category") or "")
     category_label = _CATEGORY_LABELS.get(category, category.replace("_", " ").upper() or "OPTIONS")
-    target_1 = alert.get("target_1")
-    target_2 = alert.get("target_2")
-    try:
-        entry = float(alert["entry"])
-        stop_loss = float(alert["stop_loss"])
-        risk = entry - stop_loss
-        target_1 = round(entry + risk, 2)
-        target_2 = round(entry + 2 * risk, 2)
-    except (KeyError, TypeError, ValueError):
-        if target_2 is None:
-            target_2 = alert.get("target")
-            if target_2 is None and alert.get("targets"):
-                target_2 = alert["targets"][0]
+    target = alert.get("target")
+    if target is None and alert.get("targets"):
+        target = alert["targets"][0]
+    if target is None:
+        target = alert.get("target_2")
     breakout_timestamp = alert.get("breakout_timestamp")
     breakout_ist = (
         format_ist_timestamp(breakout_timestamp, with_seconds=True)
@@ -106,7 +98,9 @@ def format_option_breakout_alert(
     if observed_price is None:
         observed_price = alert.get("premium_ltp")
     lines = [
+        "📡 <b>POSITION OPEN TRIGGER</b>",
         f"{icon} <b>{esc(action)}</b> | <b>{esc(alert.get('underlying') or alert.get('symbol'))}</b> ({esc(category_label)})",
+        f"Signal ID: {esc(alert.get('signal_id'))}",
         f"Option: <b>{esc(alert.get('option_symbol'))}</b>",
         f"Strike: {esc(_fmt_strike(alert.get('strike')))} {esc(option_type)} | Band: {esc(alert.get('strike_band'))}",
         f"Expiry: {esc(alert.get('expiry'))}",
@@ -115,14 +109,13 @@ def format_option_breakout_alert(
         f"Entry: {esc(_fmt_price(alert.get('entry')))}",
         f"Stop Loss: {esc(_fmt_price(alert.get('stop_loss')))}",
         f"Risk: {esc(_fmt_price(alert.get('risk_points')))} points",
-        f"Target 1 (1R): {esc(_fmt_price(target_1))}",
-        f"Target 2 (2R): {esc(_fmt_price(target_2))}",
+        f"Target: {esc(_fmt_price(target))}",
         "",
-        f"⚡ Breakout: {esc(breakout_ist)} @ {esc(_fmt_price(observed_price))}",
+        f"⚡ Observed signal breakout: {esc(breakout_ist)} @ {esc(_fmt_price(observed_price))}",
     ]
     lines.append(f"Underlying spot: {esc(_fmt_price(alert.get('spot_ltp')))}")
     if practice_mode:
-        lines.append("🧪 PRACTICE MODE: alert only, no live order placed")
+        lines.append("🧪 PRACTICE MODE: signal only, no paper or live order placed")
     elif practice_mode is False:
         lines.append("📌 SIGNAL ONLY: strategy observation, no broker entry implied")
     else:
@@ -132,37 +125,39 @@ def format_option_breakout_alert(
 
 
 class TelegramHandler:
-    """Telegram delivery for the final two-bot routing model.
-
-    Exactly two bots/channels are active:
-      * ``trade_control``  - automated/paper trade lifecycle + system/service alerts
-      * ``service_alerts`` - combined options screener alerts (stock, index, commodity)
-
-    The ``service_alerts`` key and its ``BOT_SERVICE_ALERTS_TOKEN`` /
-    ``CHANNEL_SERVICE_ALERTS_ID`` env names are intentionally kept for deployment
-    compatibility even though the channel now carries screener alerts.
-    """
+    """Category destinations share a screener bot; real executions use Trade Control."""
 
     BOT_CONFIG = {
         "trade_control": {
-            "channel_id": -1001234567894,
             "channel_env": "CHANNEL_TRADE_CONTROL_ID",
             "token_env": "BOT_TRADE_CONTROL_TOKEN",
-            "description": "Trade approvals, execution updates + service alerts",
+            "description": "Real execution lifecycle only",
         },
-        "service_alerts": {
-            "channel_id": -1001234567895,
-            "channel_env": "CHANNEL_SERVICE_ALERTS_ID",
+        "index_options": {
+            "channel_env": "INDEX_OPTIONS_CHANNEL_ID",
+            "legacy_channel_env": "CHANNEL_SERVICE_ALERTS_ID",
             "token_env": "BOT_SERVICE_ALERTS_TOKEN",
-            "description": "Combined options screener alerts (stock/index/commodity)",
+            "description": "Index option strategy signals",
+        },
+        "commodity_options": {
+            "channel_env": "COMMODITY_OPTIONS_CHANNEL_ID",
+            "token_env": "BOT_SERVICE_ALERTS_TOKEN",
+            "description": "Commodity option strategy signals",
+        },
+        "nifty50_stock_options": {
+            "channel_env": "STOCK_OPTIONS_CHANNEL_ID",
+            "token_env": "BOT_SERVICE_ALERTS_TOKEN",
+            "description": "Stock option strategy signals",
         },
     }
-    CHANNELS = {category: config["channel_id"] for category, config in BOT_CONFIG.items()}
-    # The three supported screener segments all deliver to the single screener bot.
     CHANNEL_ALIASES = {
-        **{category: "service_alerts" for category in SCREENER_CATEGORIES | SCREENER_CATEGORY_ALIASES},
+        "index": "index_options",
+        "commodity": "commodity_options",
+        "nifty50_options": "nifty50_stock_options",
+        "stock_options": "nifty50_stock_options",
+        "service_alerts": "index_options",
         "trade": "trade_control",
-        "service": "service_alerts",
+        "service": "index_options",
     }
     DISABLED_CATEGORIES = DISABLED_CATEGORIES
 
@@ -181,10 +176,8 @@ class TelegramHandler:
         logger.info("📱 TELEGRAM BOT CONFIGURATION")
         logger.info("=" * 80)
         for category, config in self.BOT_CONFIG.items():
-            category_token = self._env_first(config["token_env"], *config.get("token_aliases", [])) or self.default_token
-            configured_channel = self._env_first(config["channel_env"], *config.get("channel_aliases", []))
-            channel_id = int(configured_channel or config["channel_id"])
-            status = "✅" if category_token else "⚠️ (missing token)"
+            category_token, channel_id = self._get_bot_for_category(category)
+            status = "✅" if category_token and channel_id else "⚠️ (missing token or destination)"
             logger.info(
                 "%s [%s] Channel: %s | %s",
                 status,
@@ -212,17 +205,22 @@ class TelegramHandler:
             return False
         return category.lower() in cls.DISABLED_CATEGORIES
 
-    def _get_bot_for_category(self, category: str) -> tuple[str, int]:
+    def _get_bot_for_category(self, category: str) -> tuple[str, Optional[int]]:
         normalized_category = self.CHANNEL_ALIASES.get(category, category)
         if normalized_category not in self.BOT_CONFIG:
-            logger.warning("⚠️ Unknown Telegram category '%s', using default channel", category)
-            fallback_chat = int(self.default_chat_id or "-1004321977761")
-            return self.default_token, fallback_chat
+            logger.warning("⚠️ Unknown Telegram category '%s'; delivery blocked", category)
+            return "", None
 
         config = self.BOT_CONFIG[normalized_category]
-        category_token = self._env_first(config["token_env"], *config.get("token_aliases", [])) or self.default_token
-        configured_channel = self._env_first(config["channel_env"], *config.get("channel_aliases", []))
-        channel_id = int(configured_channel or config["channel_id"])
+        category_token = os.getenv(config["token_env"], "").strip()
+        # An explicitly empty new key disables the route; only absence allows legacy.
+        configured_channel = os.getenv(config["channel_env"])
+        if configured_channel is None:
+            configured_channel = os.getenv(config.get("legacy_channel_env", ""), "")
+        try:
+            channel_id = int(configured_channel)
+        except (TypeError, ValueError):
+            return category_token, None
         logger.debug("🔍 [%s] Routed to channel %s", normalized_category.upper(), channel_id)
         return category_token, channel_id
 
@@ -242,6 +240,8 @@ class TelegramHandler:
         }
 
     def send_signal_alert(self, category: str, signal_data: dict, option_data: dict) -> bool:
+        if self.CHANNEL_ALIASES.get(category, category) == "trade_control":
+            return False
         if self.is_disabled_category(category):
             logger.warning("⚠️ [%s] Category is disabled, alert not sent", category.upper())
             return False
@@ -260,6 +260,8 @@ class TelegramHandler:
                 return False
 
             bot_token, chat_id = self._get_bot_for_category(category)
+            if not bot_token or not chat_id:
+                return False
 
             message = self.format_signal_message(category, signal_data, option_data)
             logger.info("📨 [%s] Sending to channel %s", category.upper(), chat_id)
@@ -435,7 +437,7 @@ class TelegramHandler:
                 alert[key] = option_data[key]
         if alert.get("strike") is None:
             alert["strike"] = option_data.get("strike_price", option_data.get("strike"))
-        compact = self.CHANNEL_ALIASES.get(category, category) == "service_alerts"
+        compact = self.CHANNEL_ALIASES.get(category, category) in SCREENER_CATEGORIES
         return format_option_breakout_alert(alert, compact=compact)
 
     def _format_spot_signal_message(self, category: str, signal_data: dict, option_data: dict) -> str:
@@ -470,8 +472,8 @@ class TelegramHandler:
         )
 
     def _send_message(self, chat_id: int, message: str, token: Optional[str] = None) -> bool:
-        token = token or self.default_token
-        if not token:
+        token = self.default_token if token is None else token
+        if not token or not chat_id:
             logger.warning("❌ No Telegram token available")
             return False
 
@@ -510,7 +512,10 @@ class TelegramHandler:
                 f"⏰ Test Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}\n\n"
                 "If you see this message, the bot is working correctly! 🎉"
             )
-            sent = self._send_message(channel_id, test_message, token)
+            sent = bool(
+                category != "trade_control" and token and channel_id
+                and self._send_message(channel_id, test_message, token)
+            )
             status = "✅ WORKING" if sent else "❌ FAILED"
             results[category] = {
                 "category": category,

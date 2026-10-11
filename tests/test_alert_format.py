@@ -60,12 +60,15 @@ class AlertFormatTests(unittest.TestCase):
             "option_symbol": "CRUDEOIL-15Oct2026-8650-CE", "strike": 8650,
             "expiry": "15OCT2026", "entry": 316.50, "stop_loss": 289.37,
             "risk_points": 27.13, "breakout_price": 318.50, "premium_ltp": 999,
+            "target": 370.76,
             "breakout_timestamp": "2026-10-07T16:12:51+05:30", "spot_ltp": 8714,
             "indicator_confirmations": {"ready": True}, "volume": 999,
             "reference_high": 316.50, "detected_at": "2026-10-07T16:13:00+05:30",
         }
         expected = (
+            "📡 POSITION OPEN TRIGGER\n"
             "🚀 BUY CALL | CRUDE OIL (COMMODITY OPTIONS)\n"
+            "Signal ID: N/A\n"
             "Option: CRUDEOIL-15Oct2026-8650-CE\n"
             "Strike: 8650 CE | Band: ITM+1\n"
             "Expiry: 15OCT2026\n\n"
@@ -73,11 +76,10 @@ class AlertFormatTests(unittest.TestCase):
             "Entry: 316.50\n"
             "Stop Loss: 289.37\n"
             "Risk: 27.13 points\n"
-            "Target 1 (1R): 343.63\n"
-            "Target 2 (2R): 370.76\n\n"
-            "⚡ Breakout: 07-Oct-2026 16:12:51 IST @ 318.50\n"
+            "Target: 370.76\n\n"
+            "⚡ Observed signal breakout: 07-Oct-2026 16:12:51 IST @ 318.50\n"
             "Underlying spot: 8714.00\n"
-            "🧪 PRACTICE MODE: alert only, no live order placed\n\n"
+            "🧪 PRACTICE MODE: signal only, no paper or live order placed\n\n"
             "📢 DISCLAIMER: Educational purposes only."
         )
         for compact in (False, True):
@@ -100,9 +102,8 @@ class AlertFormatTests(unittest.TestCase):
             "Entry: 120.00",
             "Stop Loss: 95.00",
             "Risk: 25.00 points",
-            "Target 1 (1R): 145.00",
-            "Target 2 (2R): 170.00",
-            "Breakout: 05-Oct-2026 10:31:05 IST @ 120.50",
+            "Target: 170.00",
+            "Observed signal breakout: 05-Oct-2026 10:31:05 IST @ 120.50",
             "PRACTICE MODE",
         ):
             self.assertIn(expected, message)
@@ -133,7 +134,9 @@ class AlertFormatTests(unittest.TestCase):
             compact=True,
         )
         self.assertEqual(
+            "📡 POSITION OPEN TRIGGER\n"
             "🚀 BUY CALL | BEL (STOCK OPTIONS)\n"
+            "Signal ID: N/A\n"
             "Option: BEL-Oct2026-380-CE\n"
             "Strike: 380 CE | Band: ATM\n"
             "Expiry: 27OCT2026\n"
@@ -142,12 +145,11 @@ class AlertFormatTests(unittest.TestCase):
             "Entry: 10.80\n"
             "Stop Loss: 9.03\n"
             "Risk: 1.77 points\n"
-            "Target 1 (1R): 12.57\n"
-            "Target 2 (2R): 14.34\n"
+            "Target: 14.34\n"
             "\n"
-            "⚡ Breakout: 05-Oct-2026 09:50:42 IST @ 10.95\n"
+            "⚡ Observed signal breakout: 05-Oct-2026 09:50:42 IST @ 10.95\n"
             "Underlying spot: 379.40\n"
-            "🧪 PRACTICE MODE: alert only, no live order placed\n"
+            "🧪 PRACTICE MODE: signal only, no paper or live order placed\n"
             "\n"
             "📢 DISCLAIMER: Educational purposes only.",
             _rendered_message(message),
@@ -172,7 +174,9 @@ class AlertFormatTests(unittest.TestCase):
         }
         message = format_option_breakout_alert(alert, practice_mode=False, compact=True)
         self.assertEqual(
+            "📡 POSITION OPEN TRIGGER\n"
             "🚀 BUY PUT | M&M (INDEX OPTIONS)\n"
+            "Signal ID: N/A\n"
             "Option: M&M-Oct2026-177.5-PE\n"
             "Strike: 177.50 PE | Band: OTM+1\n"
             "Expiry: 27OCT2026\n"
@@ -181,10 +185,9 @@ class AlertFormatTests(unittest.TestCase):
             "Entry: 4.57\n"
             "Stop Loss: 3.12\n"
             "Risk: 1.45 points\n"
-            "Target 1 (1R): 6.02\n"
-            "Target 2 (2R): 7.47\n"
+            "Target: 7.47\n"
             "\n"
-            "⚡ Breakout: 05-Oct-2026 10:31:05 IST @ 4.62\n"
+            "⚡ Observed signal breakout: 05-Oct-2026 10:31:05 IST @ 4.62\n"
             "Underlying spot: N/A\n"
             "📌 SIGNAL ONLY: strategy observation, no broker entry implied\n"
             "\n"
@@ -211,7 +214,7 @@ class AlertFormatTests(unittest.TestCase):
         alert = _queue_signal(breakout_time_ist="05-Oct-2026 10:31 IST")["metadata"]
         for compact in (False, True):
             message = format_option_breakout_alert(alert, compact=compact)
-            self.assertIn("Breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
+            self.assertIn("Observed signal breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
 
     def test_scanner_enrichment_and_queue_payload_preserve_observed_seconds(self):
         from types import SimpleNamespace
@@ -232,7 +235,7 @@ class AlertFormatTests(unittest.TestCase):
         payload = scanner._build_queue_payload(instrument, signal, "index_options", "premium_screener", contract)
         self.assertEqual("05-Oct-2026 10:31:05 IST", payload["metadata"]["breakout_time_ist"])
         message = SignalNotifier(_Handler()).format_strategy_signal(payload)
-        self.assertIn("Breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
+        self.assertIn("Observed signal breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
         self.assertNotIn("10:31:09 IST @", message)
 
     def test_compact_commodity_category_mapping(self):
@@ -256,7 +259,7 @@ class AlertFormatTests(unittest.TestCase):
         )
         self.assertIn("🚀 BUY PUT | GOLD (COMMODITY OPTIONS)", _rendered_message(message))
         self.assertNotIn("PRACTICE MODE", message)
-        self.assertIn("⚡ Breakout: 05-Oct-2026 09:50:00 IST @ 2904.50", _rendered_message(message))
+        self.assertIn("⚡ Observed signal breakout: 05-Oct-2026 09:50:00 IST @ 2904.50", _rendered_message(message))
 
     def test_put_alert_says_buy_put(self):
         message = format_option_breakout_alert(
@@ -273,10 +276,10 @@ class AlertFormatTests(unittest.TestCase):
             "runtime_services.now_mark", return_value=1.004
         ):
             SignalNotifier(handler).notify_strategy_signal(signal)
-        self.assertEqual(["service_alerts"], [channel for channel, _ in handler.calls])
-        self.assertIn("Target 1 (1R): 145.00", handler.calls[0][1])
-        self.assertIn("Target 2 (2R): 170.00", handler.calls[0][1])
-        self.assertIn("Breakout: 05-Oct-2026 10:31:05 IST @ 120.50", handler.calls[0][1])
+        self.assertEqual(["nifty50_stock_options"], [channel for channel, _ in handler.calls])
+        self.assertIn("Target: 170.00", handler.calls[0][1])
+        self.assertNotIn("Target 1", handler.calls[0][1])
+        self.assertIn("Observed signal breakout: 05-Oct-2026 10:31:05 IST @ 120.50", handler.calls[0][1])
         self.assertNotIn("Timeframe:", handler.calls[0][1])
         self.assertIn("10:31:05", handler.calls[0][1])
         summary = tracker.summary()
@@ -304,7 +307,7 @@ class AlertFormatTests(unittest.TestCase):
         for message in messages:
             for internal in ("PREMIUM CONFIRMATIONS", "EMA9", "MACD", "RSI14", "Evidence:"):
                 self.assertNotIn(internal, message)
-            self.assertIn("Breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
+            self.assertIn("Observed signal breakout: 05-Oct-2026 10:31:05 IST @ 120.50", message)
             self.assertIn("Band: ITM+1", message)
             self.assertLess(len(message), 4096)
 
@@ -338,22 +341,22 @@ class AlertFormatTests(unittest.TestCase):
         )
         for expected in ("BUY PUT", "NIFTY", "INDEX OPTIONS", "NIFTY-Oct2026-24500-PE", "Strike: 24500 PE",
                          "Band: ITM+1", "Expiry: 27OCT2026", "Entry: 50.00", "Stop Loss: 42.75",
-                         "Risk: 7.25 points", "Target 1 (1R): 57.25", "Target 2 (2R): 64.50"):
+                         "Risk: 7.25 points", "Target: 64.50"):
             self.assertIn(expected, message)
 
     def test_non_premium_signals_keep_compact_format(self):
         message = SignalNotifier(_Handler()).format_strategy_signal(
             {"symbol": "RELIANCE", "action": "BUY", "entry_price": 100, "metadata": {"source": "scanner"}}
         )
-        self.assertIn("Strategy signal queued", message)
+        self.assertIn("POSITION OPEN TRIGGER", message)
         self.assertIn("Entry: 100", message)
 
     def test_direct_premium_alert_uses_compact_service_format(self):
         handler = TelegramHandler()
         signal = {**_queue_signal()["metadata"], "symbol": "M&M", "signal": "CALL"}
         message = handler.format_signal_message("nifty50_stock_options", signal, {"option_symbol": "M&M-CE"})
-        self.assertIn("Target 1 (1R): 145.00", message)
-        self.assertIn("Target 2 (2R): 170.00", message)
+        self.assertNotIn("Target 1", message)
+        self.assertIn("Target: 170.00", message)
         self.assertIn("M&amp;M-CE", message)
         self.assertNotIn("Timeframe:", message)
         self.assertNotIn("Reference RED candle:", message)

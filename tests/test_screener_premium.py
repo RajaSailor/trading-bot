@@ -80,7 +80,7 @@ class _Base(unittest.TestCase):
         self.data_manager.resolve_underlying.return_value = None
         self.data_manager.fetch_ltp.return_value = {}
         self.alerts = []
-        directory = tempfile.TemporaryDirectory()
+        directory = tempfile.TemporaryDirectory(dir=".")
         self.addCleanup(directory.cleanup)
         self.alert_state_file = os.path.join(directory.name, "alerts.json")
         self.clock_now = MONDAY_MORNING
@@ -146,6 +146,67 @@ class SessionGatingTests(_Base):
 
 
 class BreakoutFlowTests(_Base):
+    def test_lifecycle_claim_precedes_callback_and_freezes_selection(self):
+        from signal_lifecycle import SignalLifecycle
+
+        lifecycle = SignalLifecycle(
+            os.path.join(os.path.dirname(self.alert_state_file), "signals.sqlite"),
+            clock=lambda: self.clock_now)
+        self.screener.signal_lifecycle = lifecycle
+        self._prime({101: [_candle(0, 100, 110, 95, 98)]})
+        self.screener._monitored[101]["contract"]["tick_size"] = .05
+        callback_payloads = []
+
+        def callback(incoming):
+            self.assertTrue(lifecycle.is_open("NIFTY"))
+            self.assertTrue(incoming["_lifecycle_managed"])
+            self.assertTrue(incoming["metadata"]["alert_sent"])
+            callback_payloads.append(incoming)
+            return False
+
+        self.screener.signal_callback = callback
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 110, "timestamp": MONDAY_MORNING.timestamp()}}
+        self.screener.live_check_once(MONDAY_MORNING)
+        self.clock_now += timedelta(seconds=1)
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 112.41, "timestamp": self.clock_now.timestamp()}}
+        self.assertEqual(1, self.screener.live_check_once(self.clock_now))
+        self.assertEqual(112.45, callback_payloads[0]["entry_price"])
+        self.assertEqual(1, lifecycle.status()["pending_notifications"])
+        self.assertEqual(112.41, next(iter(self.screener._last_entries.values())))
+        with patch.object(self.screener.fetcher, "resolve_strike_band") as select:
+            self.assertEqual(0, self.screener._refresh_instrument(self.index, "10min", self.clock_now))
+        select.assert_not_called()
+        self.assertEqual(0, self.screener.live_check_once(self.clock_now))
+
+    def test_lifecycle_missing_tick_does_not_deliver_or_advance_antichop(self):
+        from signal_lifecycle import SignalLifecycle
+
+        self.screener.signal_lifecycle = SignalLifecycle(
+            os.path.join(os.path.dirname(self.alert_state_file), "signals.sqlite"),
+            clock=lambda: self.clock_now)
+        self._prime({101: [_candle(0, 100, 110, 95, 98)]})
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 110, "timestamp": MONDAY_MORNING.timestamp()}}
+        self.screener.live_check_once(MONDAY_MORNING)
+        self.clock_now += timedelta(seconds=1)
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 112, "timestamp": self.clock_now.timestamp()}}
+        self.assertEqual(0, self.screener.live_check_once(self.clock_now))
+        self.assertEqual([], self.alerts)
+        self.assertEqual({}, self.screener._last_entries)
+        self.assertEqual(0, self.screener.signal_lifecycle.status()["open"])
+
+    def test_deliver_has_no_trade_control_approval_fallback(self):
+        self.screener.signal_callback = None
+        self.screener.trade_control_handler = MagicMock()
+        self.screener.trade_control_bot = MagicMock()
+        self.screener.position_manager.add_position.return_value = False
+        signal = {"signal": "CALL", "entry": 112, "stop_loss": 93.1, "targets": [149.8]}
+        self.assertFalse(self.screener._deliver(self.index, signal, _contract(101)))
+        self.screener.trade_control_bot.create_and_send_request.assert_not_called()
+
     def _prime(self, candles_by_id, now=MONDAY_MORNING):
         self.clock_now = now
         contracts = [_contract(101, "CE", "ITM+1", 24400), _contract(102, "CE", "ATM", 24450),

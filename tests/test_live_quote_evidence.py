@@ -56,3 +56,21 @@ def test_response_receipt_does_not_accept_future_or_stale_trade():
             NOW, NOW + 3,
         )
         assert quote["trade_timestamp"] is None
+
+
+def test_market_quote_diagnostics_are_safe_and_report_backoff(monkeypatch):
+    import data_manager
+
+    monkeypatch.setitem(data_manager._quote_rate_limiter, "last_http_status", 429)
+    monkeypatch.setitem(data_manager._quote_rate_limiter, "retry_at", NOW + 10)
+    monkeypatch.setattr(data_manager.time, "time", lambda: NOW)
+    status = data_manager.market_quote_diagnostics()
+    assert status["rate_limited"]
+    assert status["retry_in_seconds"] == 10
+    assert not status["auth_rejected"]
+    monkeypatch.setitem(data_manager._quote_rate_limiter, "last_http_status", 401)
+    assert data_manager.market_quote_diagnostics()["auth_rejected"]
+    assert set(status) == {
+        "last_http_status", "auth_rejected", "rate_limited", "retry_in_seconds",
+        "consecutive_failures", "last_valid_quote_at",
+    }

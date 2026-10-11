@@ -39,7 +39,20 @@ class LiveRoute:
             return {"status": "blocked", "reason": str(exc)}
 
     def status(self):
-        broker = self.execution.broker.readiness()
+        actual = self.execution.status()
+        safe_execution = {key: actual[key] for key in (
+            "enabled", "practice", "auto", "auto_mode", "production_ready",
+            "simulation_ready", "super_order_ready", "blockers",
+            "order_policy", "trailing_enabled") if key in actual}
+        safe_execution["account"] = {
+            key: actual["account"][key] for key in ("sequence", "halted", "write_busy")
+            if key in actual["account"]}
+        safe_execution["intents"] = [
+            {key: item[key] for key in (
+                "id", "side", "status", "quantity", "filled_quantity", "owned_quantity",
+                "order_type", "limit_price", "initial_stop_loss", "stop_loss", "target_2",
+                "average_price", "entry_day", "realized_pnl") if key in item}
+            for item in actual["intents"]]
         secret_valid = len(self.control.secret) >= 32
         configured = bool(secret_valid and self.control.allowed_actors and self.control.allowed_chats)
         return {
@@ -52,14 +65,16 @@ class LiveRoute:
                 "practice": self.execution.practice,
                 "auto": self.execution.auto,
             },
-            "simulation_ready": broker["simulation_ready"],
+            "simulation_ready": actual["simulation_ready"],
+            "order_policy": "LIMIT_ONLY",
+            "trailing_enabled": False,
+            "execution": safe_execution,
             "telegram_authorization_configured": configured,
             "inbound_registration_verified": False,
         }
 
     def handle_update(self, payload, secret):
-        result = self.control.handle_update(payload, secret)
-        return result, 200 if result.get("ok") else 403
+        return {"ok": False, "error": "runtime approval controls are disabled; automatic execution only"}, 403
 
 
 def build_live_route(config, *, paper_db_path):
@@ -73,7 +88,7 @@ def build_live_route(config, *, paper_db_path):
     broker = LiveBroker(None)
     execution = LiveExecution(
         path, broker, enabled=True, practice=config["practice"], auto=config["auto"],
-        auto_mode=config["auto"],
+        auto_mode=True,
     )
     control = LiveTelegram(
         execution, secret=config["webhook_secret"],

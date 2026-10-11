@@ -134,8 +134,7 @@ def callback(order_id, action="approve_limit", update_id=1, callback_id="cb1"):
     }}
 
 
-@pytest.mark.parametrize("action", ["approve_limit", "approve_market"])
-def test_actual_ce_pe_scanner_to_main_queue_portfolio_formatter(pipeline, action):
+def test_actual_ce_pe_scanner_to_main_queue_remains_signal_only(pipeline):
     p = pipeline
     assert scan(p) == 2
     queued = list(p.queue._queue)
@@ -157,31 +156,16 @@ def test_actual_ce_pe_scanner_to_main_queue_portfolio_formatter(pipeline, action
     assert p.worker.process_one() and p.worker.process_one()
     snapshot = p.portfolio.snapshot()
     assert not snapshot["executions"] and not snapshot["positions"]
-    assert len(snapshot["pending"]) == 2
-    messages = sent_messages(p)
-    approvals = [m for m in messages if "PENDING APPROVAL" in m["text"]]
-    assert len(approvals) == 2
-    for receipt in approvals:
-        assert receipt["chat_id"] == -100
-        assert {b["text"] for row in receipt["reply_markup"]["inline_keyboard"] for b in row} == {
-            "Approve Limit", "Approve Market", "Modify", "Reject"}
-    assert p.worker.status()["outcomes"] == {"awaiting_approval": 2}
+    assert not snapshot["pending"]
+    assert sent_messages(p) == []
+    assert p.worker.status()["outcomes"] == {"signal_only": 2}
     p.metrics.record_order_execution.assert_not_called()
     p.clock.now += 1
     p.portfolio.tick(p.data.fetch_quotes({"NSE_FNO": [101, 201]}))
-    for i, order in enumerate(snapshot["pending"], 1):
-        event = callback(order["id"], action, i, f"cb{i}")
-        assert p.control.handle_update(event, SECRET)[1] == 200
-        assert p.control.handle_update(event, SECRET)[1] == 200
-        event["update_id"] += 100
-        assert p.control.handle_update(event, SECRET)[1] == 200
     filled = p.portfolio.snapshot()
-    assert len(filled["positions"]) == 2 and len(filled["executions"]) == 2
+    assert not filled["positions"] and not filled["executions"]
     assert filled["account"]["mode"] == "PRACTICE"
-    assert all(position["quantity"] == 75 for position in filled["positions"])
-    assert {position["option_type"] for position in filled["positions"]} == {"CE", "PE"}
-    assert all(position["timeframe"] == "10min" for position in filled["positions"])
-    assert len([m for m in sent_messages(p) if "PENDING APPROVAL" in m["text"]]) == 2
+    assert sent_messages(p) == []
     p.broker.place_trade.assert_not_called()
     p.executor.execute_order.assert_not_called()
     assert scan(p) == 0
@@ -193,42 +177,34 @@ def test_queue_latency_expiry_and_duplicate_restart_do_not_freshen(pipeline):
     original = list(p.queue._queue)[0]
     p.clock.now += 61
     assert p.worker.process_one()
-    assert p.worker.status()["last_outcome"] == "rejected"
-    assert p.worker.status()["last_reason"] == "stale_signal"
+    assert p.worker.status()["last_outcome"] == "signal_only"
     assert not p.portfolio.snapshot()["positions"]
-    reopened = PaperPortfolio(p.portfolio.db_path, clock=lambda: p.clock.now, notify=p.control.send_event)
+    reopened = PaperPortfolio(p.portfolio.db_path, clock=lambda: p.clock.now)
     original["timestamp"] = datetime.fromtimestamp(p.clock.now, IST).isoformat()
     assert reopened.submit(original, {"price": 110, "timestamp": p.clock.now})["reason"] == "stale_signal"
-    receipts = [m for m in sent_messages(p) if "#REJECTED" in m["text"]]
-    assert len(receipts) == 1
-    assert original["signal_id"] in receipts[0]["text"]
-    assert "NIFTY-27OCT2026-24400-CE" in receipts[0]["text"]
+    assert sent_messages(p) == []
 
 
 @pytest.mark.parametrize("field", ["lot_size", "tick_size", "security_id"])
-def test_actual_scanner_missing_metadata_has_one_correlated_rejection(pipeline, field):
+def test_actual_scanner_missing_metadata_never_reaches_paper_submission(pipeline, field):
     p = pipeline
     assert scan(p) == 2
     signal = p.queue._queue[0]
     signal["metadata"].pop(field)
-    original = dict(signal)
     assert p.worker.process_one()
-    assert p.worker.status()["last_outcome"] == "rejected"
+    assert p.worker.status()["last_outcome"] == "signal_only"
     assert not p.portfolio.snapshot()["positions"]
-    p.portfolio.submit(original)
-    receipts = [m for m in sent_messages(p) if "#REJECTED" in m["text"]]
-    assert len(receipts) == 1 and original["signal_id"] in receipts[0]["text"]
-    assert "reply_markup" not in receipts[0]
+    assert sent_messages(p) == []
 
 
 @pytest.mark.parametrize("failure", [None, TimeoutError("unavailable")])
-def test_quote_outage_is_business_rejection_not_execution_or_retry(pipeline, failure):
+def test_quote_outage_does_not_turn_signal_into_paper_execution_or_retry(pipeline, failure):
     p = pipeline
     assert scan(p) == 2
     p.data.fetch_quotes.return_value = {}
     p.data.fetch_quotes.side_effect = failure
     assert p.worker.process_one()
-    assert p.worker.status()["last_reason"] == "no_price"
+    assert p.worker.status()["last_outcome"] == "signal_only"
     assert p.queue.queue_size() == 1
     assert not p.portfolio.snapshot()["positions"]
     p.metrics.record_order_execution.assert_not_called()
@@ -253,31 +229,25 @@ def test_invalid_side_timeframe_or_intent_never_becomes_buy_fill(pipeline, actio
     p.queue._queue[0]["metadata"]["timeframe"] = timeframe
     p.queue._queue[0]["metadata"]["signal"] = intent
     assert p.worker.process_one()
-    assert p.worker.status()["last_outcome"] == "rejected"
+    assert p.worker.status()["last_outcome"] == "signal_only"
     assert not p.portfolio.snapshot()["positions"]
-    assert len([m for m in sent_messages(p) if "#REJECTED" in m["text"]]) == 1
+    assert sent_messages(p) == []
 
 
-def test_database_failure_requeues_original_request_without_new_deadline(pipeline, monkeypatch):
+def test_paper_database_failure_cannot_requeue_signal_only_premium(pipeline, monkeypatch):
     p = pipeline
     assert scan(p) == 2
-    original = dict(p.queue._queue[0])
-    submit = p.portfolio.submit
     failing = Mock(side_effect=RuntimeError("database unavailable"))
     monkeypatch.setattr(p.portfolio, "submit", failing)
     assert p.worker.process_one()
-    retried = p.queue._queue[0]
-    assert retried["timestamp"] == original["timestamp"]
-    assert retried["detected_at"] == original["detected_at"]
-    assert retried["queue_received_at"] == original["queue_received_at"]
-    assert p.worker.status()["outcomes"] == {}
-    retried["retry_after_epoch"] = 0
+    failing.assert_not_called()
+    assert p.queue.queue_size() == 1
+    assert p.worker.status()["outcomes"] == {"signal_only": 1}
     p.clock.now += 20
-    monkeypatch.setattr(p.portfolio, "submit", submit)
     assert p.worker.process_one()
-    order = p.portfolio.snapshot()["pending"][0]
-    assert order["expires_at"] == p.clock.now - 20 + 60
-    assert p.worker.status()["last_outcome"] == "awaiting_approval"
+    assert not p.portfolio.snapshot()["pending"]
+    assert p.worker.status()["outcomes"] == {"signal_only": 2}
+    assert sent_messages(p) == []
 
 
 def test_history_load_is_silent_then_detection_uses_live_observation_clock(pipeline):
@@ -305,10 +275,10 @@ def test_health_separates_configuration_outbox_and_submission_state(pipeline, mo
     assert response.status_code == 200
     health = response.get_json()
     assert health["revision"] == "a" * 40
-    assert health["paper_telegram"]["outbound_ready"]
-    assert health["paper_telegram"]["inbound_ready"]
+    assert health["paper_telegram"]["enabled"] is False
+    assert "logs only" in health["paper_telegram"]["reason"]
     assert health["paper_outbox"]["pending"] == 0
-    assert health["workers"]["queue_consumer"]["outcomes"]["awaiting_approval"] == 1
+    assert health["workers"]["queue_consumer"]["outcomes"]["signal_only"] == 1
     assert health["paper_submissions"]["approval_required"]
     assert SECRET not in response.get_data(as_text=True)
     assert "fake-token" not in response.get_data(as_text=True)
@@ -339,7 +309,7 @@ def test_main_queue_preserves_shorter_original_deadline(pipeline, monkeypatch, d
     assert p.queue._queue[0][deadline_field] == p.clock.now + 20
     p.clock.now += 25
     assert p.worker.process_one()
-    assert p.worker.status()["last_reason"] == "stale_signal"
+    assert p.worker.status()["last_outcome"] == "signal_only"
     assert not p.portfolio.snapshot()["positions"]
 
 
@@ -377,11 +347,11 @@ def test_narrow_range_first_live_quote_emits_once_without_fill(pipeline):
     assert len(p.handler.send_to_channel.call_args_list) == 2
     assert p.worker.process_one() and p.worker.process_one()
     snapshot = p.portfolio.snapshot()
-    assert len(snapshot["pending"]) == 2 and not snapshot["executions"] and not snapshot["positions"]
-    assert len([m for m in sent_messages(p) if "PENDING APPROVAL" in m["text"]]) == 2
+    assert not snapshot["pending"] and not snapshot["executions"] and not snapshot["positions"]
+    assert sent_messages(p) == []
     p.broker.place_trade.assert_not_called()
 
-    # A re-detected reference cannot create a second approval after restart.
+    # A re-detected reference cannot create any paper approval after restart.
     restarted = PremiumScreener(
         p.data, p.handler, Mock(), signal_callback=p.scanner.signal_callback,
         clock=p.scanner.clock,
@@ -398,8 +368,8 @@ def test_narrow_range_first_live_quote_emits_once_without_fill(pipeline):
     while p.queue.queue_size():
         assert p.worker.process_one()
     snapshot = p.portfolio.snapshot()
-    assert len(snapshot["pending"]) == 2 and not snapshot["executions"]
-    assert len([m for m in sent_messages(p) if "PENDING APPROVAL" in m["text"]]) == 2
+    assert not snapshot["pending"] and not snapshot["executions"]
+    assert sent_messages(p) == []
 
 
 def test_stale_quote_stays_blocked_then_first_fresh_quote_alerts(pipeline):

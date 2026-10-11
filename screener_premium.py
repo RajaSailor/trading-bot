@@ -66,6 +66,7 @@ class PremiumScreener:
         paper_trade_notifier=None,
         clock=None,
         alert_state_file=None,
+        signal_lifecycle=None,
     ) -> None:
         self.data_manager = data_manager
         self.telegram_handler = telegram_handler
@@ -77,6 +78,7 @@ class PremiumScreener:
         self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.signal_callback = signal_callback
         self.paper_trade_notifier = paper_trade_notifier
+        self.signal_lifecycle = signal_lifecycle
         self.clock = clock or (lambda: datetime.now(IST))
         self._alert_state = StateManager(
             alert_state_file or os.getenv(
@@ -118,7 +120,9 @@ class PremiumScreener:
         due = [
             instrument
             for instrument in self.option_instruments()
-            if exchange_for_instrument(instrument) in open_now and self._refresh_due(instrument, now)
+            if exchange_for_instrument(instrument) in open_now
+            and not self._underlying_locked(instrument.symbol)
+            and self._refresh_due(instrument, now)
         ]
         alerts = self._scan_instruments(due, INTERVAL, now) if due else 0
         return alerts
@@ -172,6 +176,8 @@ class PremiumScreener:
         }
 
     def _refresh_instrument(self, instrument, interval: str, now: datetime, spot: Optional[float] = None) -> int:
+        if self._underlying_locked(instrument.symbol):
+            return 0
         bucket, _ = self._bucket(instrument, now)
         if spot is None:
             spot = self.fetcher.get_spot_price(instrument, interval)
@@ -329,6 +335,7 @@ class PremiumScreener:
         armed = [
             state for state in self.armed_contracts()
             if exchange_for_instrument(state["instrument"]) in open_now
+            and not self._underlying_locked(state["instrument"].symbol)
         ]
         if not armed and not paper_contracts:
             return 0
@@ -500,6 +507,8 @@ class PremiumScreener:
         now = self._as_ist(now if now is not None else self.clock())
         instrument = state["instrument"]
         contract = state["contract"]
+        if self._underlying_locked(instrument.symbol):
+            return 0
         if (
             contract.get("strike_band") != BAND_ITM_PLUS_1
             or signal.get("trigger") != TRIGGER_LIVE
@@ -577,11 +586,27 @@ class PremiumScreener:
             signal["breakout_price"],
             signal.get("trigger"),
         )
+        durable_accepted = False
+        if self.signal_lifecycle is not None:
+            payload = self._build_queue_payload(
+                instrument, signal, instrument.category, "premium_screener", contract)
+            position = self.signal_lifecycle.open_once(payload)
+            if position is not None:
+                durable_accepted = True
+                signal["_delivery_payload"] = payload
+                signal["_lifecycle_managed"] = True
+                signal.update(entry=position["entry"], stop_loss=position["stop_loss"],
+                              target=position["target"], targets=[position["target"]],
+                              risk_points=position["entry"] - position["stop_loss"])
         try:
-            delivered = self._deliver(instrument, signal, contract)
+            delivered = self._deliver(instrument, signal, contract) if (
+                self.signal_lifecycle is None or durable_accepted) else False
         except Exception as exc:
             logger.warning("Premium alert delivery failed: %s", exc.__class__.__name__)
             delivered = False
+        # Durable opening/outbox acceptance is the acted-on boundary, not delivery
+        # or any broker fill. Callback failure must never release the OPEN lock.
+        delivered = durable_accepted or delivered
         if delivered:
             signal["sent_at"] = (
                 signal.get("_delivery_payload", {}).get("metadata", {}).get("sent_at")
@@ -655,9 +680,8 @@ class PremiumScreener:
                 )
                 signal["_delivery_payload"] = payload
             return bool(self.signal_callback(payload)) and payload["metadata"].get("alert_sent", True)
-        if self.trade_control_handler and self.trade_control_bot:
-            if self.trade_control_bot.create_and_send_request(signal, contract):
-                return True
+        if signal.get("_lifecycle_managed"):
+            return True
 
         accepted = self.position_manager.add_position(
             symbol=instrument.symbol,
@@ -680,6 +704,9 @@ class PremiumScreener:
         return False
 
     # ================================================================ helpers
+    def _underlying_locked(self, symbol: str) -> bool:
+        return self.signal_lifecycle is not None and self.signal_lifecycle.is_open(symbol)
+
     @staticmethod
     def _fresh_evidence(signal: dict, now: datetime) -> bool:
         try:
@@ -758,6 +785,7 @@ class PremiumScreener:
                 "targets": list(signal.get("targets", [])),
                 "trigger": signal.get("trigger"),
                 "breakout_price": signal.get("breakout_price"),
+                "previous_observed_price": signal.get("previous_observed_price"),
                 "reference_high": signal.get("reference_high"),
                 "reference_low": signal.get("reference_low"),
                 "option_symbol": option_data.get("option_symbol"),

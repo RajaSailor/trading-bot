@@ -1,8 +1,11 @@
 """Isolated durable simulation execution, not a production-ready trading engine.
 
 LiveExecution(db_path, broker, enabled=False, practice=True, auto=False).
-propose(signal) returns an approval card; all writes require Telegram-bound
-approve(id, version, actor, chat_id). Broker acknowledgments never imply fills.
+Runtime uses auto_mode=True: manual approvals are disabled and automatic
+production execution remains blocked without a verified all-LIMIT protection
+adapter. The retained auto_mode=False library supports fake-adapter simulation
+via Telegram-bound approve(id, version, actor, chat_id), not a production route.
+Broker acknowledgments never imply fills.
 Only authoritative monotonic snapshots update fills/ownership. The supplied DB
 must be dedicated to this account and must not be the paper portfolio DB.
 Snapshots must be coherent across order fills and positions: lagging positions
@@ -24,7 +27,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_CEILING
 from zoneinfo import ZoneInfo
 
-from live_broker import LiveBlocked, LiveNotSent, canonical_expiry, positive
+from live_broker import LiveBlocked, LiveNotSent, PRODUCTION_BLOCKERS, canonical_expiry, positive
 
 
 class LiveExecution:
@@ -160,6 +163,7 @@ class LiveExecution:
                 raise LiveBlocked("conflicting top-level/metadata: " + field)
         data = dict(signal)
         data.update(metadata)
+        self.broker.limit_only(data)
         for source in (signal, signal.get("metadata", {})):
             for field in ("side", "action"):
                 if field in source and source[field] != "BUY":
@@ -171,7 +175,7 @@ class LiveExecution:
             raise LiveBlocked("fresh scanner live_ltp route only")
         if self.auto_mode and not self.broker.readiness().get("super_order_ready"):
             raise LiveBlocked(
-                "automatic NIFTY execution is fail-closed until a verified Dhan Super Order adapter is available"
+                PRODUCTION_BLOCKERS[0] + "; verified Dhan Super Order adapter unavailable"
             )
         detected = self._epoch(data.get("detected_at"))
         breakout_time = self._epoch(data.get("breakout_timestamp"))
@@ -276,6 +280,7 @@ class LiveExecution:
                 if item["side"] != "BUY" or isinstance(lots, bool) or not isinstance(lots, int) or lots != 1:
                     raise LiveBlocked("NIFTY entries require exactly one lot")
             if order_type is not None:
+                self.broker.limit_only({"order_type": order_type})
                 item["order_type"] = order_type
             if limit_price is not None:
                 item["limit_price"] = positive(limit_price)
@@ -378,6 +383,10 @@ class LiveExecution:
                         or str(record.get("security_id")) != str(item["security_id"])
                         or record.get("quantity") != item["quantity"]):
                     raise LiveBlocked("authoritative order identity mismatch")
+                self.broker.limit_only(record)
+                if ("limit_price" in record
+                        and positive(record["limit_price"]) != positive(item["limit_price"])):
+                    raise LiveBlocked("authoritative LIMIT price mismatch: possible app edit")
                 filled = record["filled_quantity"]
                 if isinstance(filled, bool) or not isinstance(filled, int) or not item["filled_quantity"] <= filled <= item["quantity"]:
                     raise LiveBlocked("nonmonotonic or excessive fill")
@@ -441,6 +450,8 @@ class LiveExecution:
                     entry["external_reduction"] = entry.get("external_reduction", 0) + tracked - int(actual)
                 entry["owned_quantity"] = max(0, min(tracked, int(actual)))
                 if entry.get("average_price"):
+                    entry["stop_loss"] = entry["initial_stop_loss"]
+                    entry.pop("trail_steps", None)
                     fill = entry["average_price"]
                     risk = fill - entry["initial_stop_loss"]
                     if risk <= 0:
@@ -507,7 +518,11 @@ class LiveExecution:
                     item.update(id=uuid.uuid4().hex[:20], signal_key=uuid.uuid4().hex,
                                 entry_id=entry_id, side="SELL", quantity=entry["owned_quantity"],
                                 status="AWAITING", version=1, filled_quantity=0,
-                                order_type="MARKET", expires_at=self.clock() + self.approval_seconds,
+                                order_type="LIMIT",
+                                limit_price=self._round_up_tick(
+                                    self.broker.read("quote", str(entry["security_id"]))["price"],
+                                    entry["tick_size"]),
+                                expires_at=self.clock() + self.approval_seconds,
                                 reason=reason, reserved_cash=0)
                     item["correlation_id"] = "X" + item["id"]
                     for field in ("actor", "chat_id", "order_id", "entry_day", "approved_at", "cancel_requested"):
@@ -534,7 +549,7 @@ class LiveExecution:
             return {"status": "CANCEL_AWAITING_RECONCILIATION", "entry_id": entry_id}
 
     def protection_preview(self, entry_id):
-        """Calculate the fill-based target and monotonic five-point step trail."""
+        """Preview fixed-stop/full-target exits; never trail or move to breakeven."""
         self.reconcile()
         with self._db() as db:
             entry = self._get(db, entry_id)
@@ -542,20 +557,8 @@ class LiveExecution:
             return None
         quote = self.broker.read("quote", str(entry["security_id"]))
         mark = positive(quote["price"])
-        fill = positive(entry["average_price"])
-        steps = int((Decimal(str(mark)) - Decimal(str(fill))) // Decimal("5"))
-        if steps > 0:
-            desired_stop = self._round_up_tick(
-                fill + 5 * (steps - 1), entry["tick_size"])
-            with self._db() as db:
-                db.execute("BEGIN IMMEDIATE")
-                entry = self._get(db, entry_id)
-                entry["stop_loss"] = max(entry["stop_loss"], desired_stop)
-                entry["trail_steps"] = max(entry.get("trail_steps", 0), steps)
-                self._save(db, entry)
         reason = (
-            "trailing_stop" if mark <= entry["stop_loss"] and entry.get("trail_steps", 0)
-            else "stop_loss" if mark <= entry["stop_loss"]
+            "stop_loss" if mark <= entry["initial_stop_loss"]
             else "target_2" if mark >= entry["target_2"]
             else None
         )
@@ -650,5 +653,6 @@ class LiveExecution:
         with self._db() as db:
             return {"enabled": self.enabled, "practice": self.practice, "auto": self.auto,
                     "auto_mode": self.auto_mode,
+                    "order_policy": "LIMIT_ONLY", "trailing_enabled": False,
                     **self.broker.readiness(), "account": self._state(db),
                     "intents": self._all(db)}

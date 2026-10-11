@@ -76,6 +76,19 @@ def test_trade_during_request_preserves_trade_time_and_conservative_book_time(fe
     assert quote["trade_timestamp"] == clock[0]
 
 
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_auth_and_rate_limit_failures_back_off_without_credentials_in_health(feed, status):
+    manager, post, clock = feed
+    post.return_value = response({}, status=status)
+    assert manager.fetch_quotes({"NSE_FNO": [42]}) == {}
+    assert manager.fetch_quotes({"NSE_FNO": [42]}) == {}
+    assert post.call_count == 1
+    diagnostics = market.market_quote_diagnostics()
+    assert diagnostics["last_http_status"] == status
+    assert diagnostics["retry_in_seconds"] > 0
+    assert "test-only" not in str(diagnostics)
+
+
 def test_multiple_managers_and_workers_share_one_quote_request(feed):
     manager, post, clock = feed
     post.return_value = response({"last_price": 100})

@@ -101,8 +101,10 @@ except ImportError:
 
 from paper_portfolio import PaperPortfolio
 from paper_telegram import PaperTelegramControl
-from data_manager import get_shared_data_manager
+from data_manager import get_shared_data_manager, market_quote_diagnostics
 from live_runtime import build_live_route
+from signal_lifecycle import SignalLifecycle
+from live_broker import PRODUCTION_BLOCKERS
 
 from timezone_utils import now_local_iso
 
@@ -141,6 +143,7 @@ paper_portfolio = None
 paper_portfolio_worker = None
 paper_telegram_control = None
 live_route = None
+signal_lifecycle = None
 phase_components = {}
 runtime_config = {}
 initialized = False
@@ -207,13 +210,13 @@ def _load_runtime_config() -> dict:
         "scanner_poll_seconds": max(1, _env_int("SCANNER_POLL_SECONDS", 5)),
         "queue_poll_seconds": max(1, _env_int("QUEUE_POLL_SECONDS", 1)),
         "token_renewal_enabled": _env_bool("ENABLE_DHAN_TOKEN_RENEWAL", True),
-        # Exactly two active Telegram routes. The "service_alerts" key and its
-        # CHANNEL_SERVICE_ALERTS_ID env name are retained for compatibility even
-        # though the channel now carries the combined options screener alerts.
         "channels": {
             "trade_control": os.getenv("CHANNEL_TRADE_CONTROL_ID"),
-            "service_alerts": os.getenv("CHANNEL_SERVICE_ALERTS_ID"),
+            "index_options": os.getenv("INDEX_OPTIONS_CHANNEL_ID", os.getenv("CHANNEL_SERVICE_ALERTS_ID")),
+            "commodity_options": os.getenv("COMMODITY_OPTIONS_CHANNEL_ID"),
+            "nifty50_stock_options": os.getenv("STOCK_OPTIONS_CHANNEL_ID"),
         },
+        "signal_db_path": os.getenv("SIGNAL_DB_PATH", os.getenv("TRADING_DB_PATH", "trading.db")),
     }
 
 
@@ -247,6 +250,7 @@ def _queue_signal_from_payload(payload: dict, notify_acceptance: bool = True, *,
     if signal is None:
         return None, ("Invalid signal payload", 400)
     signal["_scanner_origin"] = scanner_origin
+    signal["_lifecycle_managed"] = scanner_origin and payload.get("_lifecycle_managed") is True
 
     signal["entry_price"] = payload.get("entry_price", payload.get("price"))
     signal["target_price"] = payload.get("target_price")
@@ -352,7 +356,7 @@ def initialize_app(force: bool = False):
     global trading_db, state_manager, metrics_collector, alert_manager
     global telegram_handler, signal_notifier, queue_consumer_worker, market_scanner_worker, token_manager
     global paper_portfolio, paper_portfolio_worker, paper_telegram_control
-    global live_route
+    global live_route, signal_lifecycle
     global phase_components, runtime_config, initialized
 
     if initialized and not force:
@@ -409,10 +413,6 @@ def initialize_app(force: bool = False):
     
     try:
         runtime_config = _load_runtime_config()
-        nifty_auto_mode = bool(
-            runtime_config["nifty_live"]["enabled"] and runtime_config["nifty_live"]["auto"]
-        )
-
         # 1. Initialize DhanHQ Integration
         logger.info("1️⃣ Initializing DhanHQ Integration...")
         dhan_integration = get_dhan_integration(
@@ -425,9 +425,16 @@ def initialize_app(force: bool = False):
         
         # 2. Initialize Telegram Bridge
         logger.info("2️⃣ Initializing Telegram Bridge...")
-        dhan_bridge = DhanTelegramBridge(dhan_integration)
-        phase_components["telegram_bridge"] = True
-        logger.info("   ✅ Telegram Bridge initialized")
+        try:
+            dhan_bridge = DhanTelegramBridge(
+                dhan_integration=dhan_integration,
+                telegram_bot_token=os.getenv("BOT_TRADE_CONTROL_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN"),
+            )
+            dhan_bridge.alert_chat_id = None
+        except ValueError:
+            dhan_bridge = None
+            logger.warning("Legacy Telegram bridge unavailable; category routing remains independent")
+        phase_components["telegram_bridge"] = dhan_bridge is not None
         
         # 3. Initialize Postback Handler
         logger.info("3️⃣ Initializing Postback Handler...")
@@ -522,7 +529,7 @@ def initialize_app(force: bool = False):
                     telegram_handler,
                     metrics_collector,
                     practice_mode=bool(runtime_config.get("practice_mode", True)),
-                    trade_control_lifecycle_only=nifty_auto_mode,
+                    trade_control_lifecycle_only=True,
                 )
                 if SignalNotifier is not None
                 else None
@@ -530,6 +537,11 @@ def initialize_app(force: bool = False):
         else:
             telegram_handler = None
             signal_notifier = None
+
+        signal_lifecycle = SignalLifecycle(
+            runtime_config["signal_db_path"],
+            notify=telegram_handler.send_to_channel if telegram_handler is not None else lambda *_: False,
+        )
 
         paper_db_path = os.getenv("PAPER_DB_PATH", runtime_config["db_path"])
         if paper_db_path == ":memory:" or "mode=memory" in paper_db_path:
@@ -540,9 +552,10 @@ def initialize_app(force: bool = False):
             approval_expiry_seconds=max(1, float(os.getenv("PAPER_APPROVAL_EXPIRY_SECONDS", "60"))),
         )
         paper_telegram_control = PaperTelegramControl(paper_portfolio, telegram_handler)
-        paper_portfolio.notify = (
-            (lambda _event: True) if nifty_auto_mode else paper_telegram_control.send_event
-        )
+        def log_paper_event(event):
+            logger.info("Paper lifecycle event (logs only): %s", event.get("type", "unknown"))
+            return True
+        paper_portfolio.notify = log_paper_event
         paper_portfolio.auto_deliver = False
         paper_portfolio_worker = PaperPortfolioWorker(paper_portfolio)
         paper_portfolio_worker.start()
@@ -551,20 +564,6 @@ def initialize_app(force: bool = False):
         phase_components["nifty_live"] = live_route is not None
 
         channels = []
-        if (
-            AlertManager is not None
-            and TelegramAlertChannel is not None
-            and not nifty_auto_mode
-            and os.getenv("BOT_TRADE_CONTROL_TOKEN")
-            and runtime_config["channels"].get("trade_control")
-        ):
-            channels.append(
-                TelegramAlertChannel(
-                    bot_token=os.getenv("BOT_TRADE_CONTROL_TOKEN", ""),
-                    chat_id=runtime_config["channels"]["trade_control"],
-                )
-            )
-
         if AlertManager is not None:
             alert_manager = AlertManager(channels=channels)
             phase_components["alert_manager"] = len(channels) > 0
@@ -608,6 +607,7 @@ def initialize_app(force: bool = False):
                 )[0] is not None,
                 runtime_config=runtime_config,
                 paper_trade_notifier=None,
+                signal_lifecycle=signal_lifecycle,
             )
             scanner_started = market_scanner_worker.start(runtime_config["scanner_poll_seconds"])
             scanner_status = market_scanner_worker.status()
@@ -647,6 +647,8 @@ def initialize_app(force: bool = False):
         logger.info(f"🤖 Auto trading enabled: {runtime_config['auto_trading_enabled']}")
         configured_channels = [name for name, value in runtime_config["channels"].items() if value]
         logger.info(f"📣 Channel keys configured: {configured_channels}")
+        logger.info("Category readiness: %s", telegram_handler.configured_channels_summary() if telegram_handler else {})
+        logger.info("Live execution blocked; LIMIT-only, no trailing: %s", list(PRODUCTION_BLOCKERS))
         logger.info("🗄️ Trading DB path: %s", runtime_config["db_path"])
         logger.info("=" * 70)
         initialized = True
@@ -683,25 +685,7 @@ def live_telegram_webhook():
 
 @app.route('/telegram/paper', methods=['POST'])
 def paper_telegram_webhook():
-    if (runtime_config.get("nifty_live", {}).get("enabled")
-            and runtime_config.get("nifty_live", {}).get("auto")):
-        return jsonify({"ok": False, "error": "paper controls disabled in NIFTY auto mode"}), 403
-    if paper_telegram_control is None:
-        return jsonify({"ok": False, "error": "unavailable"}), 503
-    if request.content_length is not None and request.content_length > 65536:
-        return jsonify({"ok": False, "error": "payload_too_large"}), 413
-    body = request.stream.read(65537)
-    if len(body) > 65536:
-        return jsonify({"ok": False, "error": "payload_too_large"}), 413
-    try:
-        payload = json.loads(body) if request.is_json else None
-    except (ValueError, UnicodeDecodeError):
-        payload = None
-    result, status = paper_telegram_control.handle_update(
-        payload,
-        request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""),
-    )
-    return jsonify(result), status
+    return jsonify({"ok": False, "error": "paper Telegram controls disabled; use logs"}), 403
 
 
 @app.route('/health', methods=['GET'])
@@ -719,10 +703,14 @@ def health_check():
             "dhan_connected": dhan_integration is not None,
             "telegram_connected": dhan_bridge is not None,
             "telegram_routing": signal_notifier.status() if signal_notifier is not None else {},
-            "paper_telegram": paper_telegram_control.readiness_status() if paper_telegram_control is not None else {},
+            "market_data": market_quote_diagnostics(),
+            "paper_telegram": {"enabled": False, "reason": "paper output uses logs only"},
             "nifty_live": live_route.status() if live_route is not None else {
                 "configured": False, "mode": "paper", "production_ready": False,
+                "blockers": list(PRODUCTION_BLOCKERS),
+                "order_type": "LIMIT", "trailing_enabled": False,
             },
+            "signal_lifecycle": signal_lifecycle.status() if signal_lifecycle is not None else {},
             "paper_outbox": paper_portfolio.notification_status() if paper_portfolio is not None else {},
             "paper_submissions": paper_portfolio.submission_status() if paper_portfolio is not None else {},
             "workers": {
@@ -999,13 +987,10 @@ def telegram_test():
         return jsonify({"status": "forbidden", "message": "Invalid test secret"}), 403
     if signal_notifier is None or TelegramHandler is None:
         return jsonify({"status": "unavailable", "message": "Telegram routing not initialized"}), 503
-    # Only the two active Telegram routes can be probed; the allowlist is derived
-    # from the handler so it cannot drift from the configured bots.
-    supported_channels = set(TelegramHandler.BOT_CONFIG)
+    supported_channels = set(TelegramHandler.BOT_CONFIG) - {"trade_control"}
     payload = request.get_json(silent=True) or {}
-    # Default to the control channel so a bare probe never posts to the screener channel.
-    channel = payload.get("channel", "trade_control")
-    if channel not in supported_channels:
+    channel = payload.get("channel", "index_options")
+    if TelegramHandler.CHANNEL_ALIASES.get(channel, channel) not in supported_channels:
         return jsonify({
             "status": "error",
             "message": "Unsupported channel",

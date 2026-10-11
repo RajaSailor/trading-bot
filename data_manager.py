@@ -332,6 +332,19 @@ def _quote_backoff(response=None) -> None:
     limiter["retry_at"] = time.time() + delay
 
 
+def market_quote_diagnostics() -> dict:
+    """Credential-free observations, not a subscription/authentication guarantee."""
+    with _quote_rate_limiter["lock"]:
+        return {
+            "last_http_status": _quote_rate_limiter.get("last_http_status"),
+            "auth_rejected": _quote_rate_limiter.get("last_http_status") in (401, 403),
+            "rate_limited": _quote_rate_limiter.get("last_http_status") == 429,
+            "retry_in_seconds": max(0, _quote_rate_limiter.get("retry_at", 0) - time.time()),
+            "consecutive_failures": _quote_rate_limiter.get("failures", 0),
+            "last_valid_quote_at": _quote_rate_limiter.get("last_valid_quote_at"),
+        }
+
+
 def _apply_rate_limit(limiter: Optional[dict] = None) -> None:
     """Apply rate limiting between API calls to prevent DH-904 errors"""
     limiter = limiter or _api_rate_limiter
@@ -716,9 +729,10 @@ class DataManager:
                     _quote_backoff()
                     break
                 received_at = time.time()
+                _quote_rate_limiter["last_http_status"] = response.status_code
                 if response.status_code != 200:
                     logger.warning("Dhan marketfeed HTTP %s", response.status_code)
-                    if response.status_code == 429 or response.status_code >= 500:
+                    if response.status_code in (401, 403, 429) or response.status_code >= 500:
                         _quote_backoff(response)
                     break
                 try:
@@ -738,6 +752,8 @@ class DataManager:
                         continue
                     value = _parse_market_quote(raw, requested_at, received_at) if quotes else _positive_price(raw.get("last_price"))
                     if value is not None:
+                        if quotes:
+                            _quote_rate_limiter["last_valid_quote_at"] = received_at
                         fetched[(segment, sid)] = value
                         _market_quote_cache[(account, url, (segment, sid))] = {
                             "received": requested_at, "value": value,

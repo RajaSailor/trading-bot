@@ -51,7 +51,7 @@ def test_live_endpoint_does_not_expose_controller_exception_details(application,
     assert response.json == {"ok": False, "error": "live_control_rejected"}
 
 
-def test_live_and_paper_webhooks_remain_separate(application, monkeypatch):
+def test_live_webhook_never_delegates_to_disabled_paper_control(application, monkeypatch):
     route = Mock()
     route.handle_update.return_value = ({"ok": True}, 200)
     paper = Mock()
@@ -61,7 +61,8 @@ def test_live_and_paper_webhooks_remain_separate(application, monkeypatch):
     client = application.app.test_client()
     assert client.post("/telegram/live", json={"update_id": 1}).status_code == 200
     paper.handle_update.assert_not_called()
-    assert client.post("/telegram/paper", json={"update_id": 2}).status_code == 200
+    assert client.post("/telegram/paper", json={"update_id": 2}).status_code == 403
+    paper.handle_update.assert_not_called()
     route.handle_update.assert_called_once()
 
 
