@@ -118,6 +118,7 @@ def test_runtime_health_reports_missing_live_adapter_and_startup_reconciliation(
     assert status["checks"]["static_ip_verified"] is False
     assert status["reconciliation"]["status"] == "unavailable"
     assert status["last_broker_error_category"] == "adapter_unavailable"
+    assert "broker reconciliation is unavailable" in status["blockers"]
     assert any("static-IP authorization" in blocker for blocker in status["blockers"])
     assert status["limits"]["daily_entry_cap"] == 2
     assert status["limits"]["open_position_cap"] == 1

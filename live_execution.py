@@ -697,8 +697,9 @@ class LiveExecution:
             item["side"] == "BUY" and item.get("owned_quantity", 0) > 0 for item in items
         )
         unresolved = sum(
-            item["status"] in ("UNKNOWN", "PENDING") for item in items
+            item["status"] in ("AWAITING", "UNKNOWN", "PENDING") for item in items
         )
+        local_now = datetime.fromtimestamp(self.clock(), ZoneInfo("Asia/Kolkata"))
         readiness = self.broker.readiness()
         return {
             "enabled": self.enabled, "practice": self.practice, "auto": self.auto,
@@ -714,6 +715,7 @@ class LiveExecution:
                 "last_success_at": state.get("last_reconciliation_at"),
                 "sequence": state.get("sequence"),
             },
+            "entry_window_open": local_now.time() < datetime_time(15, 25),
             "last_broker_error_category": (
                 self.broker.last_error_category
                 or state.get("last_broker_error_category")

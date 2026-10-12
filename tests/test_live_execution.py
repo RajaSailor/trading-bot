@@ -218,6 +218,7 @@ def test_two_filled_entries_ist_day_cap(engine, adapter):
 
 def test_new_entries_are_blocked_at_1525_ist(engine, adapter):
     adapter.now = datetime(2026, 10, 7, 15, 25, tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
+    assert engine.status()["entry_window_open"] is False
     with pytest.raises(LiveBlocked, match="15:25 IST"):
         engine.propose(signal(adapter, "after-cutoff"))
     assert not adapter.writes
@@ -227,6 +228,7 @@ def test_status_exposes_reconciliation_and_live_caps(engine, adapter):
     filled(engine, adapter)
     status = engine.status()
     assert status["reconciliation"]["status"] == "healthy"
+    assert status["entry_window_open"] is True
     assert status["reconciliation"]["sequence"] == adapter.sequence
     assert status["limits"] == {
         "filled_entries_today": 1, "daily_entry_cap": 2,
