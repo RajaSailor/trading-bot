@@ -108,6 +108,22 @@ def test_all_flag_combinations_remain_production_blocked(tmp_path, practice, aut
     assert route.status()["mode"] == "blocked"
 
 
+def test_runtime_health_reports_missing_live_adapter_and_startup_reconciliation(tmp_path):
+    route = build_live_route(
+        config(tmp_path / "live.db"), paper_db_path=tmp_path / "paper.db",
+    )
+    status = route.status()
+    assert status["production_ready"] is False
+    assert status["checks"]["broker_adapter"] is False
+    assert status["checks"]["static_ip_verified"] is False
+    assert status["reconciliation"]["status"] == "unavailable"
+    assert status["last_broker_error_category"] == "adapter_unavailable"
+    assert "broker reconciliation is unavailable" in status["blockers"]
+    assert any("static-IP authorization" in blocker for blocker in status["blockers"])
+    assert status["limits"]["daily_entry_cap"] == 2
+    assert status["limits"]["open_position_cap"] == 1
+
+
 @pytest.mark.parametrize("path", [":memory:", "file:live?mode=memory", ""])
 def test_live_database_must_be_persistent(tmp_path, path):
     with pytest.raises(RuntimeError):

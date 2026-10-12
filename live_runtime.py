@@ -40,12 +40,46 @@ class LiveRoute:
 
     def status(self):
         actual = self.execution.status()
+        activation_checks = {
+            "nifty_live_enabled": actual["enabled"] is True,
+            "practice_mode_disabled": actual["practice"] is False,
+            "auto_trading_enabled": actual["auto"] is True,
+        }
+        activation_blockers = [
+            reason for key, reason in (
+                ("nifty_live_enabled", "NIFTY_LIVE_ENABLED is false"),
+                ("practice_mode_disabled", "PRACTICE_MODE must be false for live execution"),
+                ("auto_trading_enabled", "AUTO_TRADING_ENABLED is false"),
+            )
+            if not activation_checks[key]
+        ]
+        account = actual["account"]
+        limits = actual["limits"]
+        reconciliation = actual["reconciliation"]
+        runtime_blockers = []
+        if reconciliation["status"] != "healthy":
+            runtime_blockers.append("broker reconciliation is " + reconciliation["status"])
+        if account.get("halted"):
+            runtime_blockers.append(account.get("halt_reason") or "live account is halted")
+        if account.get("write_busy"):
+            runtime_blockers.append("an unresolved broker write blocks entries")
+        if limits["unresolved_orders"]:
+            runtime_blockers.append("pending or unknown order state blocks entries")
+        if limits["filled_entries_today"] >= limits["daily_entry_cap"]:
+            runtime_blockers.append("IST daily filled-entry cap reached")
+        if limits["managed_open_positions"] >= limits["open_position_cap"]:
+            runtime_blockers.append("a managed live position is already open")
+        if not actual["entry_window_open"]:
+            runtime_blockers.append("new entries blocked at or after 15:25 IST")
         safe_execution = {key: actual[key] for key in (
             "enabled", "practice", "auto", "auto_mode", "production_ready",
-            "simulation_ready", "super_order_ready", "blockers",
-            "order_policy", "trailing_enabled") if key in actual}
+            "simulation_ready", "super_order_ready", "checks", "blockers",
+            "order_policy", "trailing_enabled", "limits", "reconciliation",
+            "entry_window_open", "last_broker_error_category") if key in actual}
         safe_execution["account"] = {
-            key: actual["account"][key] for key in ("sequence", "halted", "write_busy")
+            key: actual["account"][key] for key in (
+                "sequence", "halted", "write_busy", "reconciliation_status",
+                "last_reconciliation_at", "last_broker_error_category", "halt_reason")
             if key in actual["account"]}
         safe_execution["intents"] = [
             {key: item[key] for key in (
@@ -58,8 +92,12 @@ class LiveRoute:
         return {
             "configured": self.execution.enabled,
             "mode": "blocked" if self.execution.enabled else "paper",
-            "production_ready": False,
-            "blockers": list(PRODUCTION_BLOCKERS),
+            "production_ready": actual["production_ready"],
+            "blockers": activation_blockers + runtime_blockers + list(actual["blockers"]),
+            "checks": {**actual["checks"], **activation_checks},
+            "limits": dict(limits),
+            "reconciliation": dict(reconciliation),
+            "last_broker_error_category": actual["last_broker_error_category"],
             "guards": {
                 "enabled": self.execution.enabled,
                 "practice": self.execution.practice,
