@@ -547,6 +547,13 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(all("Signal ID:" not in m and "Event ID:" not in m
                             and "Not an execution fill." not in m for _, m in self.sent))
 
+    def test_missing_custom_session_window_skips_quote_without_aborting(self):
+        self.lifecycle.open_once(payload())
+        self.lifecycle.session_windows = lambda exchange, day: ()
+        self.now += timedelta(seconds=1)
+        self.assertEqual(0, self.lifecycle.observe_quotes(self.quote(200), self.now))
+        self.assertEqual(1, self.lifecycle.status()["open"])
+
 
 if __name__ == "__main__":
     unittest.main()

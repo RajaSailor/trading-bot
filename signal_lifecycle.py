@@ -387,13 +387,14 @@ class SignalLifecycle:
                     # A present-but-missing source stamp is never replaced by receipt time.
                     stamp = _epoch(quote.get("trade_timestamp", quote.get("timestamp")))
                     observed = datetime.fromtimestamp(stamp, IST)
+                    cutoff = self._squareoff_at(position["exchange"], observed.date())
                     if (not 0 <= current.timestamp() - stamp <= 10
                             or stamp <= row["last_quote_at"]
                             or observed.date() != current.date()
                             or observed.date() != datetime.fromtimestamp(position["opened_at"], IST).date()
                             or not self.calendar(position["exchange"], current)
                             or not self.calendar(position["exchange"], observed)
-                            or stamp > self._squareoff_at(position["exchange"], observed.date()).timestamp() + 10):
+                            or cutoff is None or stamp > cutoff.timestamp() + 10):
                         continue
                 except (KeyError, TypeError, ValueError, OverflowError, OSError):
                     continue
@@ -402,7 +403,7 @@ class SignalLifecycle:
                 position["last_quote_at"] = stamp
                 position["last_valid_premium"] = price
                 position["last_valid_quote_at"] = stamp
-                if event and current < self._squareoff_at(position["exchange"], current.date()):
+                if event and current < cutoff:
                     self._close(db, position, event, stamp, price)
                     closed += 1
                 db.execute("""UPDATE lifecycle_signals SET status=?,closed_at=?,last_quote_at=?,data=?
