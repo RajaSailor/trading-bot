@@ -26,12 +26,49 @@ class LiveNotSent(LiveBlocked):
 
 
 PRODUCTION_BLOCKERS = (
-    "Super Order stop leg has no independently configurable LIMIT price/type; LIMIT entry does not verify LIMIT stop execution",
-    "verified production funds and margin schemas/adapters",
-    "authoritative production ownership/order/trade reconciliation adapter",
-    "verified Dhan Super Order placement and protection/restart recovery",
-    "static IP and production credentials deployment verification",
+    "verified Dhan live order adapter is unavailable",
+    "Dhan Super Order entry/target/market-stop semantics are not verified by a production adapter",
+    "verified production funds and margin schemas/adapters are unavailable",
+    "authoritative production ownership/order/trade reconciliation is unavailable",
+    "supported Dhan product type for the Super Order endpoint is unverified",
+    "Dhan authentication and deployment static-IP authorization are unverified",
 )
+
+
+def broker_error_category(error, *, adapter_missing=False):
+    """Classify broker failures without returning potentially sensitive error text."""
+    if adapter_missing:
+        return "adapter_unavailable"
+    text = str(error).lower()
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None) or getattr(error, "status_code", None)
+    ip_error = any(
+        value in text
+        for value in ("ip whitelist", "whitelisted ip", "static ip", "source ip")
+    ) or ("ip" in text and any(value in text for value in ("whitelist", "allowlist", "registered address")))
+    if ip_error:
+        return "ip"
+    if status == 429 or "rate limit" in text or "too many requests" in text:
+        return "rate_limit"
+    if status == 401 or any(
+        value in text for value in ("unauthorized", "authentication", "invalid token")
+    ):
+        return "auth"
+    if status == 403:
+        return "ip_or_auth"
+    if "forbidden" in text:
+        return "auth"
+    if isinstance(error, (KeyError, TypeError)) or any(
+        value in text for value in ("schema", "missing field", "invalid response", "unexpected response")
+    ):
+        return "schema"
+    if "stale" in text or "expired evidence" in text:
+        return "stale_data"
+    if isinstance(error, (TimeoutError, ConnectionError)) or any(
+        value in text for value in ("timeout", "connection", "network")
+    ):
+        return "network"
+    return "broker"
 
 
 def positive(value):
@@ -68,12 +105,24 @@ class LiveBroker:
         self.allow_simulation = allow_simulation
         self.clock = clock
         self.max_age = max_age
+        self.last_error_category = None
 
     def readiness(self):
         simulation = self.allow_simulation is True and getattr(self.adapter, "simulation", False) is True
+        checks = {
+            "broker_adapter": self.adapter is not None,
+            "production_adapter_verified": getattr(self.adapter, "production_verified", False) is True,
+            "super_order_verified": getattr(self.adapter, "super_order_verified", False) is True,
+            "funds_margin_schema_verified": getattr(self.adapter, "funds_margin_verified", False) is True,
+            "reconciliation_verified": getattr(self.adapter, "reconciliation_verified", False) is True,
+            "product_type_verified": getattr(self.adapter, "product_type_verified", False) is True,
+            "authentication_verified": getattr(self.adapter, "authentication_verified", False) is True,
+            "static_ip_verified": getattr(self.adapter, "static_ip_verified", False) is True,
+        }
         return {"production_ready": False, "simulation_ready": simulation,
                 "super_order_ready": False,
-                "blockers": list(PRODUCTION_BLOCKERS)}
+                "checks": checks, "blockers": list(PRODUCTION_BLOCKERS),
+                "last_broker_error_category": self.last_error_category}
 
     def evidence(self, data):
         if not isinstance(data, dict) or data.get("verified") is not True:
@@ -86,9 +135,15 @@ class LiveBroker:
     def read(self, method, *args):
         try:
             return self.evidence(getattr(self.adapter, method)(*args))
-        except LiveBlocked:
+        except LiveBlocked as exc:
+            self.last_error_category = broker_error_category(
+                exc, adapter_missing=self.adapter is None
+            )
             raise
         except Exception as exc:
+            self.last_error_category = broker_error_category(
+                exc, adapter_missing=self.adapter is None
+            )
             raise LiveBlocked("unavailable " + method + " evidence") from exc
 
     def contract(self, supplied, *, entry=True):
@@ -224,6 +279,11 @@ class LiveBroker:
             return self.adapter.place(dict(order))
         except LiveNotSent as exc:
             raise LiveBlocked("adapter write outcome cannot prove non-submission") from exc
+        except Exception as exc:
+            self.last_error_category = broker_error_category(
+                exc, adapter_missing=self.adapter is None
+            )
+            raise
 
     def _validate_write(self, order, known_correlations):
         if not self.readiness()["simulation_ready"]:
@@ -259,3 +319,8 @@ class LiveBroker:
             return self.adapter.cancel(order_id)
         except LiveNotSent as exc:
             raise LiveBlocked("adapter cancellation outcome cannot prove non-submission") from exc
+        except Exception as exc:
+            self.last_error_category = broker_error_category(
+                exc, adapter_missing=self.adapter is None
+            )
+            raise

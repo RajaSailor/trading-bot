@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -213,6 +214,25 @@ def test_two_filled_entries_ist_day_cap(engine, adapter):
     adapter.now += 86400
     adapter.contract["expiry"] = "2026-10-09"
     assert engine.propose(signal(adapter, "next-day", breakout=118))["status"] == "AWAITING"
+
+
+def test_new_entries_are_blocked_at_1525_ist(engine, adapter):
+    adapter.now = datetime(2026, 10, 7, 15, 25, tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
+    with pytest.raises(LiveBlocked, match="15:25 IST"):
+        engine.propose(signal(adapter, "after-cutoff"))
+    assert not adapter.writes
+
+
+def test_status_exposes_reconciliation_and_live_caps(engine, adapter):
+    filled(engine, adapter)
+    status = engine.status()
+    assert status["reconciliation"]["status"] == "healthy"
+    assert status["reconciliation"]["sequence"] == adapter.sequence
+    assert status["limits"] == {
+        "filled_entries_today": 1, "daily_entry_cap": 2,
+        "managed_open_positions": 1, "open_position_cap": 1,
+        "unresolved_orders": 0,
+    }
 
 
 def test_outbox_retries_delivery_only_never_orders(engine, adapter):

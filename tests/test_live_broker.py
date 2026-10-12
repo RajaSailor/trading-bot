@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from live_broker import LiveBlocked, LiveBroker
+from live_broker import LiveBlocked, LiveBroker, broker_error_category
 
 
 class FakeAdapter:
@@ -184,7 +184,37 @@ def test_limit_entry_does_not_prove_limit_stop(broker):
     status = broker.readiness()
     assert status["super_order_ready"] is False
     assert status["production_ready"] is False
-    assert "Super Order stop leg has no independently configurable LIMIT price/type; LIMIT entry does not verify LIMIT stop execution" in status["blockers"]
+    assert "Dhan Super Order entry/target/market-stop semantics are not verified by a production adapter" in status["blockers"]
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (RuntimeError("source IP is not whitelisted"), "ip"),
+        (RuntimeError("invalid token"), "auth"),
+        (RuntimeError("rate limit exceeded"), "rate_limit"),
+        (KeyError("available"), "schema"),
+        (TimeoutError("request timed out"), "network"),
+    ],
+)
+def test_broker_error_categories_are_explicit_and_safe(error, expected):
+    assert broker_error_category(error) == expected
+
+
+def test_ambiguous_http_403_is_not_misreported_as_definite_ip_or_auth_failure():
+    error = RuntimeError("request forbidden")
+    error.status_code = 403
+    assert broker_error_category(error) == "ip_or_auth"
+
+
+def test_broker_read_surfaces_ip_failure_category_without_raw_error(broker, adapter):
+    adapter.funds = lambda: (_ for _ in ()).throw(
+        RuntimeError("IP address is not whitelisted; private diagnostic")
+    )
+    with pytest.raises(LiveBlocked, match="unavailable funds evidence") as error:
+        broker.read("funds")
+    assert "private diagnostic" not in str(error.value)
+    assert broker.readiness()["last_broker_error_category"] == "ip"
 
 
 @pytest.mark.parametrize("quantity", [float("nan"), float("inf"), -1, True, "65"])

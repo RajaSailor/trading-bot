@@ -69,26 +69,26 @@ side would otherwise fall back to LTP.
 
 ### NIFTY automatic-trade policy (not production enabled)
 
-- One lot exactly, from the contract's current lot-size metadata; product intent
-  is carry-forward (`MARGIN`). Fresh broker funds and per-order margin must both
-  cover the trade; no fixed ₹25,000 sufficiency assumption is made.
-- Initial SL = `0.95 ×` the selected completed 10-minute red candle low. After
-  the actual average fill E, R = `E − SL` and target = `E + 2R` (E=100 and SL=85.5
-  gives target 129). At +5 points, SL moves to E; each further +5-point move
-  raises SL another 5 points. Stops only tighten and are rounded to tick size.
-- At most two filled entries per IST day and one managed open position. Unclear
-  order state, stale quotes, missing funds, or unknown exposure blocks new entry;
-  acknowledgments never count as fills and uncertain writes are never resent.
-- Super Order placement/trigger/exit semantics, product enums, static-IP
-  requirements, and restart reconciliation remain unverified in this sandbox.
-  The live path is therefore deliberately unavailable. No approval cards are
-  offered in auto mode. Trade-control event filtering allows only actual entry
-  fills with capital details and completed exits with realized P&L; the production
-  delivery worker is still a prerequisite.
+- The proposed live policy is one metadata-validated lot, tick-valid LIMIT entry,
+  one target, fixed stop, no trailing or breakeven logic, at most two confirmed
+  filled entries per IST day, and one managed open position. Pending, partial,
+  unknown, or unreconciled broker state must block entries.
+- At or after 15:25 IST new entries must be blocked. The intended close policy is
+  LIMIT-only square-off; an unfilled close remains OPEN/EXIT-PENDING and requires
+  manual operator closure in Dhan. There is no market fallback or safe live
+  square-off worker in this release.
+- User-approved Dhan Super Order stop legs have market execution semantics when
+  triggered; this can cause slippage in fast or illiquid markets. This behavior
+  still needs validation against Dhan's current production endpoint and account.
+- **The live path remains blocked.** No production Dhan adapter or automatic
+  lifecycle delivery worker is connected. Health reports adapter, funds/schema,
+  product, reconciliation, authentication, and static-IP checks separately.
+  Flags cannot override a failed or unknown check. See
+  [the activation blockers and go-live/rollback runbook](docs/DEPLOYMENT_GUIDE.md).
 
 **Risk disclaimer:** Options can lose the full premium and may incur additional
-execution risk. A 1:2 planned reward/risk, stop, target, and trailing rule do not
-guarantee fills, a win rate, or profit. Trade only money you can afford to lose.
+execution risk. A stop/target or planned reward/risk does not guarantee fills, a
+win rate, or profit. Trade only money you can afford to lose.
 
 BUY LIMIT is fillable only at a fresh ask/LTP at or below its limit (SELL uses
 bid/LTP at or above). After five seconds an unfilled limit requires new quote

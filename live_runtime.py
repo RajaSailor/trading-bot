@@ -40,12 +40,28 @@ class LiveRoute:
 
     def status(self):
         actual = self.execution.status()
+        activation_checks = {
+            "nifty_live_enabled": actual["enabled"] is True,
+            "practice_mode_disabled": actual["practice"] is False,
+            "auto_trading_enabled": actual["auto"] is True,
+        }
+        activation_blockers = [
+            reason for key, reason in (
+                ("nifty_live_enabled", "NIFTY_LIVE_ENABLED is false"),
+                ("practice_mode_disabled", "PRACTICE_MODE must be false for live execution"),
+                ("auto_trading_enabled", "AUTO_TRADING_ENABLED is false"),
+            )
+            if not activation_checks[key]
+        ]
         safe_execution = {key: actual[key] for key in (
             "enabled", "practice", "auto", "auto_mode", "production_ready",
-            "simulation_ready", "super_order_ready", "blockers",
-            "order_policy", "trailing_enabled") if key in actual}
+            "simulation_ready", "super_order_ready", "checks", "blockers",
+            "order_policy", "trailing_enabled", "limits", "reconciliation",
+            "last_broker_error_category") if key in actual}
         safe_execution["account"] = {
-            key: actual["account"][key] for key in ("sequence", "halted", "write_busy")
+            key: actual["account"][key] for key in (
+                "sequence", "halted", "write_busy", "reconciliation_status",
+                "last_reconciliation_at", "last_broker_error_category")
             if key in actual["account"]}
         safe_execution["intents"] = [
             {key: item[key] for key in (
@@ -58,8 +74,12 @@ class LiveRoute:
         return {
             "configured": self.execution.enabled,
             "mode": "blocked" if self.execution.enabled else "paper",
-            "production_ready": False,
-            "blockers": list(PRODUCTION_BLOCKERS),
+            "production_ready": actual["production_ready"],
+            "blockers": activation_blockers + list(actual["blockers"]),
+            "checks": {**actual["checks"], **activation_checks},
+            "limits": dict(actual["limits"]),
+            "reconciliation": dict(actual["reconciliation"]),
+            "last_broker_error_category": actual["last_broker_error_category"],
             "guards": {
                 "enabled": self.execution.enabled,
                 "practice": self.execution.practice,

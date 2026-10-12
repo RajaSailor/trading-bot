@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, time as datetime_time
 from decimal import Decimal, ROUND_CEILING
 from zoneinfo import ZoneInfo
 
@@ -52,7 +52,14 @@ class LiveExecution:
                 CREATE TABLE IF NOT EXISTS live_updates(id TEXT PRIMARY KEY);
             """)
             db.execute("INSERT OR IGNORE INTO live_state VALUES('account', ?)",
-                       (json.dumps({"sequence": -1, "halted": False, "write_busy": None}),))
+                       (json.dumps({"sequence": -1, "halted": False, "write_busy": None,
+                                    "reconciliation_status": "not_run",
+                                    "last_reconciliation_at": None,
+                                    "last_broker_error_category": None}),))
+        try:
+            self.reconcile()
+        except LiveBlocked:
+            pass
 
     @contextmanager
     def _db(self):
@@ -99,14 +106,14 @@ class LiveExecution:
             raise LiveBlocked("requires enabled=true, practice=false, auto=true")
         if not self.broker.readiness()["simulation_ready"]:
             raise LiveBlocked("production readiness BLOCKED")
+        if state.get("reconciliation_status") != "healthy":
+            raise LiveBlocked("reconciliation unavailable")
+        local_now = datetime.fromtimestamp(self.clock(), ZoneInfo("Asia/Kolkata"))
+        if local_now.time() >= datetime_time(15, 25):
+            raise LiveBlocked("new entries blocked at or after 15:25 IST")
         if state["halted"] or state["write_busy"]:
-            raise LiveBlocked("account halted or write unresolved")
+            raise LiveBlocked(state.get("halt_reason") or "account halted or write unresolved")
         items = self._all(db)
-        snapshot = self.broker.snapshot()
-        if snapshot["sequence"] < state["sequence"]:
-            raise LiveBlocked("account snapshot sequence regressed")
-        if self.broker.external_buy_activity(snapshot, (i["correlation_id"] for i in items)):
-            raise LiveBlocked("unknown external BUY activity prevents entry")
         day = self._day(self.clock())
         filled = sum(item.get("entry_day") == day for item in items if item["side"] == "BUY")
         reservations = sum(item["side"] == "BUY" and not item.get("entry_day")
@@ -198,6 +205,7 @@ class LiveExecution:
             raise LiveBlocked("invalid actual breakout or reference-derived stop")
         key = str(data.get("signal_id") or data.get("idempotency_key") or
                   hashlib.sha256(json.dumps(signal, sort_keys=True, default=str).encode()).hexdigest())
+        self.reconcile()
         with self._lock, self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT data FROM live_intents WHERE signal_key=?", (key,)).fetchone()
@@ -305,6 +313,7 @@ class LiveExecution:
         """Persist UNKNOWN before the broker side effect; never blind retry."""
         if self.auto_mode:
             raise LiveBlocked("manual controls are disabled in NIFTY auto mode")
+        self.reconcile()
         with self._lock:
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -360,6 +369,20 @@ class LiveExecution:
             return item
 
     def reconcile(self):
+        try:
+            return self._reconcile_once()
+        except LiveBlocked:
+            with self._lock, self._db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                state = self._state(db)
+                state["reconciliation_status"] = "unavailable"
+                state["last_broker_error_category"] = (
+                    self.broker.last_error_category or "schema"
+                )
+                self._save_state(db, state)
+            raise
+
+    def _reconcile_once(self):
         """Snapshot orders keyed by correlation_id, positions keyed by security_id.
 
         Orders carry side/security_id/quantity/status, cumulative filled_quantity,
@@ -370,11 +393,20 @@ class LiveExecution:
             db.execute("BEGIN IMMEDIATE")
             snap = self.broker.snapshot()
             state = self._state(db)
-            if snap["sequence"] <= state["sequence"]:
-                return {"applied": False, "reason": "duplicate_or_old_snapshot"}
             items = self._all(db)
-            if self.broker.external_buy_activity(snap, (i["correlation_id"] for i in items)):
+            external_buy = self.broker.external_buy_activity(
+                snap, (item["correlation_id"] for item in items)
+            )
+            if snap["sequence"] <= state["sequence"]:
+                if external_buy:
+                    state["halted"] = True
+                    state["halt_reason"] = "unknown external BUY activity prevents entry"
+                    self._save_state(db, state)
+                    return {"applied": False, "halted": True, "reason": "external_buy_activity"}
+                return {"applied": False, "reason": "duplicate_or_old_snapshot"}
+            if external_buy:
                 state["halted"] = True
+                state["halt_reason"] = "unknown external BUY activity prevents entry"
             for item in items:
                 record = snap["orders"].get(item["correlation_id"])
                 if not record or item["status"] == "AWAITING":
@@ -439,6 +471,7 @@ class LiveExecution:
                     raise LiveBlocked("invalid authoritative position")
                 if actual > expected.get(str(security), 0):
                     state["halted"] = True
+                    state["halt_reason"] = "unattributed broker position prevents entry"
             for entry in entries:
                 own_sells = sum(i["filled_quantity"] for i in items
                                 if i.get("entry_id") == entry["id"])
@@ -481,6 +514,9 @@ class LiveExecution:
             for item in items:
                 self._save(db, item)
             state["sequence"] = snap["sequence"]
+            state["reconciliation_status"] = "healthy"
+            state["last_reconciliation_at"] = self.clock()
+            state["last_broker_error_category"] = self.broker.last_error_category
             self._save_state(db, state)
             return {"applied": True, "halted": state["halted"]}
 
@@ -651,8 +687,35 @@ class LiveExecution:
 
     def status(self):
         with self._db() as db:
-            return {"enabled": self.enabled, "practice": self.practice, "auto": self.auto,
-                    "auto_mode": self.auto_mode,
-                    "order_policy": "LIMIT_ONLY", "trailing_enabled": False,
-                    **self.broker.readiness(), "account": self._state(db),
-                    "intents": self._all(db)}
+            state = self._state(db)
+            items = self._all(db)
+        today = self._day(self.clock())
+        filled_today = sum(
+            item["side"] == "BUY" and item.get("entry_day") == today for item in items
+        )
+        open_positions = sum(
+            item["side"] == "BUY" and item.get("owned_quantity", 0) > 0 for item in items
+        )
+        unresolved = sum(
+            item["status"] in ("UNKNOWN", "PENDING") for item in items
+        )
+        readiness = self.broker.readiness()
+        return {
+            "enabled": self.enabled, "practice": self.practice, "auto": self.auto,
+            "auto_mode": self.auto_mode, "order_policy": "LIMIT_ONLY",
+            "trailing_enabled": False, **readiness, "account": state, "intents": items,
+            "limits": {
+                "filled_entries_today": filled_today, "daily_entry_cap": 2,
+                "managed_open_positions": open_positions, "open_position_cap": 1,
+                "unresolved_orders": unresolved,
+            },
+            "reconciliation": {
+                "status": state.get("reconciliation_status", "not_run"),
+                "last_success_at": state.get("last_reconciliation_at"),
+                "sequence": state.get("sequence"),
+            },
+            "last_broker_error_category": (
+                self.broker.last_error_category
+                or state.get("last_broker_error_category")
+            ),
+        }
