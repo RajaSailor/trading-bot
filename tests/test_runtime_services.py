@@ -202,11 +202,167 @@ class QueueConsumerWorkerTests(unittest.TestCase):
             self.assertIn("retry_after_epoch", retried)
 
 
+class TelegramChannelTransportTests(unittest.TestCase):
+    def _handler(self):
+        env = patch.dict(os.environ, {
+            "BOT_SERVICE_ALERTS_TOKEN": "alerts-token",
+            "INDEX_OPTIONS_CHANNEL_ID": "-1002",
+        }, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        handler = TelegramHandler()
+        handler._http_session = MagicMock()
+        response = handler._http_session.return_value.post.return_value
+        response.status_code = 200
+        response.json.return_value = {"ok": True, "result": {"message_id": 123}}
+        return handler, response
+
+    def test_default_delivery_returns_bool_without_reading_response_body(self):
+        handler, response = self._handler()
+        self.assertIs(True, handler.send_to_channel("index_options", "OPEN"))
+        response.json.assert_not_called()
+        handler._http_session.return_value.post.assert_called_once_with(
+            "https://api.telegram.org/botalerts-token/sendMessage",
+            json={"chat_id": -1002, "text": "OPEN", "parse_mode": "HTML"},
+            timeout=10,
+        )
+
+    def test_requested_message_id_and_reply_parameters(self):
+        for return_message_id in (False, True):
+            with self.subTest(return_message_id=return_message_id):
+                handler, _ = self._handler()
+                result = handler.send_to_channel(
+                    "index", "EXIT",
+                    return_message_id=return_message_id, reply_to_message_id=77,
+                )
+                if return_message_id:
+                    self.assertEqual(123, result)
+                    self.assertIs(type(result), int)
+                else:
+                    self.assertIs(True, result)
+                payload = handler._http_session.return_value.post.call_args.kwargs["json"]
+                self.assertEqual(-1002, payload["chat_id"])
+                self.assertEqual(
+                    {"message_id": 77, "allow_sending_without_reply": True},
+                    payload["reply_parameters"],
+                )
+
+    def test_message_id_request_rejects_missing_invalid_and_failed_responses(self):
+        bodies = [
+            {},
+            {"ok": True},
+            {"ok": False, "result": {"message_id": 123}},
+            *(
+                {"ok": True, "result": {"message_id": value}}
+                for value in (None, False, True, 0, -1, "123", 123.0)
+            ),
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                handler, response = self._handler()
+                response.json.return_value = body
+                self.assertIs(False, handler.send_to_channel(
+                    "index_options", "OPEN", return_message_id=True,
+                ))
+
+    def test_http_and_transport_errors_return_false(self):
+        for return_message_id in (False, True):
+            for failure in ("http", "transport", "json"):
+                if failure == "json" and not return_message_id:
+                    continue
+                with self.subTest(return_message_id=return_message_id, failure=failure):
+                    handler, response = self._handler()
+                    if failure == "http":
+                        response.status_code = 500
+                    elif failure == "transport":
+                        handler._http_session.return_value.post.side_effect = RuntimeError("offline")
+                    else:
+                        response.json.side_effect = ValueError("invalid JSON")
+                    self.assertIs(False, handler.send_to_channel(
+                        "index_options", "OPEN", return_message_id=return_message_id,
+                    ))
+
+    def test_invalid_disabled_and_unconfigured_routes_never_post(self):
+        for category in ("unknown", "crypto", "commodity_options"):
+            with self.subTest(category=category):
+                handler, _ = self._handler()
+                self.assertIs(False, handler.send_to_channel(
+                    category, "OPEN", return_message_id=True, reply_to_message_id=77,
+                ))
+                handler._http_session.assert_not_called()
+
+
 class SignalNotifierRoutingTests(unittest.TestCase):
     def _signal(self, **overrides):
         signal = {"symbol": "NIFTY", "action": "BUY", "metadata": {"source": "scanner"}}
         signal.update(overrides)
         return signal
+
+    def test_signal_events_forward_message_ids_and_replies_only_to_category_channels(self):
+        for category in (
+            "index_options", "index", "commodity_options", "commodity",
+            "nifty50_stock_options", "nifty50_options", "stock_options",
+        ):
+            with self.subTest(category=category):
+                handler = MagicMock()
+                handler.send_to_channel.side_effect = [123, True]
+                metrics = _FakeMetrics()
+                notifier = SignalNotifier(handler, metrics)
+                self.assertEqual(123, notifier.send_signal_event(
+                    category, "OPEN", return_message_id=True,
+                ))
+                self.assertIs(True, notifier.send_signal_event(
+                    category, "EXIT", reply_to_message_id=123,
+                ))
+                channel = TelegramHandler.CHANNEL_ALIASES.get(category, category)
+                self.assertEqual(
+                    [((channel, "OPEN"), {"return_message_id": True}),
+                     ((channel, "EXIT"), {"reply_to_message_id": 123})],
+                    [(call.args, call.kwargs) for call in handler.send_to_channel.call_args_list],
+                )
+                self.assertEqual(2, notifier.delivery_attempts)
+                self.assertEqual(0, notifier.delivery_failures)
+                self.assertEqual([], metrics.errors)
+
+    def test_signal_events_keep_default_two_argument_delivery_bool_compatible(self):
+        handler = _FakeTelegramHandler()
+        notifier = SignalNotifier(handler)
+        self.assertIs(True, notifier.send_signal_event("commodity", "OPEN"))
+        self.assertEqual([("commodity_options", "OPEN")], handler.calls)
+
+    def test_signal_event_failures_preserve_delivery_metrics(self):
+        for return_message_id, result in (
+            (False, False), (True, False), (True, True), (True, None), (True, 0), (True, -1),
+        ):
+            with self.subTest(return_message_id=return_message_id, result=result):
+                handler = MagicMock()
+                handler.send_to_channel.return_value = result
+                metrics = _FakeMetrics()
+                notifier = SignalNotifier(handler, metrics)
+                self.assertIs(False, notifier.send_signal_event(
+                    "index_options", "OPEN", return_message_id=return_message_id,
+                ))
+                self.assertEqual(1, notifier.delivery_attempts)
+                self.assertEqual(1, notifier.delivery_failures)
+                self.assertEqual([("telegram", "delivery_failed")], metrics.errors)
+
+    def test_signal_events_reject_noncategory_routes_without_delivery_attempts(self):
+        for category in (
+            "trade_control", "trade", "service_alerts", "service", "unknown",
+            "crypto", "nifty50_intraday_5x", "nifty50_5x", "nifty50_pay_later",
+            "nifty50_paylater",
+        ):
+            with self.subTest(category=category):
+                handler = MagicMock()
+                metrics = _FakeMetrics()
+                notifier = SignalNotifier(handler, metrics)
+                self.assertIs(False, notifier.send_signal_event(
+                    category, "OPEN", return_message_id=True, reply_to_message_id=123,
+                ))
+                handler.send_to_channel.assert_not_called()
+                self.assertEqual(0, notifier.delivery_attempts)
+                self.assertEqual(0, notifier.delivery_failures)
+                self.assertEqual([], metrics.errors)
 
     def test_service_alerts_never_route_to_trade_control(self):
         handler = _FakeTelegramHandler()

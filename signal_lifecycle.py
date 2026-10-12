@@ -8,8 +8,10 @@ before the commit can repeat that event. Stable signal/event IDs enable dedup.
 from __future__ import annotations
 
 import html
+import inspect
 import json
 import math
+import os
 import sqlite3
 import time
 import uuid
@@ -75,7 +77,7 @@ def _text(value):
 
 
 class SignalLifecycle:
-    """One global OPEN lock per underlying; unresolved signals never expire."""
+    """One global OPEN lock per underlying, released at exit or session square-off."""
 
     def __init__(self, db_path, notify=None, clock=time.time, calendar=None, send=None):
         self.db_path = str(db_path)
@@ -110,12 +112,32 @@ class SignalLifecycle:
                     key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
         with self._transaction() as db:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(lifecycle_signals)")}
+            if "telegram_message_id" not in columns:
+                db.execute("ALTER TABLE lifecycle_signals ADD COLUMN telegram_message_id INTEGER")
             db.execute("INSERT OR IGNORE INTO lifecycle_meta VALUES('inception',?)",
                        (now.date().isoformat(),))
             for category in CATEGORY_EXCHANGES:
                 db.execute("INSERT OR IGNORE INTO lifecycle_meta VALUES(?,?)",
                            ("report_cursor:" + category,
                             (now.date() - timedelta(days=1)).isoformat()))
+        self._square_off(now, stale_only=True)
+
+    def _squareoff_at(self, exchange, day):
+        windows = self.session_windows(exchange, day)
+        if not windows:
+            return None
+        start = datetime.combine(day, windows[-1][0], tzinfo=IST)
+        close = datetime.combine(day, windows[-1][1], tzinfo=IST)
+        configured = os.getenv("SIGNAL_SQUAREOFF_TIME_" + exchange, "").strip()
+        if not configured and exchange in ("NSE", "BSE"):
+            configured = os.getenv("SIGNAL_SQUAREOFF_TIME_NSE", "15:25")
+        if configured:
+            clock = datetime.strptime(configured, "%H:%M").time()
+            cutoff = datetime.combine(day, clock, tzinfo=IST)
+        else:
+            cutoff = close - timedelta(minutes=5)
+        return max(start, min(close, cutoff))
 
     def _now(self, value=None):
         value = self.clock() if value is None else value
@@ -198,6 +220,7 @@ class SignalLifecycle:
                 or not 0 <= now.timestamp() - stamp <= 10
                 or not self.calendar(exchange, now)
                 or not self.calendar(exchange, datetime.fromtimestamp(stamp, IST))
+                or now >= self._squareoff_at(exchange, now.date())
             ):
                 return None
             entry = (observed / tick).to_integral_value(rounding=ROUND_CEILING) * tick
@@ -224,6 +247,8 @@ class SignalLifecycle:
                 "tick_size": float(tick), "lot_size": int(lot),
                 "instrument_type": instrument_type,
                 "option_symbol": str(meta["option_symbol"]), "metadata": meta,
+               "last_valid_premium": float(observed),
+               "last_valid_quote_at": stamp,
             }
             with self._transaction() as db:
                 if db.execute("SELECT 1 FROM lifecycle_signals WHERE signal_key=? OR "
@@ -234,7 +259,9 @@ class SignalLifecycle:
                 if last and Decimal(str(last["price"])) * Decimal(".95") <= observed <= (
                         Decimal(str(last["price"])) * Decimal("1.05")):
                     return None
-                db.execute("INSERT INTO lifecycle_signals VALUES(?,?,?,?,?,?,NULL,?,?)",
+                db.execute("""INSERT INTO lifecycle_signals
+                           (id,signal_key,underlying,category,status,opened_at,closed_at,last_quote_at,data)
+                           VALUES(?,?,?,?,?,?,NULL,?,?)""",
                            (signal_id, key, underlying, category, "OPEN", stamp, stamp,
                             json.dumps(position, allow_nan=False)))
                 db.execute("""INSERT INTO lifecycle_entries VALUES(?,?,?)
@@ -261,20 +288,90 @@ class SignalLifecycle:
     @staticmethod
     def _signal_message(position, event):
         label = {"OPEN": "POSITION OPEN TRIGGER", "TARGET": "TARGET ACHIEVED",
-                 "STOP": "STOP LOSS TRIGGERED"}[event]
+                 "STOP": "STOP LOSS TRIGGERED", "SESSION_CLOSE": "SESSION CLOSE EXIT"}[event]
         message = (
-            f"<b>{label}</b>\nSignal ID: {_text(position['id'])}\n"
-            f"Event ID: {_text(position['id'] + ':' + event)}\n"
+            f"<b>{label}</b>\n"
             f"{_text(position['underlying'])} | {_text(position['option_symbol'])}\n"
             f"{_text(position['option_type'])} | Strike {_text(position['strike'])} | "
             f"Expiry {_text(position['expiry'])}\n"
             f"Entry trigger: {position['entry']:.2f} | Stop: {position['stop_loss']:.2f} | "
             f"Target: {position['target']:.2f}\n"
-            f"Risk points: {position['entry'] - position['stop_loss']:.2f}\n"
+            f"Risk points: {position['entry'] - position['stop_loss']:.2f} | "
+            f"Lot size: {_text(position.get('lot_size') or 'MISSING')}\n"
         )
         if event == "OPEN":
-            return message + f"Observed breakout premium: {position['observed_entry']:.2f}\nNot an execution fill."
-        return message + f"Observed premium: {position['observed_exit']:.2f}\nNot an execution fill."
+            return message + f"Observed breakout premium: {position['observed_entry']:.2f}"
+        premium = position.get("exit_premium")
+        if "exit_premium" not in position and event in ("TARGET", "STOP"):
+            premium = position["target" if event == "TARGET" else "stop_loss"]
+        observed = position.get("observed_exit")
+        message += f"Exit premium: {premium:.2f}\n" if premium is not None else "Exit premium: NO QUOTE\n"
+        if observed is not None:
+            message += f"Observed premium: {observed:.2f}"
+            if position.get("quote_stale"):
+                clock = datetime.fromtimestamp(
+                    position.get("last_valid_quote_at", position["last_quote_at"]), IST).strftime("%H:%M")
+                message += f" (last quote {clock})"
+            message += "\n"
+        if event == "SESSION_CLOSE":
+            clock = datetime.fromtimestamp(position["closed_at"], IST).strftime("%I:%M %p").lstrip("0")
+            message += f"closed at {clock}\n"
+        pnl = position.get("pnl", SignalLifecycle._pnl(position, premium))
+        if pnl is None:
+            return message + "P&amp;L: N/A (NO QUOTE or missing lot size)"
+        return (message + f"P&amp;L (1 lot x {position['lot_size']}): "
+                f"{'+' if pnl >= 0 else '-'}₹{abs(pnl):,.2f}")
+
+    @staticmethod
+    def _pnl(position, premium):
+        try:
+            lot = _positive(position["lot_size"])
+            if lot != int(lot) or premium is None:
+                return None
+            return float(round((Decimal(str(premium)) - Decimal(str(position["entry"])))
+                               * Decimal(str(lot)), 2))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _close(self, db, position, event, stamp, price):
+        observed_mode = os.getenv("SIGNAL_PNL_USE_OBSERVED_PREMIUM", "false").lower() in {
+            "true", "1", "yes", "on"}
+        premium = price if event == "SESSION_CLOSE" or observed_mode else position[
+            "target" if event == "TARGET" else "stop_loss"]
+        position.update(status=event, closed_at=stamp, observed_exit=price,
+                        exit_premium=premium, pnl=self._pnl(position, premium))
+        self._enqueue(db, position["id"] + ":" + event, position["category"],
+                      self._signal_message(position, event))
+        db.execute("""UPDATE lifecycle_signals SET status=?,closed_at=?,last_quote_at=?,data=?
+                      WHERE id=?""", (event, stamp, position["last_quote_at"],
+                                      json.dumps(position), position["id"]))
+
+    def _square_off(self, current, stale_only=False):
+        closed = 0
+        with self._transaction() as db:
+            for row in db.execute("SELECT * FROM lifecycle_signals WHERE status='OPEN'").fetchall():
+                position = json.loads(row["data"])
+                day = datetime.fromtimestamp(position["opened_at"], IST).date()
+                if stale_only and day >= current.date():
+                    continue
+                cutoff = self._squareoff_at(position["exchange"], day)
+                if cutoff is None:
+                    cutoff = datetime.combine(day, datetime.max.time(), tzinfo=IST)
+                if current < cutoff:
+                    continue
+                price = position.get("last_valid_premium")
+                if "last_valid_premium" not in position:
+                    price = position.get("observed_entry")
+                    position["last_valid_quote_at"] = position["opened_at"]
+                try:
+                    price = _positive(price)
+                except (TypeError, ValueError):
+                    price = None
+                quote_at = position.get("last_valid_quote_at", position["last_quote_at"])
+                position["quote_stale"] = not 0 <= current.timestamp() - quote_at <= 10
+                self._close(db, position, "SESSION_CLOSE", cutoff.timestamp(), price)
+                closed += 1
+        return closed
 
     def observe_quotes(self, quotes, now=None):
         current = self._now(now)
@@ -293,18 +390,20 @@ class SignalLifecycle:
                     if (not 0 <= current.timestamp() - stamp <= 10
                             or stamp <= row["last_quote_at"]
                             or observed.date() != current.date()
+                            or observed.date() != datetime.fromtimestamp(position["opened_at"], IST).date()
                             or not self.calendar(position["exchange"], current)
-                            or not self.calendar(position["exchange"], observed)):
+                            or not self.calendar(position["exchange"], observed)
+                            or stamp > self._squareoff_at(position["exchange"], observed.date()).timestamp() + 10):
                         continue
                 except (KeyError, TypeError, ValueError, OverflowError, OSError):
                     continue
                 event = "TARGET" if price >= position["target"] else (
                     "STOP" if price <= position["stop_loss"] else None)
                 position["last_quote_at"] = stamp
-                if event:
-                    position.update(status=event, closed_at=stamp, observed_exit=price)
-                    self._enqueue(db, position["id"] + ":" + event, position["category"],
-                                  self._signal_message(position, event))
+                position["last_valid_premium"] = price
+                position["last_valid_quote_at"] = stamp
+                if event and current < self._squareoff_at(position["exchange"], current.date()):
+                    self._close(db, position, event, stamp, price)
                     closed += 1
                 db.execute("""UPDATE lifecycle_signals SET status=?,closed_at=?,last_quote_at=?,data=?
                               WHERE id=?""", (position["status"], position.get("closed_at"),
@@ -319,16 +418,17 @@ class SignalLifecycle:
                     "SELECT value FROM lifecycle_meta WHERE key=?", (cursor_key,)).fetchone()["value"])
                 day = cursor + timedelta(days=1)
                 while day <= current.date():
-                    closes = [datetime.combine(day, end, tzinfo=IST)
-                              for exchange in exchanges
-                              for _, end in self.session_windows(exchange, day)]
-                    if closes and current <= max(closes):
+                    closes = [cutoff for exchange in exchanges
+                              if (cutoff := self._squareoff_at(exchange, day)) is not None]
+                    if closes and current < max(closes):
                         break
                     if closes:
                         cutoff = max(closes).timestamp()
                         start = datetime.combine(day, datetime.min.time(), tzinfo=IST).timestamp()
-                        rows = db.execute("SELECT underlying,status,opened_at,closed_at FROM lifecycle_signals "
-                                          "WHERE category=?", (category,)).fetchall()
+                        rows = [json.loads(row["data"]) for row in db.execute(
+                            "SELECT data FROM lifecycle_signals WHERE category=?", (category,))]
+                        if any(row["status"] == "OPEN" and row["opened_at"] <= cutoff for row in rows):
+                            break
                         totals = self._outcomes(rows, start, cutoff)
                         per_underlying = {
                             underlying: self._outcomes(
@@ -344,15 +444,30 @@ class SignalLifecycle:
                         details = [
                             f"{_text(underlying)}: Opened {outcomes['opened']} | "
                             f"Targets {outcomes['targets']} | Stops {outcomes['stops']} | "
-                            f"Unresolved {outcomes['unresolved']} | Win rate {outcomes['winrate']}"
+                            f"Session-close {outcomes['session_close']} "
+                            f"(profit {outcomes['session_profit']}, loss {outcomes['session_loss']}) | "
+                            f"Win rate {outcomes['winrate']} | Net P&amp;L ₹{outcomes['net_pnl']:,.2f} | "
+                            f"Excluded {outcomes['excluded_pnl']} "
+                            f"(NO QUOTE {outcomes['no_quote']}, missing lot {outcomes['missing_lot']})"
                             for underlying, outcomes in per_underlying.items()]
                         header = (
                             f"<b>DAILY SIGNAL REPORT</b>\n{_text(category)} | {day.isoformat()}\n"
+                            f"Session square-off: closed at "
+                            f"{max(closes).strftime('%I:%M %p').lstrip('0')}\n"
                             f"Opened: {totals['opened']}\n"
                             f"Target achieved: {totals['targets']}\n"
                             f"Stop triggered: {totals['stops']}\n"
-                            f"Unresolved as of close: {totals['unresolved']}\n"
-                            f"Win rate: {totals['winrate']}\n")
+                            f"Session-close exits: {totals['session_close']} "
+                            f"(profit {totals['session_profit']}, loss {totals['session_loss']})\n"
+                            f"Win rate: {totals['winrate']}\n"
+                            f"Gross profit: ₹{totals['gross_profit']:,.2f} | "
+                            f"Gross loss: ₹{totals['gross_loss']:,.2f}\n"
+                            f"Net P&amp;L: ₹{totals['net_pnl']:,.2f}\n"
+                            f"Avg P&amp;L per signal: ₹{totals['avg_pnl']:,.2f}\n"
+                            f"Max single loss: ₹{totals['max_loss']:,.2f} | "
+                            f"Max single win: ₹{totals['max_win']:,.2f}\n"
+                            f"Excluded from ₹ totals: {totals['excluded_pnl']} "
+                            f"(NO QUOTE {totals['no_quote']}, missing lot {totals['missing_lot']})\n")
                         self._enqueue_report(db, event_id, category, header, details)
                     db.execute("UPDATE lifecycle_meta SET value=? WHERE key=?",
                                (day.isoformat(), cursor_key))
@@ -361,19 +476,42 @@ class SignalLifecycle:
     @staticmethod
     def _outcomes(rows, start, cutoff):
         opened = sum(start <= row["opened_at"] <= cutoff for row in rows)
-        targets = sum(row["status"] == "TARGET" and row["closed_at"] is not None
-                      and start <= row["closed_at"] <= cutoff for row in rows)
-        stops = sum(row["status"] == "STOP" and row["closed_at"] is not None
-                    and start <= row["closed_at"] <= cutoff for row in rows)
+        closed = [row for row in rows if row.get("closed_at") is not None
+                  and start <= row["closed_at"] <= cutoff]
+        targets = sum(row["status"] == "TARGET" for row in closed)
+        stops = sum(row["status"] == "STOP" for row in closed)
+        session = [row for row in closed if row["status"] == "SESSION_CLOSE"]
+        values = []
+        session_profit = session_loss = no_quote = missing_lot = 0
+        for row in closed:
+            premium = row.get("exit_premium")
+            if "exit_premium" not in row:
+                premium = row.get("target" if row["status"] == "TARGET" else "stop_loss")
+            pnl = SignalLifecycle._pnl(row, premium)
+            if premium is None:
+                no_quote += 1
+            if SignalLifecycle._pnl(row, row["entry"]) is None:
+                missing_lot += 1
+            if pnl is not None:
+                values.append(pnl)
+                if row["status"] == "SESSION_CLOSE":
+                    session_profit += pnl > 0
+                    session_loss += pnl < 0
+        profit = round(sum(value for value in values if value > 0), 2)
+        loss = round(-sum(value for value in values if value < 0), 2)
         unresolved = sum(row["opened_at"] <= cutoff and (
-            row["closed_at"] is None or row["closed_at"] > cutoff) for row in rows)
+            row.get("closed_at") is None or row["closed_at"] > cutoff) for row in rows)
         return dict(opened=opened, targets=targets, stops=stops, unresolved=unresolved,
-                    winrate=f"{100 * targets / (targets + stops):.2f}%" if targets + stops else "N/A")
+                    session_close=len(session), session_profit=session_profit, session_loss=session_loss,
+                    no_quote=no_quote, missing_lot=missing_lot, excluded_pnl=len(closed) - len(values),
+                    gross_profit=profit, gross_loss=loss, net_pnl=round(profit - loss, 2),
+                    avg_pnl=round(sum(values) / len(values), 2) if values else 0,
+                    max_loss=min(values + [0]), max_win=max(values + [0]),
+                    winrate=f"{100 * (targets + session_profit) / len(closed):.2f}%" if closed else "N/A")
 
     def _enqueue_report(self, db, event_id, category, header, details):
-        disclaimer = "\nHypothetical signal outcomes, not execution fills or realized P&amp;L."
-        # Reserve room for stable part IDs, including any practical part count.
-        budget = 3500 - len(header) - len(disclaimer) - len(event_id) - 80
+        disclaimer = "\nHypothetical signal results (1 lot per signal), not broker fills."
+        budget = 3500 - len(header) - len(disclaimer) - 80
         chunks = [""]
         for line in details:
             if len(line) > budget:
@@ -385,8 +523,8 @@ class SignalLifecycle:
                 chunks[-1] = candidate
         for index, chunk in enumerate(chunks, 1):
             part_id = f"{event_id}:PART:{index:04d}"
-            message = (header + f"Part {index}/{len(chunks)}\nEvent ID: {_text(part_id)}\n"
-                       + chunk + disclaimer)
+            message = (header + f"Part {index}/{len(chunks)}\n"
+                       + chunk + (disclaimer if index == len(chunks) else ""))
             self._enqueue(db, part_id, category, message)
 
     def dispatch_notifications(self, now=None, limit=100):
@@ -411,9 +549,45 @@ class SignalLifecycle:
                 if row is None:
                     break
                 try:
-                    success = bool(self.notify(row["category"], row["message"]))
+                    signal_id, _, event = row["event_id"].partition(":")
+                    signal = db.execute("SELECT * FROM lifecycle_signals WHERE id=?",
+                                        (signal_id,)).fetchone()
+                    kwargs = {}
+                    if signal is not None:
+                        if event == "OPEN":
+                            kwargs["return_message_id"] = True
+                        elif signal["telegram_message_id"] is not None:
+                            kwargs["reply_to_message_id"] = signal["telegram_message_id"]
+                    # Legacy two-argument callbacks remain supported without retrying a send.
+                    if kwargs:
+                        try:
+                            inspect.signature(self.notify).bind(row["category"], row["message"], **kwargs)
+                        except (TypeError, ValueError):
+                            kwargs = {}
+                    message = row["message"]
+                    if signal is not None:
+                        message = self._signal_message(json.loads(signal["data"]), event)
+                    elif row["event_id"].startswith("REPORT:"):
+                        # Clean pending reports from databases created by the older formatter.
+                        message = "\n".join(
+                            line for line in message.splitlines()
+                            if not line.startswith(("Signal ID:", "Event ID:", "Not an execution fill.",
+                                                    "Hypothetical signal outcomes")))
+                        if "Hypothetical signal outcomes" in row["message"]:
+                            message += "\nHypothetical signal results (1 lot per signal), not broker fills."
+                    result = self.notify(row["category"], message, **kwargs)
+                    success = bool(result)
                 except Exception:
                     success = False
+                if success:
+                    if signal is not None and event == "OPEN" and isinstance(result, int) and not isinstance(result, bool):
+                        if result <= 0:
+                            success = False
+                        else:
+                            position = json.loads(signal["data"])
+                            position["telegram_message_id"] = result
+                            db.execute("UPDATE lifecycle_signals SET telegram_message_id=?,data=? WHERE id=?",
+                                       (result, json.dumps(position), signal_id))
                 if success:
                     db.execute("UPDATE lifecycle_outbox SET delivered=1 WHERE event_id=?",
                                (row["event_id"],))
@@ -421,8 +595,9 @@ class SignalLifecycle:
                 else:
                     attempts = row["attempts"] + 1
                     delay = min(300, 2 ** min(attempts, 9))
-                    db.execute("UPDATE lifecycle_outbox SET attempts=?,retry_at=? WHERE event_id=?",
-                               (attempts, stamp + delay, row["event_id"]))
+                    failed = attempts >= max(1, int(os.getenv("SIGNAL_NOTIFICATION_MAX_ATTEMPTS", "25")))
+                    db.execute("UPDATE lifecycle_outbox SET attempts=?,retry_at=?,delivered=? WHERE event_id=?",
+                               (attempts, stamp + delay, -1 if failed else 0, row["event_id"]))
         return delivered
 
     def maintenance(self, data_manager, now=None):
@@ -441,6 +616,7 @@ class SignalLifecycle:
             if now is None:
                 current = self._now()
             self.observe_quotes(quotes, current)
+        self._square_off(current)
         self._schedule_reports(current)
         self.dispatch_notifications(current)
         return self.status()
@@ -453,6 +629,7 @@ class SignalLifecycle:
             retries = db.execute("SELECT COUNT(*) FROM lifecycle_outbox WHERE delivered=0 "
                                  "AND attempts>0").fetchone()[0]
             return {"open": counts.get("OPEN", 0), "target": counts.get("TARGET", 0),
-                    "stop": counts.get("STOP", 0), "pending_notifications": pending,
+                    "stop": counts.get("STOP", 0), "session_close": counts.get("SESSION_CLOSE", 0),
+                    "pending_notifications": pending,
                     "retrying_notifications": retries,
                     "reports": db.execute("SELECT COUNT(*) FROM lifecycle_reports").fetchone()[0]}

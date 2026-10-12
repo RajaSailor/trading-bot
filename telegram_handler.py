@@ -100,10 +100,13 @@ def format_option_breakout_alert(
     lines = [
         "📡 <b>POSITION OPEN TRIGGER</b>",
         f"{icon} <b>{esc(action)}</b> | <b>{esc(alert.get('underlying') or alert.get('symbol'))}</b> ({esc(category_label)})",
-        f"Signal ID: {esc(alert.get('signal_id'))}",
         f"Option: <b>{esc(alert.get('option_symbol'))}</b>",
         f"Strike: {esc(_fmt_strike(alert.get('strike')))} {esc(option_type)} | Band: {esc(alert.get('strike_band'))}",
         f"Expiry: {esc(alert.get('expiry'))}",
+    ]
+    if alert.get("lot_size") is not None:
+        lines.append(f"Lot size: {esc(alert['lot_size'])}")
+    lines.extend([
         "",
         "📊 <b>TRADE LEVELS</b>",
         f"Entry: {esc(_fmt_price(alert.get('entry')))}",
@@ -112,7 +115,7 @@ def format_option_breakout_alert(
         f"Target: {esc(_fmt_price(target))}",
         "",
         f"⚡ Observed signal breakout: {esc(breakout_ist)} @ {esc(_fmt_price(observed_price))}",
-    ]
+    ])
     lines.append(f"Underlying spot: {esc(_fmt_price(alert.get('spot_ltp')))}")
     if practice_mode:
         lines.append("🧪 PRACTICE MODE: signal only, no paper or live order placed")
@@ -297,7 +300,14 @@ class TelegramHandler:
             logger.error("❌ [%s] Failed to send alert: %s", category.upper(), e, exc_info=True)
             return False
 
-    def send_to_channel(self, channel_type: str, alert_msg: str) -> bool:
+    def send_to_channel(
+        self,
+        channel_type: str,
+        alert_msg: str,
+        *,
+        return_message_id: bool = False,
+        reply_to_message_id: Optional[int] = None,
+    ) -> bool | int:
         """Send raw alert to a configured Telegram channel."""
         try:
             if self.is_disabled_category(channel_type):
@@ -315,8 +325,21 @@ class TelegramHandler:
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
             payload = {"chat_id": chat_id, "text": alert_msg, "parse_mode": "HTML"}
+            if reply_to_message_id is not None:
+                payload["reply_parameters"] = {
+                    "message_id": reply_to_message_id,
+                    "allow_sending_without_reply": True,
+                }
             response = self._http_session().post(url, json=payload, timeout=10)
             if response.status_code == 200:
+                if return_message_id:
+                    body = response.json()
+                    message_id = (body.get("result") or {}).get("message_id")
+                    if body.get("ok") is not True or type(message_id) is not int or message_id <= 0:
+                        logger.warning("❌ Missing message ID from channel %s", channel_type)
+                        return False
+                    logger.info("✅ Alert sent to %s", channel_type)
+                    return message_id
                 logger.info("✅ Alert sent to %s", channel_type)
                 return True
 

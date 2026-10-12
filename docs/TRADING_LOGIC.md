@@ -30,31 +30,69 @@
 - There is one SQLite-enforced OPEN signal per underlying, across CE/PE,
   strikes and expiries. Different underlyings are independent. The selected
   contract, entry, stop and **one 2R target** remain frozen until a fresh observed
-  target/stop outcome. ITM+1 reselection cannot replace an open signal.
-- `POSITION OPEN TRIGGER` includes signal/event identity, contract, levels and
-  timestamp. Its entry is a tick-valid advisory level derived from the observed
-  crossing premium, **not a broker fill**. Terminal `TARGET ACHIEVED` or
-  `STOP LOSS TRIGGERED` records observed premium, including jumps; it never
-  invents a fill at the crossed level. Missing/stale/out-of-order quotes cannot
-  close a signal.
+  target/stop outcome or session square-off. ITM+1 reselection cannot replace an open signal.
+- Telegram text includes contract, CE/PE, strike, expiry, entry, stop, target,
+  risk points, lot size and observed premium. Signal/event IDs remain internal
+  in SQLite/outbox deduplication, not in Telegram text. For example:
+
+  ```text
+  POSITION OPEN TRIGGER
+  NIFTY | NIFTY-Oct2026-22550-PE
+  PE | Strike 22550 | Expiry 2026-10-13
+  Entry trigger: 134.95 | Stop: 93.45 | Target: 217.95
+  Risk points: 41.50 | Lot size: 75
+  Observed breakout premium: 134.95
+  ```
+
+  `TARGET ACHIEVED`, `STOP LOSS TRIGGERED` and `SESSION CLOSE EXIT` also show
+  exit premium and, for example, `P&L (1 lot x 75): +₹6,225.00`.
+  OPEN delivery persists Telegram's message ID; exits reply to it in the same
+  category channel, with `allow_sending_without_reply=true` if the original was
+  deleted. No signal or report is sent to Trade Control.
 - `SIGNAL_DB_PATH` stores signals, underlying locks, anti-chop entries, terminal
   events, report cursors and a durable outbox. Opening and terminal notifications
   are atomically enqueued with state transitions. Telegram delivery is
-  at-least-once: ambiguous sends may repeat an event ID, not a signal opening.
+  at-least-once: ambiguous sends may repeat a notification, not a signal opening.
   Retries preserve event ordering within each category without blocking healthy
-  categories. Large reports use bounded, stable-ID parts.
-- Category reports run after the last applicable calendar session close:
-  index NSE/BSE, stocks NSE, commodities MCX (DST and half-day aware).
+  categories. Exits wait for OPEN acknowledgment and its message ID. After
+  `SIGNAL_NOTIFICATION_MAX_ATTEMPTS` (default `25`), a permanently failed OPEN
+  releases the delivery dependency, allowing an unthreaded exit. Failed events
+  remain in the outbox with `delivered=-1`. Large reports use bounded parts with
+  internal stable IDs.
+- At `SIGNAL_SQUAREOFF_TIME_NSE` (default `15:25` IST), still-OPEN NSE/BSE signals
+  close as `SESSION_CLOSE` and release their underlying locks. Optional
+  `SIGNAL_SQUAREOFF_TIME_BSE` overrides BSE. MCX defaults to the existing calendar's
+  session close minus five minutes (DST and half-day aware); optional
+  `SIGNAL_SQUAREOFF_TIME_MCX=HH:MM` overrides it. Configured times are clamped to
+  the session window. No new signals open at/after square-off.
+- Square-off uses the last fresh valid observed premium, fetching frozen contracts
+  in one batched request through the existing shared quote pacing and bounded
+  HTTP 429 backoff. If unavailable, use the persisted last valid premium and mark
+  `(last quote HH:MM)`. The validated opening observation is also a valid fallback.
+  Legacy signals without any persisted valid premium show `NO QUOTE`, count as
+  closed, but are excluded from rupee totals. Restart closes previous-day OPEN
+  signals using their last known premium and original day's square-off time;
+  persistent terminal state prevents duplicate closure. No broker order is placed.
+- Category reports run after that category's square-off completes:
+  index NSE/BSE, stocks NSE, commodities MCX.
   Calendar holidays/weekends are skipped and report cursors survive restarts.
   Reported openings belong to their opening IST day; target/stop outcomes belong
-  to their observation IST day, including older signals closed today.
-- Unresolved counts are as of that session close and include earlier-day
-  openings. **No expiry/overnight auto-loss or unlock policy exists**; expired
-  contracts with no valid outcome remain unresolved and need operational review.
-- Per-underlying rows and consolidated totals show opened, target, stop and
-  unresolved. Closed-signal win rate is `target/(target+stop)*100`, or `N/A`
-  without closed outcomes. It is not realized rupee P&L, guaranteed performance
-  or evidence that a subscription upgrade improves results.
+  to their observation IST day, and recovered session exits to their original day.
+- Hypothetical long-option P&L is `(exit premium − entry trigger) × lot size`,
+  using the validated security-master lot size frozen at opening. By default,
+  target/stop exits use the defined target/stop level, not a jumping observed
+  premium; the observed premium is still displayed. Set
+  `SIGNAL_PNL_USE_OBSERVED_PREMIUM=true` to use observed exit premiums instead
+  (default `false`). Each exit persists the choice so later env changes cannot
+  change its report. Missing lot sizes are flagged and excluded from rupee totals.
+- Per-underlying rows and totals show opened, targets, stops, session-close exits
+  (profit/loss counts), win rate and net rupee P&L. Win rate is
+  `(targets + profitable session exits) / all closed signals × 100`, or `N/A`
+  with no closed signals; flat/no-quote session exits are not wins. Totals also
+  show gross profit, gross loss (positive magnitude), average P&L per included
+  closed signal, max single loss and max single win. One daily-report footer reads:
+  "Hypothetical signal results (1 lot per signal), not broker fills."
+  These are not realized broker results or guaranteed performance.
 - No pullback/rebound, five-minute closing confirmation, five-point entry
   buffer, extra indicators, second target, trailing or breakeven is used.
 
