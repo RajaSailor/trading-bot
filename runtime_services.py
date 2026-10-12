@@ -103,6 +103,24 @@ class SignalNotifier:
         metadata["alert_sent"] = delivered
         return delivered
 
+    def send_signal_event(
+        self,
+        category: str,
+        message: str,
+        *,
+        return_message_id: bool = False,
+        reply_to_message_id: Optional[int] = None,
+    ) -> bool | int:
+        channels = self.channels_for_signal({"category": category})
+        if not channels:
+            return False
+        return self._deliver(
+            channels[0],
+            message,
+            return_message_id=return_message_id,
+            reply_to_message_id=reply_to_message_id,
+        )
+
     def format_strategy_signal(self, signal: dict) -> str:
         metadata = signal.get("metadata") or {}
         if metadata.get("premium_strategy") and metadata.get("option_symbol"):
@@ -121,7 +139,6 @@ class SignalNotifier:
             return format_option_breakout_alert(alert, practice_mode=self.practice_mode, compact=compact)
         lines = [
             "📡 POSITION OPEN TRIGGER",
-            f"Signal ID: {signal.get('signal_id', 'N/A')}",
             f"Symbol: {signal['symbol']}",
             f"Action: {signal['action']}",
         ]
@@ -253,9 +270,25 @@ class SignalNotifier:
             return False
         return self._deliver(channel, message)
 
-    def _deliver(self, channel: str, message: str) -> bool:
+    def _deliver(
+        self,
+        channel: str,
+        message: str,
+        *,
+        return_message_id: bool = False,
+        reply_to_message_id: Optional[int] = None,
+    ) -> bool | int:
         self.delivery_attempts += 1
-        if self.telegram_handler.send_to_channel(channel, message):
+        options = {}
+        if return_message_id:
+            options["return_message_id"] = True
+        if reply_to_message_id is not None:
+            options["reply_to_message_id"] = reply_to_message_id
+        result = self.telegram_handler.send_to_channel(channel, message, **options)
+        if return_message_id:
+            if type(result) is int and result > 0:
+                return result
+        elif result:
             return True
         self.delivery_failures += 1
         if self.metrics_collector is not None:

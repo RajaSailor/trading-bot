@@ -53,6 +53,40 @@ class _Handler:
 
 
 class AlertFormatTests(unittest.TestCase):
+    def test_open_messages_hide_signal_ids_without_removing_internal_ids(self):
+        notifier = SignalNotifier(_Handler())
+        for premium in (False, True):
+            with self.subTest(premium=premium):
+                signal = _queue_signal(premium_strategy=premium, signal_id="internal-meta-id")
+                signal["signal_id"] = "internal-signal-id"
+                message = notifier.format_strategy_signal(signal)
+                self.assertIn("POSITION OPEN TRIGGER", message)
+                self.assertNotIn("Signal ID", message)
+                self.assertNotIn("internal-", message)
+                self.assertEqual("internal-signal-id", signal["signal_id"])
+                self.assertEqual("internal-meta-id", signal["metadata"]["signal_id"])
+                if premium:
+                    direct = format_option_breakout_alert(signal["metadata"])
+                    self.assertNotIn("Signal ID", direct)
+                    self.assertNotIn("internal-meta-id", direct)
+
+    def test_premium_open_messages_include_supplied_lot_size_only(self):
+        notifier = SignalNotifier(_Handler())
+        for lot_size in (None, 75, "75<&>"):
+            with self.subTest(lot_size=lot_size):
+                signal = _queue_signal(lot_size=lot_size)
+                for message in (
+                    format_option_breakout_alert(signal["metadata"]),
+                    notifier.format_strategy_signal(signal),
+                ):
+                    if lot_size is None:
+                        self.assertNotIn("Lot size:", message)
+                    else:
+                        self.assertIn(
+                            f"Expiry: 27OCT2026\nLot size: {html.escape(str(lot_size))}\n",
+                            message,
+                        )
+
     def test_exact_final_commodity_template_in_all_format_paths(self):
         alert = {
             **_queue_signal()["metadata"],
@@ -68,7 +102,6 @@ class AlertFormatTests(unittest.TestCase):
         expected = (
             "📡 POSITION OPEN TRIGGER\n"
             "🚀 BUY CALL | CRUDE OIL (COMMODITY OPTIONS)\n"
-            "Signal ID: N/A\n"
             "Option: CRUDEOIL-15Oct2026-8650-CE\n"
             "Strike: 8650 CE | Band: ITM+1\n"
             "Expiry: 15OCT2026\n\n"
@@ -136,7 +169,6 @@ class AlertFormatTests(unittest.TestCase):
         self.assertEqual(
             "📡 POSITION OPEN TRIGGER\n"
             "🚀 BUY CALL | BEL (STOCK OPTIONS)\n"
-            "Signal ID: N/A\n"
             "Option: BEL-Oct2026-380-CE\n"
             "Strike: 380 CE | Band: ATM\n"
             "Expiry: 27OCT2026\n"
@@ -176,7 +208,6 @@ class AlertFormatTests(unittest.TestCase):
         self.assertEqual(
             "📡 POSITION OPEN TRIGGER\n"
             "🚀 BUY PUT | M&M (INDEX OPTIONS)\n"
-            "Signal ID: N/A\n"
             "Option: M&M-Oct2026-177.5-PE\n"
             "Strike: 177.50 PE | Band: OTM+1\n"
             "Expiry: 27OCT2026\n"
