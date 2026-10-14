@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
 import threading
@@ -227,6 +228,16 @@ class TelegramHandler:
         logger.debug("🔍 [%s] Routed to channel %s", normalized_category.upper(), channel_id)
         return category_token, channel_id
 
+    def resolve_chat_id(self, channel_type: str) -> Optional[int]:
+        """Return the configured destination chat id for a routable strategy category."""
+        if self.is_disabled_category(channel_type):
+            return None
+        normalized_channel = self.CHANNEL_ALIASES.get(channel_type, channel_type)
+        if normalized_channel == "trade_control" or normalized_channel not in self.BOT_CONFIG:
+            return None
+        _, chat_id = self._get_bot_for_category(normalized_channel)
+        return chat_id
+
     def is_channel_ready(self, channel_type: str) -> bool:
         if self.is_disabled_category(channel_type):
             return False
@@ -348,6 +359,66 @@ class TelegramHandler:
         except Exception as e:
             logger.error("Error sending to channel %s: %s", channel_type, e.__class__.__name__)
             return False
+
+    def send_photo(
+        self,
+        channel_type: str,
+        photo_bytes: bytes,
+        caption: str = "",
+        *,
+        reply_to_message_id: Optional[int] = None,
+        expected_chat_id: Optional[int] = None,
+        timeout: int = 20,
+    ) -> dict:
+        """Send a PNG photo to a configured strategy channel."""
+        try:
+            if self.is_disabled_category(channel_type):
+                return {"ok": False, "permanent": True, "error": "disabled"}
+            normalized_channel = self.CHANNEL_ALIASES.get(channel_type, channel_type)
+            if normalized_channel == "trade_control":
+                return {"ok": False, "permanent": True, "error": "trade_control"}
+            if normalized_channel not in self.BOT_CONFIG:
+                return {"ok": False, "permanent": True, "error": "unknown"}
+            bot_token, chat_id = self._get_bot_for_category(normalized_channel)
+            if not bot_token or not chat_id:
+                return {"ok": False, "permanent": True, "error": "missing_destination"}
+            if expected_chat_id is not None and int(expected_chat_id) != int(chat_id):
+                return {"ok": False, "permanent": True, "error": "destination_changed"}
+
+            data = {"chat_id": chat_id, "caption": caption or "", "parse_mode": "HTML"}
+            if reply_to_message_id is not None:
+                data["reply_parameters"] = json.dumps({
+                    "message_id": reply_to_message_id,
+                    "allow_sending_without_reply": True,
+                })
+            response = self._http_session().post(
+                f"https://api.telegram.org/bot{bot_token}/sendPhoto",
+                data=data,
+                files={"photo": ("chart.png", photo_bytes, "image/png")},
+                timeout=timeout,
+            )
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            if response.status_code == 200 and body.get("ok") is True:
+                message_id = (body.get("result") or {}).get("message_id")
+                if type(message_id) is int and message_id > 0:
+                    return {"ok": True, "message_id": message_id}
+                return {"ok": False, "error": "missing_message_id"}
+            if response.status_code == 429:
+                retry_after = ((body.get("parameters") or {}).get("retry_after"))
+                return {"ok": False, "retry_after": retry_after, "error": "rate_limited"}
+            if 400 <= response.status_code < 500:
+                return {"ok": False, "permanent": True, "error": f"http_{response.status_code}"}
+            if response.status_code >= 500:
+                return {"ok": False, "error": f"http_{response.status_code}"}
+            return {"ok": False, "error": f"http_{response.status_code}"}
+        except (requests.Timeout, requests.ConnectionError):
+            return {"ok": False, "ambiguous": True, "error": "transport_timeout"}
+        except Exception as exc:
+            logger.error("Error sending photo to channel %s: %s", channel_type, exc.__class__.__name__)
+            return {"ok": False, "error": exc.__class__.__name__}
 
     def _http_session(self) -> requests.Session:
         """Per-thread keep-alive session: avoids a TLS handshake per alert."""

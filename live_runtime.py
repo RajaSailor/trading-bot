@@ -1,11 +1,24 @@
-"""Separate NIFTY routing, with an intentionally unavailable production adapter."""
+"""Separate NIFTY live routing, background monitoring and Trade Control messages.
 
+The production adapter (dhan_live_adapter.DhanLiveAdapter) is only constructed when
+NIFTY_LIVE_ENABLED=true and DHAN_CLIENT_ID/ACCESS_TOKEN exist. Even then, orders are
+written only when every computed readiness check passes (see live_broker.py).
+"""
+
+import logging
 import os
 import re
+import threading
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from live_broker import LiveBlocked, LiveBroker, PRODUCTION_BLOCKERS
 from live_execution import LiveExecution
 from live_telegram import LiveTelegram
+
+logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def _ids(value, *, users=False):
@@ -27,6 +40,9 @@ class LiveRoute:
 
     def propose(self, signal):
         metadata = signal.get("metadata") or {}
+        categories = {signal.get("category"), metadata.get("category") if isinstance(metadata, dict) else None}
+        if categories - {None, "index_options"}:
+            return {"status": "rejected", "reason": "only index_options NIFTY signals are live-eligible"}
         if (signal.get("symbol") != "NIFTY" or not isinstance(metadata, dict)
                 or signal.get("_scanner_origin") is not True
                 or metadata.get("underlying") != "NIFTY"
@@ -71,6 +87,9 @@ class LiveRoute:
             runtime_blockers.append("a managed live position is already open")
         if not actual["entry_window_open"]:
             runtime_blockers.append("new entries blocked at or after 15:25 IST")
+        adapter = getattr(self.execution.broker, "adapter", None)
+        diagnostics = adapter.diagnostics() if callable(getattr(adapter, "diagnostics", None)) else {}
+        live_active = bool(actual["production_ready"] and not activation_blockers)
         safe_execution = {key: actual[key] for key in (
             "enabled", "practice", "auto", "auto_mode", "production_ready",
             "simulation_ready", "super_order_ready", "checks", "blockers",
@@ -79,19 +98,32 @@ class LiveRoute:
         safe_execution["account"] = {
             key: actual["account"][key] for key in (
                 "sequence", "halted", "write_busy", "reconciliation_status",
-                "last_reconciliation_at", "last_broker_error_category", "halt_reason")
+                "last_reconciliation_at", "last_broker_error_category", "halt_reason",
+            "halt_cleared_at")
             if key in actual["account"]}
         safe_execution["intents"] = [
             {key: item[key] for key in (
                 "id", "side", "status", "quantity", "filled_quantity", "owned_quantity",
                 "order_type", "limit_price", "initial_stop_loss", "stop_loss", "target_2",
-                "average_price", "entry_day", "realized_pnl") if key in item}
+                "target_price", "protection", "exit_filled_quantity", "exit_average_price",
+                "exit_reason", "legs", "time_exit", "average_price", "entry_day",
+                "realized_pnl") if key in item}
             for item in actual["intents"]]
         secret_valid = len(self.control.secret) >= 32
         configured = bool(secret_valid and self.control.allowed_actors and self.control.allowed_chats)
         return {
             "configured": self.execution.enabled,
-            "mode": "blocked" if self.execution.enabled else "paper",
+            "mode": ("live" if live_active else "blocked") if self.execution.enabled else "paper",
+            "adapter": "dhan_v2_wire" if getattr(adapter, "wire_adapter", False) is True
+            else ("simulation" if adapter is not None else "unavailable"),
+            "adapter_diagnostics": diagnostics,
+            "counters": actual.get("counters", {}),
+            "pending_notifications": actual.get("pending_notifications", 0),
+            "external_validation_required": [
+                "Super Order STOP_LOSS_LEG execution type and leg fill representation in /orders and /trades",
+                "order-endpoint acceptance from the deployment's exact static egress IP",
+                "product type accepted for NIFTY Super Orders on this account",
+            ],
             "production_ready": actual["production_ready"],
             "blockers": activation_blockers + runtime_blockers + list(actual["blockers"]),
             "checks": {**actual["checks"], **activation_checks},
@@ -105,6 +137,8 @@ class LiveRoute:
             },
             "simulation_ready": actual["simulation_ready"],
             "order_policy": "LIMIT_ONLY",
+            "stop_policy": "Dhan Super Order stop-loss leg (operator-accepted broker market stop); "
+                           "entry, target and 15:25 square-off are LIMIT only",
             "trailing_enabled": False,
             "execution": safe_execution,
             "telegram_authorization_configured": configured,
@@ -115,15 +149,123 @@ class LiveRoute:
         return {"ok": False, "error": "runtime approval controls are disabled; automatic execution only"}, 403
 
 
-def build_live_route(config, *, paper_db_path):
+def _money(value):
+    try:
+        return f"₹{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "unavailable"
+
+
+def _ist(epoch):
+    try:
+        return datetime.fromtimestamp(float(epoch), IST).strftime("%d %b %Y %H:%M:%S IST")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "unavailable"
+
+
+def format_live_event(event):
+    """Trade Control text. Execution wording only for broker-confirmed fills."""
+    kind = event.get("kind")
+    item = event.get("proposal") or {}
+    contract = "NIFTY {expiry} {strike} {option_type}".format(
+        expiry=item.get("expiry"), strike=item.get("strike"), option_type=item.get("option_type"))
+    if kind == "entry_executed":
+        return "\n".join([
+            "✅ NIFTY LIVE ENTRY EXECUTED (broker-confirmed fill)",
+            f"Contract: {contract}",
+            f"Filled qty: {item.get('filled_quantity')} of {item.get('quantity')} @ avg {_money(item.get('average_price'))}",
+            f"Fill time: {_ist(item.get('first_fill_timestamp'))}",
+            f"Stop (Dhan Super Order stop leg): {_money(item.get('stop_loss'))} | Target: {_money(item.get('target_price'))}",
+            f"Order: {item.get('order_id')} | Product: {item.get('product_type')}",
+        ])
+    if kind == "exit_executed":
+        reason = {"target": "TARGET LEG FILLED", "stop_loss": "STOP-LOSS LEG FILLED",
+                  "time_exit_1525": "15:25 IST LIMIT SQUARE-OFF FILLED",
+                  "broker_exit_unattributed": "BROKER EXIT (leg not identified)"}.get(
+                      item.get("reason"), str(item.get("reason")))
+        return "\n".join([
+            "🏁 NIFTY LIVE EXIT EXECUTED (broker-confirmed fill)",
+            f"Contract: {contract}",
+            f"Reason: {reason}",
+            f"Exit qty: {item.get('filled_quantity')} @ avg {_money(item.get('average_price'))}",
+            f"Entry avg: {_money(item.get('entry_average_price'))}",
+            f"Gross P&L: {_money(item.get('realized_pnl'))} (before brokerage, taxes and charges; net unavailable)",
+            f"Exit time: {_ist(item.get('fill_timestamp'))}",
+        ])
+    if kind == "operational_alert":
+        return "\n".join([
+            "⚠️ OPERATIONAL ALERT — this is NOT an order execution",
+            str(event.get("message") or event.get("code")),
+            f"Contract: {contract}" if item.get("security_id") else "",
+            f"Time: {_ist(event.get('at'))}",
+        ]).strip()
+    return None
+
+
+class LiveWorker:
+    """Read-only probes, reconciliation, Super Order management and Trade Control delivery."""
+
+    def __init__(self, route, notify, *, interval=15.0):
+        self.route, self.notify = route, notify
+        self.interval = max(5.0, float(interval))
+        self._stop = threading.Event()
+        self._thread = None
+        self.last_run_at = None
+        self.last_error = None
+
+    def run_once(self):
+        execution = self.route.execution
+        adapter = getattr(execution.broker, "adapter", None)
+        if callable(getattr(adapter, "refresh_readiness", None)):
+            adapter.refresh_readiness()
+        try:
+            execution.manage() if execution.auto_mode else execution.reconcile()
+            self.last_error = None
+        except LiveBlocked as exc:
+            self.last_error = execution.broker.last_error_category or type(exc).__name__
+        self.last_run_at = time.time()
+
+        def send(_event_id, event):
+            text = format_live_event(event)
+            return True if text is None else bool(self.notify(text))
+        return execution.deliver_notifications(send)
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+
+        def loop():
+            while not self._stop.is_set():
+                try:
+                    self.run_once()
+                except Exception as exc:  # keep monitoring alive; never leak secrets
+                    self.last_error = type(exc).__name__
+                    logger.warning("Live worker iteration failed: %s", type(exc).__name__)
+                self._stop.wait(self.interval)
+        self._thread = threading.Thread(target=loop, name="nifty-live-worker", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def status(self):
+        return {"running": bool(self._thread and self._thread.is_alive()),
+                "last_run_at": self.last_run_at, "last_error": self.last_error,
+                "interval_seconds": self.interval}
+
+
+def build_live_route(config, *, paper_db_path, data_manager=None, adapter=None):
     if not config["enabled"]:
         return None
     path = config["db_path"]
     if (not path or path == ":memory:" or "mode=memory" in path
             or os.path.realpath(path) == os.path.realpath(paper_db_path)):
         raise RuntimeError("LIVE_DB_PATH must be persistent and separate from paper")
-    # None is deliberately not a production adapter; no startup broker writes.
-    broker = LiveBroker(None)
+    if adapter is None and data_manager is not None:
+        from dhan_live_adapter import adapter_from_env
+        adapter = adapter_from_env(data_manager)
+    # Construction performs read-only startup reconciliation only; never writes.
+    broker = LiveBroker(adapter)
     execution = LiveExecution(
         path, broker, enabled=True, practice=config["practice"], auto=config["auto"],
         auto_mode=True,
