@@ -596,9 +596,7 @@ class SignalLifecycle:
                     kwargs = {}
                     if signal is not None:
                         kwargs["return_message_id"] = True
-                        if event == "OPEN":
-                            pass
-                        elif signal["telegram_message_id"] is not None:
+                        if event != "OPEN" and signal["telegram_message_id"] is not None:
                             kwargs["reply_to_message_id"] = signal["telegram_message_id"]
                     # Legacy two-argument callbacks remain supported without retrying a send.
                     if kwargs:

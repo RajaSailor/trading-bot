@@ -254,7 +254,7 @@ class LiveWorker:
                 "interval_seconds": self.interval}
 
 
-def build_live_route(config, *, paper_db_path, data_manager=None, adapter=None):
+def build_live_route(config, *, paper_db_path, data_manager=None, adapter=None, clock=time.time):
     if not config["enabled"]:
         return None
     path = config["db_path"]
@@ -265,10 +265,10 @@ def build_live_route(config, *, paper_db_path, data_manager=None, adapter=None):
         from dhan_live_adapter import adapter_from_env
         adapter = adapter_from_env(data_manager)
     # Construction performs read-only startup reconciliation only; never writes.
-    broker = LiveBroker(adapter)
+    broker = LiveBroker(adapter, clock=clock)
     execution = LiveExecution(
         path, broker, enabled=True, practice=config["practice"], auto=config["auto"],
-        auto_mode=True,
+        auto_mode=True, clock=clock,
     )
     control = LiveTelegram(
         execution, secret=config["webhook_secret"],

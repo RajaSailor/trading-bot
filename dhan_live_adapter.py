@@ -85,7 +85,13 @@ class DhanAmbiguousWrite(DhanWireError):
 
 
 class DhanRejectedWrite(DhanWireError):
-    """Dhan returned a documented DH-90x rejection for a write request."""
+    """Dhan returned a documented DH-90x rejection for a write request.
+
+    Still never retried blindly: the intent stays UNKNOWN until a later authoritative
+    snapshot confirms that the correlation id is absent.
+    """
+
+    definite_rejection = True
 
 
 def _number(value, *, field, allow_zero=True):
