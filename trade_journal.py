@@ -42,7 +42,8 @@ HEADERS = (
     "Win % (running gross)", "Target Hit", "Stop Hit", "Session Auto-Square-Off",
     "Amount Used (INR)", "Amount After Exit (INR)", "Charges (INR)",
     "Charges Provenance/Status", "Entry Order Type", "Exit Order Type",
-    "Status", "Accounting Basis", "Exit Reason", "Time Zone", "Notes",     "Review", "Row ID", "Bot Data SHA-256",
+    "Status", "Accounting Basis", "Exit Reason", "Time Zone", "Notes", "Review",
+    "Row ID", "Bot Data SHA-256",
 )
 HEADER_ROW = 6
 ROW_ID_COLUMN = HEADERS.index("Row ID") + 1
@@ -435,6 +436,17 @@ class TradeJournalExporter:
                 signal_db.close()
             if live_db is not None:
                 live_db.close()
+
+        signal_symbols = {
+            str(position["id"]): position.get("option_symbol")
+            for position in signals
+            if position.get("id") is not None and isinstance(position.get("option_symbol"), str)
+        }
+        for item in intents:
+            if not item.get("option_symbol"):
+                symbol = signal_symbols.get(str(item.get("signal_key")))
+                if symbol:
+                    item["option_symbol"] = symbol
 
         categories = {name: [] for name in SHEET_CATEGORIES}
         for position in signals:

@@ -233,7 +233,7 @@ def test_live_partial_fills_update_same_row_only_when_fully_closed(tmp_path):
     signals, live, output = (tmp_path / "signals.db", tmp_path / "live.db", tmp_path / "journal.xlsx")
     _signal_db(signals, [_position()])
     entry = {
-        "id": "live-1", "signal_key": "stable-signal", "side": "BUY",
+        "id": "live-1", "signal_key": "sig-1", "side": "BUY",
         "entry_notified": True, "filled_quantity": 50, "quantity": 50,
         "average_price": 10, "first_fill_timestamp": _epoch(10, 2),
         "owned_quantity": 25, "lot_size": 50, "lots": 1, "underlying": "NIFTY",
@@ -249,6 +249,7 @@ def test_live_partial_fills_update_same_row_only_when_fully_closed(tmp_path):
     row, columns = _data_rows(sheet)[0], _header_map(sheet)
     row_id = sheet.cell(row, columns["Row ID"]).value
     assert sheet.cell(row, columns["Status"]).value == "OPEN"
+    assert sheet.cell(row, columns["Contract Symbol"]).value == "NIFTY-CE"
     assert sheet.cell(row, columns["Exit Time (IST)"]).value is None
     assert sheet.cell(row, columns["Gross P&L (INR)"]).value is None
     workbook.close()
