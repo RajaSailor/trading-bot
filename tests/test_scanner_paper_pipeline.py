@@ -414,3 +414,16 @@ def test_failed_telegram_delivery_retries_evidence_without_requeue(pipeline):
         assert queued["metadata"]["breakout_timestamp"] == before["breakout_timestamp"]
         assert queued["metadata"]["breakout_price"] == 113
     p.broker.place_trade.assert_not_called()
+
+
+def test_stale_quote_rejections_are_explained_without_loosening_freshness(pipeline):
+    p = pipeline
+    p.scanner.fetcher.fetch_option_candles = Mock(return_value=passing_breakout_candles(NARROW_DAY))
+    assert scan(p, live=False) == 0
+    p.data.fetch_quotes.side_effect = lambda request: {
+        (segment, sid): {"price": 120, "timestamp": p.clock.now, "trade_timestamp": None}
+        for segment, ids in request.items() for sid in ids
+    }
+    assert _live_poll(p) == 0                # request-time timestamp never substitutes a trade time
+    counts = p.scanner._indicator_counts
+    assert counts["stale_quote"] == counts["stale_quote_no_recent_trade"] > 0

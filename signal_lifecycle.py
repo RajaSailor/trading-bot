@@ -79,11 +79,12 @@ def _text(value):
 class SignalLifecycle:
     """One global OPEN lock per underlying, released at exit or session square-off."""
 
-    def __init__(self, db_path, notify=None, clock=time.time, calendar=None, send=None):
+    def __init__(self, db_path, notify=None, clock=time.time, calendar=None, send=None, chart_jobs=None):
         self.db_path = str(db_path)
         if not self.db_path.strip() or self.db_path == ":memory:" or self.db_path.startswith("file:"):
             raise ValueError("signal lifecycle requires a persistent filesystem SQLite path")
         self.notify = send if send is not None else notify
+        self.chart_jobs = chart_jobs
         self.clock = clock
         self.calendar = calendar or is_exchange_open
         self.session_windows = session_windows if calendar is None else calendar.session_windows
@@ -110,6 +111,10 @@ class SignalLifecycle:
                     PRIMARY KEY(category,day));
                 CREATE TABLE IF NOT EXISTS lifecycle_meta (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS lifecycle_event_messages (
+                    event_id TEXT PRIMARY KEY, signal_id TEXT NOT NULL, event TEXT NOT NULL,
+                    category TEXT NOT NULL, chat_message_id INTEGER NOT NULL,
+                    delivered_at REAL NOT NULL);
             """)
         with self._transaction() as db:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(lifecycle_signals)")}
@@ -346,6 +351,41 @@ class SignalLifecycle:
                       WHERE id=?""", (event, stamp, position["last_quote_at"],
                                       json.dumps(position), position["id"]))
 
+    @staticmethod
+    def _chart_overlay(position, event):
+        metadata = position.get("metadata") or {}
+        event_time = position.get("opened_at") if event == "OPEN" else position.get("closed_at")
+        event_premium = position.get("observed_entry") if event == "OPEN" else position.get("observed_exit")
+        if event_premium is None:
+            event_premium = position.get("exit_premium") if event != "OPEN" else position.get("entry")
+        return {
+            "signal_id": position["id"],
+            "event": event,
+            "event_time": event_time,
+            "event_premium": event_premium,
+            "opened_at": position.get("opened_at"),
+            "entry": position.get("entry"),
+            "stop": position.get("stop_loss"),
+            "target": position.get("target"),
+            "observed_entry": position.get("observed_entry"),
+            "observed_exit": position.get("observed_exit"),
+            "security_id": position.get("security_id"),
+            "exchange_segment": position.get("exchange_segment"),
+            "instrument_type": position.get("instrument_type"),
+            "option_type": position.get("option_type"),
+            "strike": position.get("strike"),
+            "expiry": position.get("expiry"),
+            "option_symbol": position.get("option_symbol"),
+            "underlying": position.get("underlying"),
+            "category": position.get("category"),
+            "reference_high": metadata.get("reference_high"),
+            "reference_low": metadata.get("reference_low"),
+            "breakout_price": metadata.get("breakout_price"),
+            "breakout_timestamp": metadata.get("breakout_timestamp"),
+            "reference_timestamp": metadata.get("reference_timestamp"),
+            "timeframe": metadata.get("timeframe", "10min"),
+        }
+
     def _square_off(self, current, stale_only=False):
         closed = 0
         with self._transaction() as db:
@@ -555,9 +595,8 @@ class SignalLifecycle:
                                         (signal_id,)).fetchone()
                     kwargs = {}
                     if signal is not None:
-                        if event == "OPEN":
-                            kwargs["return_message_id"] = True
-                        elif signal["telegram_message_id"] is not None:
+                        kwargs["return_message_id"] = True
+                        if event != "OPEN" and signal["telegram_message_id"] is not None:
                             kwargs["reply_to_message_id"] = signal["telegram_message_id"]
                     # Legacy two-argument callbacks remain supported without retrying a send.
                     if kwargs:
@@ -581,14 +620,34 @@ class SignalLifecycle:
                 except Exception:
                     success = False
                 if success:
-                    if signal is not None and event == "OPEN" and isinstance(result, int) and not isinstance(result, bool):
+                    message_id = None
+                    if signal is not None and isinstance(result, int) and not isinstance(result, bool):
                         if result <= 0:
                             success = False
                         else:
-                            position = json.loads(signal["data"])
-                            position["telegram_message_id"] = result
+                            message_id = result if result > 0 else None
+                    if success and signal is not None and message_id is not None:
+                        position = json.loads(signal["data"])
+                        if event == "OPEN":
+                            position["telegram_message_id"] = message_id
                             db.execute("UPDATE lifecycle_signals SET telegram_message_id=?,data=? WHERE id=?",
-                                       (result, json.dumps(position), signal_id))
+                                       (message_id, json.dumps(position), signal_id))
+                        db.execute("""INSERT OR REPLACE INTO lifecycle_event_messages
+                                      (event_id,signal_id,event,category,chat_message_id,delivered_at)
+                                      VALUES(?,?,?,?,?,?)""",
+                                   (row["event_id"], signal_id, event, row["category"], message_id, stamp))
+                        if self.chart_jobs is not None:
+                            try:
+                                self.chart_jobs.enqueue(db, {
+                                    "job_id": row["event_id"],
+                                    "signal_id": signal_id,
+                                    "event": event,
+                                    "category": row["category"],
+                                    "reply_to_message_id": message_id,
+                                    "overlay": self._chart_overlay(position, event),
+                                })
+                            except Exception:
+                                pass
                 if success:
                     db.execute("UPDATE lifecycle_outbox SET delivered=1 WHERE event_id=?",
                                (row["event_id"],))

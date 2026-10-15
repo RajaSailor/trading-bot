@@ -6,8 +6,11 @@ Read dictionaries require verified=True and timestamp (epoch seconds).
 Authoritative snapshots must include complete current-account order history,
 including externally submitted BUYs that have already been closed. Filtering
 snapshots to only this engine's orders is unsafe and not an adapter contract.
-Production is deliberately unavailable pending independently verified account
-snapshots, funds/margin adapters and exchange-side protection.
+Production readiness is never taken from adapter attributes/flags. It is computed
+only from a wire adapter's ``readiness_checks()`` (dhan_live_adapter.DhanLiveAdapter),
+whose checks come from actual read-only broker probes plus a revision-bound external
+validation attestation for behavior the Dhan documentation does not establish.
+Optional adapter methods: readiness_checks(), modify_target(order_id, price).
 """
 
 import math
@@ -25,20 +28,30 @@ class LiveNotSent(LiveBlocked):
     """Boundary validation proved that no broker write was attempted."""
 
 
-PRODUCTION_BLOCKERS = (
-    "verified Dhan live order adapter is unavailable",
-    "Dhan Super Order entry/target/market-stop semantics are not verified by a production adapter",
-    "verified production funds and margin schemas/adapters are unavailable",
-    "authoritative production ownership/order/trade reconciliation is unavailable",
-    "supported Dhan product type for the Super Order endpoint is unverified",
-    "Dhan authentication and deployment static-IP authorization are unverified",
-)
+CHECK_BLOCKERS = {
+    "broker_adapter": "verified Dhan live order adapter is unavailable",
+    "super_order_verified":
+        "Dhan Super Order entry/target/market-stop semantics are not verified by a production adapter",
+    "production_adapter_verified":
+        "external validation of the production adapter is not attested for this deployed revision",
+    "funds_margin_schema_verified": "verified production funds and margin schemas/adapters are unavailable",
+    "reconciliation_verified": "authoritative production ownership/order/trade reconciliation is unavailable",
+    "product_type_verified": "supported Dhan product type for the Super Order endpoint is unverified",
+    "authentication_verified": "Dhan authentication is unverified by a read-only profile probe",
+    "static_ip_verified":
+        "Dhan deployment static-IP authorization is unverified (exact registered IP and stable egress required)",
+}
+CHECK_KEYS = tuple(CHECK_BLOCKERS)
+PRODUCTION_BLOCKERS = tuple(CHECK_BLOCKERS.values())
 
 
 def broker_error_category(error, *, adapter_missing=False):
     """Classify broker failures without returning potentially sensitive error text."""
     if adapter_missing:
         return "adapter_unavailable"
+    category = getattr(error, "category", None)
+    if isinstance(category, str) and category:
+        return category
     text = str(error).lower()
     response = getattr(error, "response", None)
     status = getattr(response, "status_code", None) or getattr(error, "status_code", None)
@@ -109,20 +122,33 @@ class LiveBroker:
 
     def readiness(self):
         simulation = self.allow_simulation is True and getattr(self.adapter, "simulation", False) is True
-        checks = {
-            "broker_adapter": self.adapter is not None,
-            "production_adapter_verified": getattr(self.adapter, "production_verified", False) is True,
-            "super_order_verified": getattr(self.adapter, "super_order_verified", False) is True,
-            "funds_margin_schema_verified": getattr(self.adapter, "funds_margin_verified", False) is True,
-            "reconciliation_verified": getattr(self.adapter, "reconciliation_verified", False) is True,
-            "product_type_verified": getattr(self.adapter, "product_type_verified", False) is True,
-            "authentication_verified": getattr(self.adapter, "authentication_verified", False) is True,
-            "static_ip_verified": getattr(self.adapter, "static_ip_verified", False) is True,
-        }
-        return {"production_ready": False, "simulation_ready": simulation,
-                "super_order_ready": False,
-                "checks": checks, "blockers": list(PRODUCTION_BLOCKERS),
+        checks = {key: False for key in CHECK_KEYS}
+        wire = (self.adapter is not None and not simulation
+                and getattr(self.adapter, "wire_adapter", False) is True
+                and getattr(self.adapter, "simulation", False) is not True
+                and callable(getattr(self.adapter, "readiness_checks", None)))
+        if wire:
+            try:
+                computed = self.adapter.readiness_checks()
+            except Exception as exc:
+                computed = {}
+                self.last_error_category = broker_error_category(exc)
+            if isinstance(computed, dict):
+                checks.update({key: computed.get(key) is True for key in CHECK_KEYS})
+        else:
+            # Attribute flags are never evidence; only report that an adapter object exists.
+            checks["broker_adapter"] = self.adapter is not None and not simulation
+        production = wire and all(checks.values())
+        blockers = [CHECK_BLOCKERS[key] for key in CHECK_KEYS if not checks[key]]
+        super_order_simulation = simulation and getattr(self.adapter, "super_order_simulation", False) is True
+        return {"production_ready": production, "simulation_ready": simulation,
+                "super_order_ready": production or super_order_simulation,
+                "checks": checks, "blockers": blockers,
                 "last_broker_error_category": self.last_error_category}
+
+    def writable(self):
+        status = self.readiness()
+        return status["production_ready"] or status["simulation_ready"]
 
     def evidence(self, data):
         if not isinstance(data, dict) or data.get("verified") is not True:
@@ -258,15 +284,32 @@ class LiveBroker:
             except (TypeError, ValueError, OverflowError) as exc:
                 raise LiveBlocked("unavailable available funds") from exc
             required = positive(margin.get("required"))
-            if not math.isfinite(available) or available < max(required, price * quantity):
+            shortfall = margin.get("insufficient", 0)
+            if (not math.isfinite(available) or available < max(required, price * quantity)
+                    or (isinstance(shortfall, (int, float)) and not isinstance(shortfall, bool)
+                        and shortfall > 0)):
                 raise LiveBlocked("insufficient funds")
+        if entry and order.get("protection") == "DHAN_SUPER_ORDER":
+            tick = Decimal(str(order["tick_size"]))
+            stop, target = positive(order.get("stop_loss")), positive(order.get("target_price"))
+            if Decimal(str(stop)) % tick or Decimal(str(target)) % tick:
+                raise LiveBlocked("protection price off tick")
+            if not stop < price < target:
+                raise LiveBlocked("invalid Super Order stop/entry/target ordering")
         return max(price * quantity, required if entry else 0)
 
     @staticmethod
     def limit_only(order):
+        # The only accepted market behaviour is Dhan's own Super Order stop-loss leg
+        # (explicitly accepted by the operator). Entry, target and any independent
+        # square-off remain LIMIT-only.
+        stop_type = order.get("stop_order_type", "LIMIT")
+        broker_stop = (stop_type == "MARKET" and order.get("protection") == "DHAN_SUPER_ORDER"
+                       and order.get("side") == "BUY")
         if order.get("order_type", "LIMIT") != "LIMIT" or any(
                 order.get(field, "LIMIT") != "LIMIT"
-                for field in ("entry_order_type", "stop_order_type", "target_order_type")):
+                for field in ("entry_order_type", "target_order_type")) or (
+                stop_type != "LIMIT" and not broker_stop):
             raise LiveBlocked("LIMIT only for every leg; MARKET fallback is forbidden")
 
     def write(self, order, *, known_correlations=()):
@@ -286,7 +329,7 @@ class LiveBroker:
             raise
 
     def _validate_write(self, order, known_correlations):
-        if not self.readiness()["simulation_ready"]:
+        if not self.writable():
             raise LiveBlocked("production execution BLOCKED")
         if not 1 <= len(order["correlation_id"]) <= 30:
             raise LiveBlocked("invalid correlation id")
@@ -313,12 +356,29 @@ class LiveBroker:
                 raise LiveBlocked("sell exceeds authoritative owned residual")
 
     def cancel(self, order_id):
-        if not self.readiness()["simulation_ready"]:
+        if not self.writable():
             raise LiveNotSent("production execution BLOCKED")
         try:
             return self.adapter.cancel(order_id)
         except LiveNotSent as exc:
             raise LiveBlocked("adapter cancellation outcome cannot prove non-submission") from exc
+        except Exception as exc:
+            self.last_error_category = broker_error_category(
+                exc, adapter_missing=self.adapter is None
+            )
+            raise
+
+    def modify_target(self, order_id, price, *, tick_size):
+        """Move the Super Order TARGET_LEG (LIMIT) - used for the 15:25 LIMIT square-off."""
+        if not self.writable() or not callable(getattr(self.adapter, "modify_target", None)):
+            raise LiveNotSent("production execution BLOCKED")
+        price = positive(price)
+        if Decimal(str(price)) % Decimal(str(tick_size)):
+            raise LiveNotSent("price off tick")
+        try:
+            return self.adapter.modify_target(order_id, price)
+        except LiveNotSent as exc:
+            raise LiveBlocked("adapter modification outcome cannot prove non-submission") from exc
         except Exception as exc:
             self.last_error_category = broker_error_category(
                 exc, adapter_missing=self.adapter is None

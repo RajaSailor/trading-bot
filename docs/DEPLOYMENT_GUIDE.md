@@ -81,19 +81,24 @@ margin, snapshot ordering and supported broker stop behavior remain production
 verification gaps. Do not invent postback authentication or exchange-side
 protection guarantees from legacy modules.
 
-### Activation prerequisites and go-live runbook (not satisfied)
+### Activation prerequisites and go-live runbook (not satisfied by default)
 
 Safe defaults are `PRACTICE_MODE=true`, `AUTO_TRADING_ENABLED=false`, and
 `NIFTY_LIVE_ENABLED=false`. `LIVE_DB_PATH` must be a persistent file on a mounted
-volume, separate from `PAPER_DB_PATH`. Changing these flags does **not** enable
-orders in this release: `live_runtime.py` still supplies no production Dhan
-adapter. `/health` exposes the failed adapter, Super Order, funds/margin schema,
-product type, reconciliation, authentication, and static-IP checks; any false
-or unknown critical check blocks entry.
+volume, separate from `PAPER_DB_PATH`. With `NIFTY_LIVE_ENABLED=true` and Dhan
+credentials, `live_runtime.py` now builds the documented Dhan v2 wire adapter
+(`dhan_live_adapter.py`) and computes each check from read-only probes;
+`/health` exposes the adapter, Super Order, funds/margin schema, product type,
+reconciliation, authentication, and static-IP checks; any false check blocks
+entry. Exact keys, endpoint evidence and the remaining external validations are
+in [LIVE_EXECUTION.md](LIVE_EXECUTION.md).
 
 Do not enable real trading until all of the following are implemented and
 independently verified against the current official Dhan API and the actual
-deployment account:
+deployment account. Items 1, 4, 6, 7 and 8 are now implemented in code and
+covered by mocked tests only; the Super Order stop-leg/leg-fill behavior (2),
+product type (3) and order-endpoint static-IP acceptance (5) still need
+external validation before `LIVE_EXTERNAL_VALIDATION_REVISION` is set:
 
 1. Authenticated order, funds/margin, contract-master, quote, order/trade-book,
    and position adapters with validated response schemas, bounded request
@@ -102,9 +107,8 @@ deployment account:
    The user-approved stop leg is market-executed when triggered and can slip.
    Verify the endpoint's support for one target, LIMIT entry, and the stop
    behavior. No trailing or breakeven modifications are allowed.
-3. Verify the existing `MARGIN` product policy is supported by that endpoint;
-   otherwise reject entries until an explicitly approved, supported product is
-   configured.
+3. Verify the configured `LIVE_PRODUCT_TYPE` (default `INTRADAY`; `MARGIN`
+   allowed) is supported by that endpoint for this account.
 4. Startup and ongoing authoritative reconciliation, including pending/partial/
    unknown orders, manual Dhan edits/exits, externally-created exposure, and
    restart recovery. Reconciliation failure or ambiguity must block entries.
@@ -157,9 +161,9 @@ resend/cancel an ambiguous order.
 The isolated route validates only NIFTY NSE_FNO OPTIDX ITM+1 CE/PE contracts and
 one lot using security-master lot/tick metadata. It applies a two-filled-entry
 IST-day cap and one-managed-position guard. At/after 15:25 IST it rejects new
-entries. These validations are not a connected production execution service;
-the current route cannot create or manage a real position. Never infer execution
-from a signal, a local preview, or a broker acknowledgment.
+entries. Real positions can be created only when every readiness check passes
+and all three activation flags are set (see LIVE_EXECUTION.md). Never infer
+execution from a signal, a local preview, or a broker acknowledgment.
 
 Trade Control must remain reserved for confirmed execution lifecycle messages
 and insufficient-balance alerts; routine signals and reports stay on their

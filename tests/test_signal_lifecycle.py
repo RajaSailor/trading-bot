@@ -400,7 +400,7 @@ class LifecycleTests(unittest.TestCase):
         self.lifecycle.observe_quotes(self.quote(80), self.now)
         self.restart(notify=notify).dispatch_notifications()
         self.assertEqual({"return_message_id": True}, calls[0][2])
-        self.assertEqual({"reply_to_message_id": 1234}, calls[1][2])
+        self.assertEqual({"return_message_id": True, "reply_to_message_id": 1234}, calls[1][2])
         self.assertEqual(calls[0][0], calls[1][0])
         self.assertIn("-₹1,447.50", calls[1][1])
         self.assertNotIn("trade_control", [call[0] for call in calls])
@@ -421,9 +421,10 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.now += timedelta(seconds=1)
         with patch.dict(os.environ, {"SIGNAL_NOTIFICATION_MAX_ATTEMPTS": "2"}):
-            self.assertEqual(1, self.lifecycle.dispatch_notifications())
-        self.assertEqual([{"return_message_id": True}, {"return_message_id": True}, {}], calls)
-        self.assertEqual(0, self.lifecycle.status()["pending_notifications"])
+            self.assertEqual(0, self.lifecycle.dispatch_notifications())
+        self.assertEqual([{"return_message_id": True}, {"return_message_id": True},
+                          {"return_message_id": True}], calls)
+        self.assertEqual(1, self.lifecycle.status()["pending_notifications"])
 
     def test_nse_squareoff_fresh_quote_pnl_and_report_after_exit(self):
         self.lifecycle.open_once(payload())

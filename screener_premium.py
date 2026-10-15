@@ -388,7 +388,15 @@ class PremiumScreener:
                 or quote_time > now.timestamp()
                 or now.timestamp() - quote_time > LIVE_QUOTE_MAX_AGE_SECONDS
             ):
+                # Freshness is never loosened; the breakdown only explains rejections.
                 self._count_indicator_reason("stale_quote")
+                self._count_indicator_reason(
+                    "stale_quote_unavailable" if price is None or not isinstance(quote, dict)
+                    else "stale_quote_no_recent_trade" if quote.get("trade_timestamp", 0) is None
+                    else "stale_quote_unparseable_time" if quote_time is None
+                    else "stale_quote_future_time" if quote_time > now.timestamp()
+                    else "stale_quote_aged"
+                )
                 continue
             with self._lock:
                 if self._monitored.get(int(contract["security_id"])) is not state:

@@ -102,7 +102,8 @@ except ImportError:
 from paper_portfolio import PaperPortfolio
 from paper_telegram import PaperTelegramControl
 from data_manager import get_shared_data_manager, market_quote_diagnostics
-from live_runtime import build_live_route
+from live_runtime import LiveWorker, build_live_route
+from lifecycle_charts import LifecycleChartService, chart_settings_from_env
 from signal_lifecycle import SignalLifecycle
 from live_broker import PRODUCTION_BLOCKERS
 
@@ -143,6 +144,8 @@ paper_portfolio = None
 paper_portfolio_worker = None
 paper_telegram_control = None
 live_route = None
+live_worker = None
+lifecycle_chart_service = None
 signal_lifecycle = None
 phase_components = {}
 runtime_config = {}
@@ -193,6 +196,7 @@ def _load_runtime_config() -> dict:
             "allowed_users": os.getenv("LIVE_TELEGRAM_ALLOWED_USER_IDS", ""),
             "chat_id": os.getenv("LIVE_TELEGRAM_CHAT_ID", ""),
             "webhook_secret": os.getenv("LIVE_TELEGRAM_WEBHOOK_SECRET", ""),
+            "worker_seconds": max(5, _env_int("LIVE_RECONCILE_SECONDS", 15)),
         },
         "max_loss_per_trade": _env_float("MAX_LOSS_PER_TRADE", 0.01),
         "max_position_size": max(1, _env_int("MAX_POSITION_SIZE", 5)),
@@ -356,7 +360,7 @@ def initialize_app(force: bool = False):
     global trading_db, state_manager, metrics_collector, alert_manager
     global telegram_handler, signal_notifier, queue_consumer_worker, market_scanner_worker, token_manager
     global paper_portfolio, paper_portfolio_worker, paper_telegram_control
-    global live_route, signal_lifecycle
+    global live_route, signal_lifecycle, live_worker, lifecycle_chart_service
     global phase_components, runtime_config, initialized
 
     if initialized and not force:
@@ -538,9 +542,28 @@ def initialize_app(force: bool = False):
             telegram_handler = None
             signal_notifier = None
 
+        lifecycle_chart_service = None
+        if telegram_handler is not None and callable(getattr(telegram_handler, "send_photo", None)):
+            chart_data_manager = get_shared_data_manager()
+
+            def chart_candles(security_id, segment, instrument_type, from_date, to_date, interval):
+                return chart_data_manager.fetch_contract_candles(
+                    security_id, segment, instrument_type, from_date, to_date,
+                    interval=interval, symbol="lifecycle-chart",
+                )
+
+            # Chart jobs are enqueued inside the lifecycle transaction, so they share its DB.
+            lifecycle_chart_service = LifecycleChartService(
+                runtime_config["signal_db_path"], telegram_handler.send_photo, chart_candles,
+                **chart_settings_from_env(),
+            )
+            lifecycle_chart_service.start()
+        phase_components["lifecycle_charts"] = bool(
+            lifecycle_chart_service is not None and lifecycle_chart_service.enabled)
         signal_lifecycle = SignalLifecycle(
             runtime_config["signal_db_path"],
             notify=telegram_handler.send_to_channel if telegram_handler is not None else lambda *_: False,
+            chart_jobs=lifecycle_chart_service,
         )
 
         paper_db_path = os.getenv("PAPER_DB_PATH", runtime_config["db_path"])
@@ -560,8 +583,19 @@ def initialize_app(force: bool = False):
         paper_portfolio_worker = PaperPortfolioWorker(paper_portfolio)
         paper_portfolio_worker.start()
         phase_components["paper_portfolio"] = True
-        live_route = build_live_route(runtime_config["nifty_live"], paper_db_path=paper_db_path)
+        live_route = build_live_route(
+            runtime_config["nifty_live"], paper_db_path=paper_db_path,
+            data_manager=get_shared_data_manager(),
+        )
         phase_components["nifty_live"] = live_route is not None
+        if live_route is not None:
+            def notify_trade_control(text):
+                if telegram_handler is None:
+                    return False
+                return telegram_handler.send_to_channel("trade_control", text) is not False
+            live_worker = LiveWorker(live_route, notify_trade_control,
+                                     interval=runtime_config["nifty_live"]["worker_seconds"])
+            live_worker.start()
 
         channels = []
         if AlertManager is not None:
@@ -648,7 +682,12 @@ def initialize_app(force: bool = False):
         configured_channels = [name for name, value in runtime_config["channels"].items() if value]
         logger.info(f"📣 Channel keys configured: {configured_channels}")
         logger.info("Category readiness: %s", telegram_handler.configured_channels_summary() if telegram_handler else {})
-        logger.info("Live execution blocked; LIMIT-only, no trailing: %s", list(PRODUCTION_BLOCKERS))
+        if live_route is None:
+            logger.info("NIFTY live execution disabled (NIFTY_LIVE_ENABLED=false); paper/signal mode only")
+        else:
+            live_state = live_route.status()
+            logger.info("NIFTY live mode=%s production_ready=%s blockers=%s",
+                        live_state["mode"], live_state["production_ready"], live_state["blockers"])
         logger.info("🗄️ Trading DB path: %s", runtime_config["db_path"])
         logger.info("=" * 70)
         initialized = True
@@ -686,6 +725,15 @@ def live_telegram_webhook():
 @app.route('/telegram/paper', methods=['POST'])
 def paper_telegram_webhook():
     return jsonify({"ok": False, "error": "paper Telegram controls disabled; use logs"}), 403
+
+
+def _lifecycle_chart_health():
+    if lifecycle_chart_service is None:
+        return {"enabled": False}
+    try:
+        return lifecycle_chart_service.status()
+    except Exception as exc:  # chart diagnostics must never break /health
+        return {"enabled": lifecycle_chart_service.enabled, "status_error": type(exc).__name__}
 
 
 @app.route('/health', methods=['GET'])
@@ -726,7 +774,9 @@ def health_check():
                 "reconciliation": {"status": "not_configured", "sequence": None},
                 "last_broker_error_category": None,
                 "order_type": "LIMIT", "trailing_enabled": False,
+                "adapter": "not_constructed (NIFTY_LIVE_ENABLED=false)",
             },
+            "lifecycle_charts": _lifecycle_chart_health(),
             "signal_lifecycle": signal_lifecycle.status() if signal_lifecycle is not None else {},
             "paper_outbox": paper_portfolio.notification_status() if paper_portfolio is not None else {},
             "paper_submissions": paper_portfolio.submission_status() if paper_portfolio is not None else {},
@@ -735,6 +785,7 @@ def health_check():
                 "market_scanner": market_scanner_worker.status() if market_scanner_worker is not None else {"running": False},
                 "token_renewal": token_manager.status() if token_manager is not None else {"running": False},
                 "paper_portfolio": paper_portfolio_worker.status() if paper_portfolio_worker is not None else {"running": False},
+                "nifty_live": live_worker.status() if live_worker is not None else {"running": False},
             },
         }), 200
     except Exception as e:

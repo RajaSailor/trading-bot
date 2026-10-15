@@ -15,22 +15,25 @@ The default application runtime is **PRACTICE-only**. Changing `PRACTICE_MODE` o
 orders to Dhan. Compact option strategy alerts remain on `service_alerts`;
 practice lifecycle messages normally go to `trade_control`.
 
-### Separate NIFTY route — implementation present, production BLOCKED
+### Separate NIFTY route — Dhan adapter implemented, activation gated by actual readiness
 
-`NIFTY_LIVE_ENABLED=false` and `AUTO_TRADING_ENABLED=false` are the defaults.
-When both are enabled, only canonical NIFTY index ITM+1 CE/PE signals may enter
-the NIFTY route; stocks, commodities, and other indices remain service-channel
-signals and are not submitted to the paper or real order paths. Auto mode
-suppresses paper/manual approval controls and non-execution trade-control
-messages.
+`NIFTY_LIVE_ENABLED=false`, `PRACTICE_MODE=true` and `AUTO_TRADING_ENABLED=false`
+are the defaults. Only canonical NIFTY index ITM+1 CE/PE `index_options`
+signals may enter the NIFTY route; stocks, commodities, and other indices remain
+service-channel signals and are never submitted to real order paths.
 
-**This release cannot send real orders.** Its production adapter and Dhan Super
-Order support are fail-closed; auto-mode proposals are rejected until verified
-broker placement, funds/margin, authoritative reconciliation, and exchange-side
-protection are implemented. The isolated ledger has mock-only execution tests;
-it is not a working real-money deployment, even with all flags set. Do not
-interpret a signal or acknowledgment as a fill. See [the activation blockers and
-official-source evidence](docs/DEPLOYMENT_GUIDE.md).
+This release contains a documented Dhan v2 wire adapter (funds/margin, profile,
+static-IP read, order/trade/position/Super Order books, Super Order
+place/modify/cancel) and computes readiness from actual read-only probes. Orders
+remain blocked until **every** check in `/health → nifty_live.checks` passes,
+including a revision-bound operator attestation for the behaviors Dhan's docs do
+not establish (stop-leg execution and leg fill representation, order-endpoint
+static-IP acceptance). All tests use mocked broker I/O; no order has been sent.
+Trade Control receives ENTRY/EXIT EXECUTED only from broker-confirmed fills, and
+clearly labeled operational alerts otherwise. See
+[docs/LIVE_EXECUTION.md](docs/LIVE_EXECUTION.md) for evidence, env keys,
+persistence requirements and the activation/rollback runbook. Lifecycle premium
+chart replies are described in [docs/LIFECYCLE_CHARTS.md](docs/LIFECYCLE_CHARTS.md).
 
 ### Persistence and controls
 
@@ -450,7 +453,7 @@ TELEGRAM_TEST_SECRET=your_private_telegram_test_secret
 # ============================================================================
 PRACTICE_MODE=true                # Keep true for safe practice trading
 AUTO_TRADING_ENABLED=false        # Conscious guard; does not enable production execution
-NIFTY_LIVE_ENABLED=false          # Separate opt-in route; production currently BLOCKED
+NIFTY_LIVE_ENABLED=false          # Separate opt-in route; orders need all readiness checks (docs/LIVE_EXECUTION.md)
 ENABLE_MARKET_SCANNER=false       # Enable only after market-data config is verified
 ENABLE_DHAN_TOKEN_RENEWAL=true    # Runtime-only renewal; secrets still live in Render
 MAX_LOSS_PER_TRADE=500            # Maximum loss per trade (₹)
