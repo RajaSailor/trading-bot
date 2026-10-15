@@ -115,6 +115,9 @@ SIGNAL_DB_PATH = /var/data/signals.db
 PREMIUM_ALERT_STATE_FILE = /var/data/premium_alert_state.json
 NIFTY_LIVE_ENABLED = false
 LIVE_DB_PATH = /var/data/live_trading.db
+TRADE_JOURNAL_XLSX_PATH = /var/data/trade-journal.xlsx
+TRADE_JOURNAL_EXPORT_SECONDS = 5
+TRADE_JOURNAL_EXPORT_TOKEN = <independently generated 32+ character secret>
 ```
 
 Use persistent disk storage for both the signal SQLite database and anti-chop
@@ -123,6 +126,13 @@ backoff; Telegram has no idempotent-send primitive, so an ambiguous accepted
 send followed by a crash may repeat the **same event ID**, never open a new
 signal. Monitor undelivered events in `/health`. Do not deploy multiple scanner
 workers via Gunicorn.
+
+The Excel journal reads the existing signal and live SQLite databases and writes
+a background-generated `.xlsx` under `/var/data`. Protect the authenticated
+`GET /trade-journal.xlsx` endpoint with the dedicated token above. See
+[`TRADE_JOURNAL.md`](TRADE_JOURNAL.md) for workbook accounting, the optional
+Windows sync helper, backups, and secure setup. The laptop does not need to stay
+online for the cloud bot to trade.
 
 ### Pre-live verification checklist
 
