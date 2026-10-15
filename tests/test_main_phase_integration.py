@@ -54,7 +54,10 @@ def _load_main():
 def _stop_workers():
     module = sys.modules.get("main")
     if module is not None:
-        for name in ("queue_consumer_worker", "market_scanner_worker", "paper_portfolio_worker"):
+        for name in (
+            "queue_consumer_worker", "market_scanner_worker",
+            "paper_portfolio_worker", "trade_journal_worker",
+        ):
             worker = getattr(module, name, None)
             if worker is not None:
                 worker.stop()

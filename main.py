@@ -17,6 +17,7 @@ import sys
 import logging
 import atexit
 import time
+import hmac
 from dotenv import load_dotenv
 from datetime import datetime
 from uuid import uuid4
@@ -29,7 +30,7 @@ load_dotenv()
 # ============================================================================
 
 try:
-    from flask import Flask, request, jsonify
+    from flask import Flask, request, jsonify, send_file
     from dhan_telegram_bridge import DhanTelegramBridge
     from dhan_postback_handler import DhanPostbackHandler
     from dhan_integration import get_dhan_integration
@@ -105,6 +106,7 @@ from data_manager import get_shared_data_manager, market_quote_diagnostics
 from live_runtime import LiveWorker, build_live_route
 from lifecycle_charts import LifecycleChartService, chart_settings_from_env
 from signal_lifecycle import SignalLifecycle
+from trade_journal import TradeJournalExporter, TradeJournalWorker
 from live_broker import PRODUCTION_BLOCKERS
 
 from timezone_utils import now_local_iso
@@ -147,6 +149,7 @@ live_route = None
 live_worker = None
 lifecycle_chart_service = None
 signal_lifecycle = None
+trade_journal_worker = None
 phase_components = {}
 runtime_config = {}
 initialized = False
@@ -221,6 +224,8 @@ def _load_runtime_config() -> dict:
             "nifty50_stock_options": os.getenv("STOCK_OPTIONS_CHANNEL_ID"),
         },
         "signal_db_path": os.getenv("SIGNAL_DB_PATH", os.getenv("TRADING_DB_PATH", "trading.db")),
+        "trade_journal_path": os.getenv("TRADE_JOURNAL_XLSX_PATH", ""),
+        "trade_journal_interval": max(1, _env_int("TRADE_JOURNAL_EXPORT_SECONDS", 5)),
     }
 
 
@@ -360,7 +365,7 @@ def initialize_app(force: bool = False):
     global trading_db, state_manager, metrics_collector, alert_manager
     global telegram_handler, signal_notifier, queue_consumer_worker, market_scanner_worker, token_manager
     global paper_portfolio, paper_portfolio_worker, paper_telegram_control
-    global live_route, signal_lifecycle, live_worker, lifecycle_chart_service
+    global live_route, signal_lifecycle, live_worker, lifecycle_chart_service, trade_journal_worker
     global phase_components, runtime_config, initialized
 
     if initialized and not force:
@@ -377,6 +382,8 @@ def initialize_app(force: bool = False):
             token_manager.stop()
         if paper_portfolio_worker:
             paper_portfolio_worker.stop()
+        if trade_journal_worker:
+            trade_journal_worker.stop()
         if trading_db:
             try:
                 trading_db.close()
@@ -408,6 +415,7 @@ def initialize_app(force: bool = False):
         paper_portfolio_worker = None
         paper_telegram_control = None
         live_route = None
+        trade_journal_worker = None
         phase_components.clear()
         initialized = False
     
@@ -597,6 +605,26 @@ def initialize_app(force: bool = False):
                                      interval=runtime_config["nifty_live"]["worker_seconds"])
             live_worker.start()
 
+        journal_path = runtime_config["trade_journal_path"] or os.path.join(
+            os.path.dirname(runtime_config["signal_db_path"]) or ".",
+            "trade-journal.xlsx",
+        )
+        try:
+            journal_exporter = TradeJournalExporter(
+                runtime_config["signal_db_path"],
+                runtime_config["nifty_live"]["db_path"],
+                journal_path,
+            )
+            trade_journal_worker = TradeJournalWorker(
+                journal_exporter, interval=runtime_config["trade_journal_interval"]
+            )
+            trade_journal_worker.start()
+            phase_components["trade_journal"] = True
+        except (OSError, ValueError) as journal_error:
+            trade_journal_worker = None
+            phase_components["trade_journal"] = False
+            logger.warning("Trade journal exporter unavailable: %s", type(journal_error).__name__)
+
         channels = []
         if AlertManager is not None:
             alert_manager = AlertManager(channels=channels)
@@ -778,6 +806,9 @@ def health_check():
             },
             "lifecycle_charts": _lifecycle_chart_health(),
             "signal_lifecycle": signal_lifecycle.status() if signal_lifecycle is not None else {},
+            "trade_journal": trade_journal_worker.status() if trade_journal_worker is not None else {
+                "running": False, "export_error": "unavailable",
+            },
             "paper_outbox": paper_portfolio.notification_status() if paper_portfolio is not None else {},
             "paper_submissions": paper_portfolio.submission_status() if paper_portfolio is not None else {},
             "workers": {
@@ -795,6 +826,34 @@ def health_check():
             "error": str(e),
             "timestamp": now_local_iso()
         }), 500
+
+
+@app.route('/trade-journal.xlsx', methods=['GET'])
+def download_trade_journal():
+    """Download the private workbook using a dedicated secret header."""
+    secret = os.getenv("TRADE_JOURNAL_EXPORT_TOKEN", "")
+    if len(secret) < 32:
+        return jsonify({"error": "journal export is not configured"}), 503
+    supplied = request.headers.get("X-Trade-Journal-Token", "")
+    if not hmac.compare_digest(secret.encode("utf-8"), supplied.encode("utf-8")):
+        return jsonify({"error": "unauthorized"}), 401
+    if trade_journal_worker is None:
+        return jsonify({"error": "journal export is unavailable"}), 503
+    path = trade_journal_worker.exporter.output_path
+    if not path.is_file():
+        return jsonify({"error": "journal workbook is not ready"}), 503
+    response = send_file(
+        path,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name="Trading Log File through bot.xlsx",
+        conditional=False,
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
 
 @app.route('/dhan/health', methods=['GET'])
 def dhan_health():
@@ -1233,6 +1292,9 @@ def shutdown_handler():
 
     if paper_portfolio_worker:
         paper_portfolio_worker.stop()
+
+    if trade_journal_worker:
+        trade_journal_worker.stop()
 
     if market_scanner_worker:
         market_scanner_worker.stop()
