@@ -57,12 +57,46 @@ rate limit is 10/s; the adapter paces calls at ≥100 ms.
 | `authentication_verified` | read-only `/profile` matches client id and token validity not expired |
 | `funds_margin_schema_verified` | `/fundlimit` parsed with the documented schema (margin is validated on every entry) |
 | `reconciliation_verified` | authoritative snapshot (orders + super orders + trades + positions) within 60 s |
-| `product_type_verified` | `LIVE_PRODUCT_TYPE` ∈ {INTRADAY, MARGIN} and profile shows Derivative segment |
+| `product_type_verified` | `LIVE_PRODUCT_TYPE` ∈ {INTRADAY, MARGIN} and fresh profile recognizes exact `D` or `Derivative` segment |
 | `static_ip_verified` | `LIVE_STATIC_EGRESS_IP` is an exact address equal to Dhan's registered primary/secondary IP **and** three samples from `LIVE_EGRESS_IP_CHECK_URL` all equal it. CIDRs/ranges never match. |
 | `super_order_verified`, `production_adapter_verified` | operator attestation `LIVE_EXTERNAL_VALIDATION_REVISION` equals the deployed 40-hex revision (`RENDER_GIT_COMMIT`/`GITHUB_SHA`) |
 
 Attribute flags on an adapter are ignored. A successful funds call never marks
 the static IP or order authorization as verified.
+
+### Segment parsing and product diagnostics
+
+The sanitized runtime fixture from a successful read-only `GET /v2/profile` on
+2026-10-16 was `activeSegment="E, D, C, M, "`. The adapter splits strings on
+commas, trims whitespace and normalizes case, accepting only exact `D` and
+`Derivative` tokens for derivatives. The latter preserves full-word profile
+compatibility. Other short codes are not interpreted. Empty/unknown strings,
+`NOT_DERIVATIVE`, `DISABLED` and undocumented `Derivatives` do not qualify;
+non-string or missing `activeSegment` remains a schema error. Trailing commas
+are harmless but do not themselves qualify a profile.
+
+This fixes a parser false negative: with a fresh observed profile and
+`LIVE_PRODUCT_TYPE=INTRADAY`, `product_type_verified` can now become true.
+**It is only a local product/segment prerequisite, not proof that Dhan accepted
+an order or enabled Super Orders for this account.** Successful funds, quotes
+or profile calls prove neither order-IP authorization nor product acceptance.
+
+Inspect `/health → nifty_live.adapter_diagnostics` after the worker probes:
+
+- `probe_status`: `pending` (no completed probe cycle), `complete`, `error`
+  (see sanitized `probe_errors` categories), or `stale` (older than twice
+  `LIVE_PROBE_SECONDS`). Startup logs include this status; pending checks stay
+  false, not ready, and are not evidence of a failed broker response.
+- `derivatives_recognized`: exact supported token recognized in a fresh profile.
+- `product_type_allowed`: configured product is `INTRADAY` or `MARGIN`.
+- `product_readiness_reason`: `unsupported_product`, `profile_probe_missing`,
+  `profile_probe_stale`, `profile_probe_error`, `derivatives_not_recognized`,
+  or `eligible`. Unsupported configuration takes precedence; `eligible` refers
+  only to the product check. Authentication (including expiry), funds,
+  reconciliation, static IP and revision attestation remain independent guards.
+
+These additive diagnostics expose no raw profile, client ID, credential, IP or
+balance. Existing check names and boolean semantics are unchanged.
 
 ## External validation still required (cannot be proven from docs)
 
@@ -152,11 +186,29 @@ to "reset". Startup performs read-only reconciliation only.
 
 1. Keep `PRACTICE_MODE=true`, `AUTO_TRADING_ENABLED=false`, set
    `NIFTY_LIVE_ENABLED=true` with a persistent `LIVE_DB_PATH`.
-2. Deploy; `/health → nifty_live` shows `mode=blocked`, each check and
-   `adapter_diagnostics.probe_errors` (categories only). This performs **reads
-   only** (profile, getIP, fundlimit, order/trade/position books).
-3. Fix failing checks; complete external validation; set
-   `LIVE_EXTERNAL_VALIDATION_REVISION`.
+2. After deployment, inspect `/health → revision` against the intended commit;
+   a startup timestamp alone cannot establish the deployed revision. PR #58
+   merged on 2026-10-16 at 02:19:23Z as
+   `35ead5d2a77084c59f7d7d625c3f22dff20813bf`; that verified merge does not
+   establish deployment. Its direction/SR, chart, advisory trailing and journal
+   work is preserved by this parser fix.
+3. `/health → nifty_live` shows `mode=blocked`, each check and
+   `adapter_diagnostics` (sanitized diagnostics above). Wait for `probed_at`
+   and a non-pending `probe_status`, then inspect the product reason, errors,
+   and each independent check. Health inspection itself does not trigger a
+   probe; the worker runs probes/reconciliation. In this safe configuration it
+   performs **reads only** (profile, getIP, fundlimit, order/trade/position books).
+   A stale/error probe still blocks affected checks.
+4. Resolve exact static-egress/Dhan authorization, account/product Super Order
+   acceptance, stop-leg/fill validation and persistence prerequisites. Only
+   after external validation for the deployed revision may the operator set
+   `LIVE_EXTERNAL_VALIDATION_REVISION`; never set it automatically or use
+   `*_verified=true` environment variables as substitutes. Do not delete,
+   move or reset existing databases to resolve readiness.
+
+This bugfix alone does not enable live trading. Defaults remain
+`PRACTICE_MODE=true`, `AUTO_TRADING_ENABLED=false`; all external prerequisites
+and activation guards still apply.
 
 ## Activation and rollback
 

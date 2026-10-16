@@ -714,8 +714,10 @@ def initialize_app(force: bool = False):
             logger.info("NIFTY live execution disabled (NIFTY_LIVE_ENABLED=false); paper/signal mode only")
         else:
             live_state = live_route.status()
-            logger.info("NIFTY live mode=%s production_ready=%s blockers=%s",
-                        live_state["mode"], live_state["production_ready"], live_state["blockers"])
+            logger.info("NIFTY live mode=%s production_ready=%s probe_status=%s blockers=%s",
+                        live_state["mode"], live_state["production_ready"],
+                        live_state.get("adapter_diagnostics", {}).get("probe_status", "unavailable"),
+                        live_state["blockers"])
         logger.info("🗄️ Trading DB path: %s", runtime_config["db_path"])
         logger.info("=" * 70)
         initialized = True

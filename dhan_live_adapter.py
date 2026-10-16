@@ -303,7 +303,8 @@ class DhanLiveAdapter:
             except ValueError:
                 validity = None
         return {"verified": True, "timestamp": self.clock(),
-                "derivatives_active": "derivative" in segments.lower(),
+                "derivatives_active": bool({"d", "derivative"} & {
+                    segment.strip().lower() for segment in segments.split(",")}),
                 "token_valid_until": validity}
 
     def registered_ips(self):
@@ -547,9 +548,13 @@ class DhanLiveAdapter:
         self._probe, self._probed_at = probe, now
         return dict(probe)
 
+    def _fresh_probe(self):
+        return (self._probe if self._probed_at is not None
+                and self.clock() - self._probed_at <= 2 * self.probe_seconds else {})
+
     def readiness_checks(self):
         now = self.clock()
-        probe = self._probe if self._probed_at is not None and now - self._probed_at <= 2 * self.probe_seconds else {}
+        probe = self._fresh_probe()
         profile = probe.get("profile") or {}
         ips = probe.get("ips") or {}
         egress = probe.get("egress")
@@ -577,14 +582,30 @@ class DhanLiveAdapter:
 
     def diagnostics(self):
         probe = self._probe
+        fresh = self._fresh_probe()
+        probe_status = ("pending" if self._probed_at is None else "stale" if not fresh
+                        else "error" if probe.get("errors") else "complete")
+        product_allowed = self.product_type in PRODUCT_TYPES
+        derivatives_recognized = (fresh.get("profile") or {}).get("derivatives_active") is True
+        product_reason = (
+            "unsupported_product" if not product_allowed else
+            "profile_probe_missing" if self._probed_at is None else
+            "profile_probe_stale" if not fresh else
+            "profile_probe_error" if "profile" in fresh.get("errors", {}) else
+            "derivatives_not_recognized" if not derivatives_recognized else
+            "eligible")
         return {
             "probed_at": self._probed_at,
+            "probe_status": probe_status,
             "probe_errors": dict(probe.get("errors", {})),
             "registered_ip_count": sum(bool((probe.get("ips") or {}).get(key)) for key in ("primary", "secondary")),
             "egress_observation": ("unconfigured" if not self.egress_check_url
                                    else "stable" if probe.get("egress") and len(probe["egress"]) == 1
                                    else "unstable_or_unavailable"),
             "product_type": self.product_type,
+            "product_type_allowed": product_allowed,
+            "derivatives_recognized": derivatives_recognized,
+            "product_readiness_reason": product_reason,
             "external_validation_attested_for_revision": bool(
                 len(self.deployed_revision) == 40 and self.attested_revision == self.deployed_revision),
             "last_snapshot_at": self._last_snapshot_at,

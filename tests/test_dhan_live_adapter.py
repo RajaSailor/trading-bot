@@ -315,6 +315,99 @@ def test_readiness_is_computed_from_probes_and_attestation():
     assert status["blockers"] == []
 
 
+@pytest.mark.parametrize("segments,recognized", [
+    ("E, D, C, M, ", True),  # sanitized observed GET /v2/profile fixture
+    ("D", True),
+    (" e , d , c , m , \t", True),
+    ("Equity, Derivative, Currency, Commodity", True),
+    (" \tDeRiVaTiVe \n, ", True),
+    ("E, C, M, ", False),
+    ("Equity", False),
+    ("", False),
+    (" , \t, ", False),
+    ("Equity,", False),
+    ("NOT_DERIVATIVE", False),
+    ("DISABLED", False),
+    ("DerivativeDisabled, nonderivative, derivatives", False),
+    ("E D C M", False),
+])
+def test_profile_derivatives_require_exact_normalized_segment_tokens(segments, recognized):
+    routes = base_routes()
+    routes[("GET", "/profile")][1]["activeSegment"] = segments
+    adapter, session = make(routes)
+    assert adapter.profile()["derivatives_active"] is recognized
+    adapter.refresh_readiness(force=True)
+    assert adapter.readiness_checks()["product_type_verified"] is recognized
+    diagnostics = adapter.diagnostics()
+    assert diagnostics["derivatives_recognized"] is recognized
+    assert diagnostics["product_type_allowed"] is True
+    assert diagnostics["product_readiness_reason"] == (
+        "eligible" if recognized else "derivatives_not_recognized")
+    assert diagnostics["probe_status"] == "complete"
+    assert all(method == "GET" for method, *_ in session.calls)
+
+
+@pytest.mark.parametrize("segments", [None, True, 1, ["D"], {"D": True}])
+def test_profile_malformed_segment_types_remain_schema_errors(segments):
+    routes = base_routes()
+    routes[("GET", "/profile")][1]["activeSegment"] = segments
+    adapter, _ = make(routes)
+    with pytest.raises(DhanWireError) as error:
+        adapter.profile()
+    assert error.value.category == "schema"
+    adapter.refresh_readiness(force=True)
+    assert adapter.readiness_checks()["product_type_verified"] is False
+    assert adapter.diagnostics()["product_readiness_reason"] == "profile_probe_error"
+    assert adapter.diagnostics()["probe_errors"]["profile"] == "schema"
+
+
+def test_profile_missing_segments_remains_schema_error():
+    routes = base_routes()
+    del routes[("GET", "/profile")][1]["activeSegment"]
+    adapter, _ = make(routes)
+    with pytest.raises(DhanWireError, match="activeSegment"):
+        adapter.profile()
+
+
+@pytest.mark.parametrize("state,reason", [
+    ("missing", "profile_probe_missing"),
+    ("stale", "profile_probe_stale"),
+    ("error", "profile_probe_error"),
+    ("unsupported", "unsupported_product"),
+])
+def test_product_diagnostics_explain_fail_closed_readiness(state, reason):
+    routes = base_routes()
+    routes[("GET", "/profile")][1]["activeSegment"] = "E, D, C, M, "
+    if state == "error":
+        routes[("GET", "/profile")] = (401, {"errorCode": "DH-901",
+                                                "errorMessage": "secret-token"})
+    adapter, _ = make(routes, product_type="CNC" if state == "unsupported" else "INTRADAY")
+    if state != "missing":
+        adapter.refresh_readiness(force=True)
+    if state == "stale":
+        adapter.clock = lambda: NOW + 2 * adapter.probe_seconds + 1
+    assert adapter.readiness_checks()["product_type_verified"] is False
+    diagnostics = adapter.diagnostics()
+    assert diagnostics["product_readiness_reason"] == reason
+    assert diagnostics["product_type_allowed"] is (state != "unsupported")
+    assert diagnostics["derivatives_recognized"] is (state == "unsupported")
+    assert diagnostics["probe_status"] == ("pending" if state == "missing" else
+                                            "complete" if state == "unsupported" else state)
+    for private in ("secret-token", "1100", "203.0.113.10", "50000", "activeSegment", "dhanClientId"):
+        assert private not in str(diagnostics)
+
+
+def test_product_probe_freshness_boundary():
+    adapter, _ = make()
+    adapter.refresh_readiness(force=True)
+    adapter.clock = lambda: NOW + 2 * adapter.probe_seconds
+    assert adapter.readiness_checks()["product_type_verified"] is True
+    assert adapter.diagnostics()["product_readiness_reason"] == "eligible"
+    adapter.clock = lambda: NOW + 2 * adapter.probe_seconds + 1
+    assert adapter.readiness_checks()["product_type_verified"] is False
+    assert adapter.diagnostics()["product_readiness_reason"] == "profile_probe_stale"
+
+
 @pytest.mark.parametrize("change,check", [
     ("profile_error", "authentication_verified"),
     ("funds_error", "funds_margin_schema_verified"),
@@ -331,6 +424,7 @@ def test_readiness_is_computed_from_probes_and_attestation():
 ])
 def test_each_readiness_check_blocks_independently(change, check):
     routes = base_routes()
+    routes[("GET", "/profile")][1]["activeSegment"] = "E, D, C, M, "
     options = {}
     if change == "profile_error":
         routes[("GET", "/profile")] = (401, {"errorCode": "DH-901"})
@@ -361,6 +455,8 @@ def test_each_readiness_check_blocks_independently(change, check):
         adapter.snapshot()
     status = LiveBroker(adapter, clock=lambda: NOW).readiness()
     assert status["checks"][check] is False
+    if change not in ("profile_error", "bad_product", "no_derivatives"):
+        assert status["checks"]["product_type_verified"] is True
     assert status["production_ready"] is False
     assert status["blockers"]
 
@@ -412,7 +508,9 @@ def _live_config(path, practice=True, auto=False):
                                                 (True, True, "blocked"), (False, True, "live")])
 def test_route_mode_requires_actual_readiness_and_all_activation_guards(tmp_path, practice, auto, mode):
     from live_runtime import build_live_route
-    adapter, _ = make()
+    routes = base_routes()
+    routes[("GET", "/profile")][1]["activeSegment"] = "E, D, C, M, "
+    adapter, _ = make(routes)
     route = build_live_route(_live_config(tmp_path / "live.db", practice, auto),
                              paper_db_path=tmp_path / "paper.db", adapter=adapter,
                              clock=lambda: NOW)
@@ -422,6 +520,8 @@ def test_route_mode_requires_actual_readiness_and_all_activation_guards(tmp_path
     status = route.status()
     assert status["mode"] == mode and status["production_ready"] is True
     assert status["adapter"] == "dhan_v2_wire"
+    assert status["checks"]["product_type_verified"] is True
+    assert status["adapter_diagnostics"]["product_readiness_reason"] == "eligible"
     assert "secret-token" not in str(status)
 
 
