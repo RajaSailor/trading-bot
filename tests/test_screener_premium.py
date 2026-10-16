@@ -146,6 +146,47 @@ class SessionGatingTests(_Base):
 
 
 class BreakoutFlowTests(_Base):
+    def test_nifty_gate_rejection_counts_and_consumes_reference(self):
+        self._assert_market_rejection("direction_filter_reject")
+
+    def test_nifty_sr_rejection_counter(self):
+        self._assert_market_rejection("sr_filter_reject")
+
+    def _assert_market_rejection(self, reason):
+        self._prime({101: [_candle(0, 100, 110, 95, 98)]})
+        gate = self.screener.nifty_market_filter
+        gate.rejection = MagicMock(return_value=reason)
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 110, "timestamp": self.clock_now.timestamp()}}
+        self.screener.live_check_once(self.clock_now)
+        self.clock_now += timedelta(seconds=1)
+        self.data_manager.fetch_quotes.return_value = {
+            ("NSE_FNO", 101): {"price": 112, "timestamp": self.clock_now.timestamp()}}
+        self.assertEqual(0, self.screener.live_check_once(self.clock_now))
+        self.assertEqual([], self.alerts)
+        self.assertEqual(1, self.screener.status()["indicator_rejections"][reason])
+        self.assertFalse(self.screener._monitored[101]["reference"]["armed"])
+        self.assertNotIn("pending_signal", self.screener._monitored[101])
+        self.assertEqual({}, self.screener._last_entries)
+
+    def test_nifty_filter_is_not_called_for_other_categories(self):
+        for instrument in (self.stock, self.commodity, self.sensex):
+            with self.subTest(symbol=instrument.symbol):
+                self.screener._monitored.clear()
+                self.screener._live_bars.clear()
+                self._prime({101: [_candle(0, 100, 110, 95, 98)]})
+                self.screener._monitored[101]["instrument"] = instrument
+                self.screener.nifty_market_filter.rejection = MagicMock(
+                    side_effect=AssertionError("NIFTY only"))
+                self.data_manager.fetch_quotes.return_value = {
+                    ("NSE_FNO", 101): {"price": 110, "timestamp": self.clock_now.timestamp()}}
+                self.screener.live_check_once(self.clock_now)
+                self.clock_now += timedelta(seconds=1)
+                self.data_manager.fetch_quotes.return_value = {
+                    ("NSE_FNO", 101): {"price": 112, "timestamp": self.clock_now.timestamp()}}
+                self.assertEqual(1, self.screener.live_check_once(self.clock_now))
+                self.screener.nifty_market_filter.rejection.assert_not_called()
+
     def test_lifecycle_claim_precedes_callback_and_freezes_selection(self):
         from signal_lifecycle import SignalLifecycle
 

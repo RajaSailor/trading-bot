@@ -108,6 +108,7 @@ class LifecycleChartService:
         self._fetch_times = []
         self._cache = OrderedDict()
         self._cache_lock = threading.RLock()
+        self._inline = False
         self._init_db()
 
     def _now(self):
@@ -121,11 +122,31 @@ class LifecycleChartService:
 
     @staticmethod
     def _ensure_schema(db):
-        db.executescript(_SCHEMA)
+        # executescript implicitly commits: callers may own an outbox transaction.
+        for statement in _SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(lifecycle_chart_jobs)")}
+        if "delivery_mode" not in columns:
+            db.execute("ALTER TABLE lifecycle_chart_jobs ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'LEGACY'")
+
+    def bind_lifecycle(self):
+        """Make the lifecycle outbox the sole delivery owner."""
+        self._inline = True
+        self.stop()
+        with self._connect() as db:
+            self._retire_legacy(db)
+
+    def _retire_legacy(self, db):
+        db.execute("UPDATE lifecycle_chart_jobs SET status='SKIPPED',last_error='legacy_text_already_sent',"
+                   "updated_at=? WHERE status='PENDING' AND delivery_mode='LEGACY'", (self._now(),))
 
     def _init_db(self):
         with self._connect() as db:
             self._ensure_schema(db)
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lifecycle_outbox'").fetchone():
+                self._inline = True
+                self._retire_legacy(db)
 
     def _resolve_chat_id(self, category):
         resolver = getattr(self.sender, "resolve_chat_id", None)
@@ -171,7 +192,10 @@ class LifecycleChartService:
                 (job_id, signal_id, event, category, chat_id, job.get("reply_to_message_id"),
                  now, now, json.dumps(overlay, allow_nan=False)),
             )
-            return db.execute("SELECT changes()").fetchone()[0] == 1
+            inserted = db.execute("SELECT changes()").fetchone()[0] == 1
+            if inserted and job.get("delivery_mode") == "INLINE":
+                db.execute("UPDATE lifecycle_chart_jobs SET delivery_mode='INLINE' WHERE job_id=?", (job_id,))
+            return inserted
         except Exception as exc:
             logger.warning("Lifecycle chart enqueue failed: %s", exc.__class__.__name__)
             return False
@@ -257,6 +281,74 @@ class LifecycleChartService:
             "Signal-only / hypothetical — not a broker fill"
         )[:1024]
 
+    def deliver_event(self, db, job, caption):
+        """Attempt one photo in the caller's durable outbox transaction.
+
+        None means a definite pre-send failure: send the full text instead.
+        Transport failures return retry state and must not trigger a second send.
+        """
+        if not self.enabled or len(caption.encode("utf-16-le")) // 2 > 1024:
+            return None
+        job = {**job, "delivery_mode": "INLINE"}
+        self.enqueue(db, job)
+        row = db.execute("SELECT * FROM lifecycle_chart_jobs WHERE job_id=?", (job["job_id"],)).fetchone()
+        if row is None:
+            return None
+        if row["status"] == "SENT":
+            return {"ok": True, "message_id": row["photo_message_id"]}
+        if row["status"] in {"FAILED", "SKIPPED"}:
+            return None
+        now = self._now()
+        if row["retry_at"] > now:
+            return {"ok": False, "retry_at": row["retry_at"]}
+        if now - row["created_at"] > self.ttl_hours * 3600:
+            self._mark(db, row["job_id"], "SKIPPED", error="expired")
+            return None
+        overlay = json.loads(row["overlay"])
+        try:
+            snapshot = json.loads(row["snapshot"]) if row["snapshot"] else None
+            if snapshot is None:
+                snapshot, reason = self._fetch_snapshot(overlay)
+                if reason:
+                    raise ChartRenderError(reason)
+                self._mark(db, row["job_id"], "PENDING", snapshot=snapshot)
+            if not self._verify_snapshot(snapshot, overlay):
+                raise ChartRenderError("wrong_contract")
+            png = render_premium_chart(
+                snapshot.get("candles") or [],
+                {**overlay, "interval_minutes": self.interval_minutes, "window": self.window},
+                max_bytes=self.max_bytes,
+            )
+        except Exception as exc:
+            self._mark(db, row["job_id"], "SKIPPED", error=str(exc) if isinstance(
+                exc, (ChartRenderError, ChartUnavailable)) else exc.__class__.__name__)
+            return None
+        try:
+            result = self.sender(
+                row["category"], png, caption,
+                reply_to_message_id=row["reply_to_message_id"],
+                expected_chat_id=row["chat_id"],
+            )
+        except Exception as exc:
+            result = {"ok": False, "ambiguous": True, "error": exc.__class__.__name__}
+        if not isinstance(result, dict):
+            result = {"ok": False, "ambiguous": True, "error": "invalid_send_result"}
+        if result.get("error") == "missing_message_id":
+            result = {**result, "ambiguous": True}
+        if self._handle_send_result(db, row, result):
+            return result
+        updated = db.execute("SELECT * FROM lifecycle_chart_jobs WHERE job_id=?", (row["job_id"],)).fetchone()
+        if updated["status"] in {"FAILED", "SKIPPED"}:
+            if result.get("ambiguous") or result.get("error") in {
+                "destination_changed", "trade_control", "disabled", "unknown", "missing_destination"
+            }:
+                return {"ok": False, "terminal": True}
+            return None
+        return {"ok": False, "retry_at": updated["retry_at"]}
+
+    def abandon_event(self, db, event_id):
+        self._mark(db, event_id, "FAILED", error="notification_attempts_exhausted")
+
     def _mark(self, db, job_id, status, *, error=None, retry_at=None, photo_message_id=None,
               attempts=None, ambiguous_attempts=None, snapshot=None):
         fields = ["status=?", "updated_at=?"]
@@ -318,14 +410,14 @@ class LifecycleChartService:
         return False
 
     def run_once(self):
-        if not self.enabled:
+        if not self.enabled or self._inline:
             return 0
         now = self._now()
         with self._connect() as db:
             self._ensure_schema(db)
             row = db.execute(
                 """SELECT * FROM lifecycle_chart_jobs
-                   WHERE status='PENDING' AND retry_at<=?
+                   WHERE status='PENDING' AND delivery_mode='LEGACY' AND retry_at<=?
                    ORDER BY created_at LIMIT 1""",
                 (now,),
             ).fetchone()
@@ -379,6 +471,8 @@ class LifecycleChartService:
             return 1 if self._handle_send_result(db, row, result) else 0
 
     def start(self):
+        if self._inline:
+            return None
         if self._thread is not None and self._thread.is_alive():
             return self._thread
         self._stop.clear()

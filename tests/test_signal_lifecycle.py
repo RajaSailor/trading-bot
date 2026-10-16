@@ -555,6 +555,121 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(0, self.lifecycle.observe_quotes(self.quote(200), self.now))
         self.assertEqual(1, self.lifecycle.status()["open"])
 
+    def test_advisory_trailing_default_off_and_invalid_config_fails_closed(self):
+        for config in (
+            {"SIGNAL_ADVISORY_TRAILING_ENABLED": "false"},
+            {"SIGNAL_ADVISORY_TRAILING_ENABLED": "true", "SIGNAL_ADVISORY_TRAILING_GAIN_PERCENT": "nan"},
+            {"SIGNAL_ADVISORY_TRAILING_ENABLED": "true", "SIGNAL_ADVISORY_TRAILING_STOP_PERCENT": "21"},
+        ):
+            with self.subTest(config=config), patch.dict(os.environ, config):
+                incoming = payload(underlying=str(config), key=str(config))
+                position = self.lifecycle.open_once(incoming)
+                self.assertIsNone(position["advisory_trailing"])
+                self.now += timedelta(seconds=1)
+                self.lifecycle.observe_quotes(self.quote(135), self.now)
+                with sqlite3.connect(self.path) as db:
+                    data = json.loads(db.execute("SELECT data FROM lifecycle_signals WHERE id=?",
+                                                 (position["id"],)).fetchone()[0])
+                self.assertEqual(0, data["trailing_step"])
+                self.assertEqual(93.15, data["stop_loss"])
+                self.now = NOW
+
+    def test_advisory_trailing_steps_persist_and_modify_replies_to_original_open(self):
+        calls = []
+        self.lifecycle.notify = lambda c, m, **kw: calls.append((m, kw)) or (100 + len(calls))
+        with patch.dict(os.environ, {"SIGNAL_ADVISORY_TRAILING_ENABLED": "true"}):
+            position = self.lifecycle.open_once(payload())
+        self.lifecycle.dispatch_notifications()
+        self.now += timedelta(seconds=1)
+        self.lifecycle.observe_quotes(self.quote(134.93), self.now)
+        self.assertEqual(0, self.lifecycle.open_positions()[0]["trailing_step"])
+        self.now += timedelta(seconds=1)
+        self.lifecycle.observe_quotes(self.quote(134.94), self.now)
+        trailed = self.lifecycle.open_positions()[0]
+        self.assertEqual((1, 104.4, 167.95), (
+            trailed["trailing_step"], trailed["stop_loss"], trailed["target"]))
+        self.assertEqual((93.15, 151.05), (trailed["initial_stop_loss"], trailed["initial_target"]))
+        self.assertEqual(104.4, trailed["metadata"]["stop_loss"])
+        self.lifecycle.dispatch_notifications()
+        self.assertIn("ADVISORY TRAILING MODIFY", calls[-1][0])
+        self.assertIn("no broker order modification", calls[-1][0])
+        self.assertEqual(101, calls[-1][1]["reply_to_message_id"])
+        restarted = self.restart(notify=self.lifecycle.notify)
+        self.now += timedelta(seconds=1)
+        restarted.observe_quotes(self.quote(157.43), self.now)
+        self.assertEqual((2, 115.65, 184.8), tuple(
+            restarted.open_positions()[0][key] for key in ("trailing_step", "stop_loss", "target")))
+        restarted.dispatch_notifications()
+        self.assertEqual(101, calls[-1][1]["reply_to_message_id"])
+        self.now += timedelta(seconds=1)
+        restarted.observe_quotes(self.quote(110), self.now)
+        restarted.dispatch_notifications()
+        self.assertEqual("STOP", json.loads(self.signal_row()["data"])["status"])
+        self.assertIn("+₹240.00", calls[-1][0])
+        self.assertEqual(101, calls[-1][1]["reply_to_message_id"])
+        with sqlite3.connect(self.path) as db:
+            event_ids = [row[0] for row in db.execute("SELECT event_id FROM lifecycle_outbox ORDER BY sequence")]
+        self.assertEqual([position["id"] + ":" + event for event in ("OPEN", "MODIFY:1", "MODIFY:2", "STOP")],
+                         event_ids)
+
+    def test_trailing_target_exit_wins_over_modification_and_old_signals_not_enrolled(self):
+        with patch.dict(os.environ, {"SIGNAL_ADVISORY_TRAILING_ENABLED": "true"}):
+            self.lifecycle.open_once(payload())
+        self.now += timedelta(seconds=1)
+        self.assertEqual(1, self.lifecycle.observe_quotes(self.quote(200), self.now))
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM lifecycle_outbox WHERE event_id LIKE '%:MODIFY:%'").fetchone()[0])
+        incoming = payload(self.now, underlying="BANKNIFTY", key="old")
+        old = self.lifecycle.open_once(incoming)
+        with sqlite3.connect(self.path) as db:
+            old.pop("advisory_trailing")
+            db.execute("UPDATE lifecycle_signals SET data=? WHERE id=?", (json.dumps(old), old["id"]))
+            db.execute("ALTER TABLE lifecycle_outbox DROP COLUMN position")
+        with patch.dict(os.environ, {"SIGNAL_ADVISORY_TRAILING_ENABLED": "true"}):
+            restarted = self.restart()
+            self.now += timedelta(seconds=1)
+            restarted.observe_quotes(self.quote(135), self.now)
+        self.assertEqual(93.15, restarted.open_positions()[0]["stop_loss"])
+
+    def test_trailing_multi_step_gap_atomic_concurrent_duplicate_quotes(self):
+        incoming = payload()
+        incoming["metadata"]["reference_low"] = 10
+        with patch.dict(os.environ, {"SIGNAL_ADVISORY_TRAILING_ENABLED": "true"}):
+            self.lifecycle.open_once(incoming)
+        self.now += timedelta(seconds=1)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: self.lifecycle.observe_quotes(self.quote(180), self.now), range(4)))
+        position = self.lifecycle.open_positions()[0]
+        self.assertEqual(3, position["trailing_step"])
+        self.assertEqual(43.25, position["stop_loss"])
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(1, db.execute("SELECT COUNT(*) FROM lifecycle_outbox WHERE event_id LIKE '%:MODIFY:%'").fetchone()[0])
+        self.now += timedelta(seconds=1)
+        self.lifecycle.observe_quotes(self.quote(175), self.now)
+        self.assertEqual(3, self.lifecycle.open_positions()[0]["trailing_step"])
+
+    def test_trailing_custom_percentages_and_outbox_failure_roll_back_state(self):
+        with patch.dict(os.environ, {
+            "SIGNAL_ADVISORY_TRAILING_ENABLED": "true",
+            "SIGNAL_ADVISORY_TRAILING_GAIN_PERCENT": "10",
+            "SIGNAL_ADVISORY_TRAILING_STOP_PERCENT": "5",
+            "SIGNAL_ADVISORY_TRAILING_TARGET_PERCENT": "7",
+        }):
+            self.lifecycle.open_once(payload())
+        self.now += timedelta(seconds=1)
+        with patch.object(self.lifecycle, "_enqueue", side_effect=ValueError("outbox unavailable")):
+            with self.assertRaises(ValueError):
+                self.lifecycle.observe_quotes(self.quote(123.7), self.now)
+        position = self.restart().open_positions()[0]
+        self.assertEqual(0, position["trailing_step"])
+        self.assertEqual(NOW.timestamp(), position["last_quote_at"])
+        self.lifecycle.observe_quotes(self.quote(123.7), self.now)
+        position = self.lifecycle.open_positions()[0]
+        self.assertEqual((1, 98.8, 158.95),
+                         tuple(position[key] for key in ("trailing_step", "stop_loss", "target")))
+        self.lifecycle.observe_quotes(self.quote(140), self.now)  # Same source timestamp is a replay.
+        self.assertEqual(1, self.lifecycle.open_positions()[0]["trailing_step"])
+
 
 if __name__ == "__main__":
     unittest.main()

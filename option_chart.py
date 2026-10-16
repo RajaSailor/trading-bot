@@ -105,14 +105,19 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
         fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
         fig.patch.set_facecolor("white")
         ax.set_facecolor("#fbfbfb")
-        right_x = x[-1] + width * 2
         event_x = mdates.date2num(datetime.fromtimestamp(event_time, IST))
-        shade_start = max(min(event_x, right_x), x[0])
-        if right_x > shade_start:
-            ax.axhspan(entry, target, xmin=(shade_start - x[0]) / (right_x - x[0]), xmax=1,
-                       color="#2ca02c", alpha=0.10)
-            ax.axhspan(stop, entry, xmin=(shade_start - x[0]) / (right_x - x[0]), xmax=1,
-                       color="#d62728", alpha=0.10)
+        projection = max(interval_seconds / 86400 * 4, (event_x - x[0]) * .25)
+        right_x = event_x + projection
+        opened_x = mdates.date2num(datetime.fromtimestamp(
+            _epoch(overlay.get("opened_at") or event_time), IST))
+        shade_start = max(min(opened_x, event_x), x[0])
+        ax.add_patch(Rectangle((shade_start, entry), right_x - shade_start, target - entry,
+                               facecolor="#2ca02c", alpha=0.10, edgecolor="none"))
+        if stop < entry:
+            ax.add_patch(Rectangle((shade_start, stop), right_x - shade_start, entry - stop,
+                                   facecolor="#d62728", alpha=0.10, edgecolor="none"))
+        ax.text(event_x + projection / 2, .02, "Level projection\n(no future candles)",
+                transform=ax.get_xaxis_transform(), ha="center", fontsize=7, color="#666666")
         for xpos, candle in zip(x, plotted):
             color = "#1a9850" if candle["close"] >= candle["open"] else "#d73027"
             ax.vlines(xpos, candle["low"], candle["high"], color=color, linewidth=1.1)

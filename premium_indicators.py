@@ -71,7 +71,7 @@ def _epoch(value: object) -> float:
     return result
 
 
-def completed_candles(candles: Sequence[dict], now: datetime) -> list[dict]:
+def completed_candles(candles: Sequence[dict], now: datetime, *, timeframe_seconds=TIMEFRAME_SECONDS) -> list[dict]:
     """Validate, deduplicate, order and retain only completed, non-future bars.
 
     OHLC is mandatory; volume is optional and never used by the entry gates
@@ -105,7 +105,7 @@ def completed_candles(candles: Sequence[dict], now: datetime) -> list[dict]:
         values["volume"] = volume if volume is not None and math.isfinite(volume) and volume >= 0 else None
         values["timestamp"] = candle.get("timestamp")
         values["_timestamp_epoch"] = timestamp
-        if timestamp + TIMEFRAME_SECONDS <= now_epoch:
+        if timestamp + timeframe_seconds <= now_epoch:
             by_timestamp[timestamp] = values
     return [by_timestamp[timestamp] for timestamp in sorted(by_timestamp)]
 

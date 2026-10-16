@@ -9,16 +9,74 @@
 ## Signal Processing
 - The premium screener supports index, commodity and stock options, using only listed ITM+1 CE/PE contracts with expiry strictly after today.
 - History loading is silent. Completed highs/closes never generate service alerts or seed a monitored crossing. Startup above the reference does not trigger: a fresh observation at/below the high must precede an observation strictly above it. No candle close, second above-high observation, or continuation confirmation is required.
-- EMA9, MACD, RSI and volume have no role in premium alert eligibility or presentation. Legacy range/sideways gates remain removed.
+- Option-premium EMA9, MACD, RSI and volume have no role in premium alert eligibility or presentation. Legacy range/sideways gates remain removed. Optional NIFTY underlying EMA20 and VWAP/TWAP gates are described below.
 - The deterministic anti-chop key is `index_options:NIFTY:CE|PE`, shared across strikes/expiries and persisted with live intents. After an acted/filled trigger at P, the inclusive band [0.95P, 1.05P] is blocked; only a new crossing strictly outside it qualifies.
 - `PREMIUM_ALERT_STATE_FILE` retains legacy anti-chop and per-reference dedup state. In the deployed lifecycle path, a successfully acted trigger means the **atomic durable signal opening and outbox acceptance**, not Telegram delivery or a broker fill. This deliberately supersedes the old delivery-success-only policy: a transport retry must not open another CE/PE signal while the first is unresolved. Queue acceptance alone never advances this state. Mount persistent storage and run one scanner process.
 - Live breakout evidence must be at most 10 seconds old. A separate last-trade timestamp, when present, must be fresh; a fresh executable book timestamp cannot disguise stale LTP.
-- The compact signal alert has no EMA/MACD/RSI or volume lines. The fixed stop is `0.95 × red-candle low` (rounded upward to the contract tick); after the actual fill E, R is `E − SL` and the full target is `E + 2R`. No trailing or breakeven adjustment is enabled.
+- The compact signal alert has no EMA/MACD/RSI or volume lines. The initial stop is `0.95 × red-candle low` (rounded upward to the contract tick); after the actual fill E, R is `E − SL` and the full target is `E + 2R`. Live trailing remains disabled; opt-in hypothetical signal trailing is documented in [Lifecycle charts](LIFECYCLE_CHARTS.md).
 - Real auto sizing is exactly one lot from contract metadata and uses the carry-forward `MARGIN` product enum. Insufficient or unverifiable funds/margin, stale evidence, an occupied position, or the two-filled-entry IST-day cap blocks entry.
 - Internal payload/logging retains `reference_timestamp`, `reference_high`, `first_crossing_timestamp`, `breakout_price`, `detected_at`, and `sent_at`. Delivery retry keeps the original crossing price/time and detection deadline, never relabels a later above-high quote, and expires after 60 seconds. Retries require a fresh current quote and an open session. Transport uncertainty after Telegram accepts a message can still cause an at-least-once delivery; this is not a new strategy trigger.
 - Production execution remains fail-closed: there is no verified Dhan Super Order adapter, funds/margin wire parser, authoritative account reconciler, or broker-managed protection worker in this checkout. Runtime mode is automatic only, denies approval updates, and creates no approval cards or generic-order substitute. The old approval library is retained only for fake-adapter simulation tests. Dhan carry-forward semantics, static egress IP, and exit behavior must be independently verified before a real deployment.
 - The official [Super Order API](https://dhanhq.co/docs/v2/super-order/) and [Dhan SDK implementation](https://github.com/dhan-oss/DhanHQ-py/blob/main/src/dhanhq/_super_order.py) expose entry `orderType` and `stopLossPrice`, but no independent stop-leg LIMIT price/type. The precise production blocker is: **Super Order stop leg has no independently configurable LIMIT price/type; LIMIT entry does not verify LIMIT stop execution**. No alternative OCO/protection route has been verified safe with no hidden market execution, so there is no substitute route.
 - `live_route.status()` exposes sanitized actual execution account/intent status, LIMIT-only policy, disabled trailing, and production blockers; it does not expose Telegram secrets, credentials, or arbitrary adapter/proposal data.
+
+## Optional NIFTY spot direction and support/resistance gates
+
+These additive phase-1 gates apply only to `index_options:NIFTY`, before durable
+opening or live-route callbacks. They do not relax premium crossing/freshness,
+deduplication, risk or broker guards, enable execution, or change channel routing.
+Other indices, stocks and commodities retain their existing behavior.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `NIFTY_DIRECTION_FILTER_ENABLED` | `false` | Enable underlying regime gate |
+| `NIFTY_DIRECTION_HTF_MINUTES` | `15` | Completed spot candle interval: 5 or 15 |
+| `NIFTY_DIRECTION_NEUTRAL_POLICY` | `block` | `block` both sides, or `stronger` |
+| `NIFTY_DIRECTION_NEUTRAL_BREAKOUT_PCT` | `0.5` | Neutral `stronger` requires premium ≥ reference high × 1.005 |
+| `NIFTY_SR_FILTER_ENABLED` | `false` | Enable immediate underlying S/R gate independently |
+| `NIFTY_SR_BUFFER_PCT` | `0.10` | Spot-relative distance, in percent (0.10 means 0.1%, not 10%) |
+
+Enable either or both flags explicitly; no deployment environment is changed by
+this feature. Invalid numeric settings revert to defaults (S/R range 0–5%,
+neutral premium buffer 0.01–10%); unknown neutral policies block.
+
+The shared Dhan candle path resolves the **NIFTY spot index**, fetching the
+previous NSE trading day through today. Requests are coalesced once per
+session-anchored HTF bucket, with failed, empty or delayed latest-bar fetches
+retried after 120 seconds.
+No external data source or new dependency is introduced.
+
+Only valid completed, non-future OHLC bars are used. Latest completion must be
+today and no older than one HTF interval plus 60 seconds. EMA20 is seeded with
+20 completed closes, including previous-session history; 21 bars are needed
+for its slope. Bullish means latest spot close is strictly above both session
+VWAP and EMA20, with rising EMA20; bearish is the strict inverse. CE requires
+bullish and PE requires bearish. Equality/disagreement is neutral. Missing
+history or stale/invalid data blocks enabled gates, not a neutral exception.
+
+VWAP uses session typical price `(H+L+C)/3` weighted by positive volume.
+Spot indices often have no meaningful volume: if any session bar lacks positive
+volume, an explicitly labeled **TWAP** (equal-weight session typical prices)
+is used instead, never invented volume. No separate 5-minute confirmation or
+strength/probability score is added in phase 1.
+
+S/R includes previous-day high/low, classic pivot `P=(H+L+C)/3`,
+`R1=2P−L`, `R2=P+(H−L)`, `S1=2P−H`, `S2=P−(H−L)` and strict local
+swing highs/lows among the last 20 completed session bars (one neighbor on
+either side). The pivot can act as either support or resistance. CE is blocked
+when a resistance is at/above spot within `spot × buffer_pct / 100`; PE is
+blocked when support is at/below spot within that buffer. Equality blocks.
+Missing previous-session data blocks S/R. Already-broken levels do not block.
+For example, spot 25,000 and resistance 25,020 blocks CE with a 0.10% buffer;
+support 24,980 similarly blocks PE.
+
+Rejected crossings consume that RED reference rather than creating a delayed
+entry when regime changes. Health `indicator_rejections` adds
+`direction_filter_reject` and `sr_filter_reject` (direction evaluated first);
+`nifty_market_filter` exposes regime, VWAP/TWAP basis and as-of telemetry.
+Existing rejection categories remain intact. These are coarse, lagging
+confirmations, not forecasts: HTF spot closes can lag current price, gaps can
+jump levels, and enabling filters can reduce signal count substantially.
 
 ## Risk Management Rules
 - One NIFTY lot only; fresh funds/margin checks precede any entry, with a maximum of two filled entries per IST day and one managed open position.
@@ -29,8 +87,10 @@
 
 - There is one SQLite-enforced OPEN signal per underlying, across CE/PE,
   strikes and expiries. Different underlyings are independent. The selected
-  contract, entry, stop and **one 2R target** remain frozen until a fresh observed
-  target/stop outcome or session square-off. ITM+1 reselection cannot replace an open signal.
+  contract and entry remain frozen until a fresh observed target/stop outcome
+  or session square-off. Stop and **one initial 2R target** remain frozen unless
+  advisory trailing is explicitly enabled for that signal. ITM+1 reselection
+  cannot replace an open signal.
 - Telegram text includes contract, CE/PE, strike, expiry, entry, stop, target,
   risk points, lot size and observed premium. Signal/event IDs remain internal
   in SQLite/outbox deduplication, not in Telegram text. For example:
@@ -94,7 +154,8 @@
   "Hypothetical signal results (1 lot per signal), not broker fills."
   These are not realized broker results or guaranteed performance.
 - No pullback/rebound, five-minute closing confirmation, five-point entry
-  buffer, extra indicators, second target, trailing or breakeven is used.
+  buffer, second target or breakeven is used. NIFTY underlying filters and
+  advisory trailing are opt-in; defaults retain the original signal rules.
 
 ## Order Execution Flow
 1. Validate the NIFTY ITM+1 contract and its lot/tick metadata.
