@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import weakref
 from datetime import date, datetime
 from typing import Iterable, List, Optional, Sequence
 
@@ -36,6 +37,12 @@ class ATMOptionsFetcher:
 
     def __init__(self, data_manager: Optional[DataManager] = None) -> None:
         self.data_manager = data_manager or get_shared_data_manager()
+        # (symbol, side) pairs already warned as unlisted for one security master
+        # load and IST day. The lookup still runs every retry; only the repeated
+        # WARNING is demoted to DEBUG. A weak reference avoids pinning a released master.
+        self._unlisted_index: Optional[weakref.ref] = None
+        self._unlisted_day: Optional[date] = None
+        self._unlisted_warned: set = set()
 
     # ------------------------------------------------------------------ spot
     def get_spot_price(self, instrument: Instrument, interval: str = "10min") -> Optional[float]:
@@ -114,9 +121,19 @@ class ATMOptionsFetcher:
             return None
         chain = index.option_chain(entry.root, option_side)
         if not chain or not chain[1]:
-            logger.warning("[%s] No listed %s contracts after %s", instrument.symbol, option_side, today.isoformat())
+            self._log_unlisted(index, instrument.symbol, option_side, today)
             return None
         return chain
+
+    def _log_unlisted(self, index, symbol: str, option_side: str, today: date) -> None:
+        current = self._unlisted_index() if self._unlisted_index is not None else None
+        if current is not index or self._unlisted_day != today:
+            self._unlisted_index = weakref.ref(index)
+            self._unlisted_day = today
+            self._unlisted_warned = set()
+        log = logger.debug if (symbol, option_side) in self._unlisted_warned else logger.warning
+        self._unlisted_warned.add((symbol, option_side))
+        log("[%s] No listed %s contracts after %s", symbol, option_side, today.isoformat())
 
     def _contract_dict(
         self,
