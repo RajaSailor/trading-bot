@@ -143,6 +143,8 @@ class SignalLifecycle:
             outbox_columns = {row["name"] for row in db.execute("PRAGMA table_info(lifecycle_outbox)")}
             if "position" not in outbox_columns:
                 db.execute("ALTER TABLE lifecycle_outbox ADD COLUMN position TEXT")
+            if "last_error" not in outbox_columns:
+                db.execute("ALTER TABLE lifecycle_outbox ADD COLUMN last_error TEXT")
             db.execute("INSERT OR IGNORE INTO lifecycle_meta VALUES('inception',?)",
                        (now.date().isoformat(),))
             for category in CATEGORY_EXCHANGES:
@@ -211,6 +213,23 @@ class SignalLifecycle:
                       VALUES(?,?,?,?)""", (event_id, category, message,
                                           json.dumps(position, allow_nan=False) if position else None))
 
+    def _resolve_chat_id(self, category):
+        owner = getattr(self.notify, "__self__", None)
+        for candidate in (self.notify, owner, self.chart_jobs):
+            resolver = getattr(candidate, "resolve_chat_id", None)
+            if resolver is None and candidate is self.chart_jobs:
+                resolver = getattr(candidate, "_resolve_chat_id", None)
+            if callable(resolver):
+                try:
+                    chat_id = resolver(category)
+                    if chat_id is not None and not isinstance(chat_id, bool) and int(chat_id) != 0:
+                        return int(chat_id)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                except Exception:
+                    return None
+        return None
+
     def open_once(self, payload):
         """Accept a validated enriched scanner queue payload, or fail closed."""
         try:
@@ -271,6 +290,7 @@ class SignalLifecycle:
                 "entry": float(entry), "stop_loss": float(stop), "target": float(target),
                 "initial_stop_loss": float(stop), "initial_target": float(target),
                 "trailing_step": 0, "advisory_trailing": _trailing_settings(),
+                "telegram_chat_id": self._resolve_chat_id(category),
                 "risk_points": float(entry - stop),
                 "observed_entry": float(observed), "security_id": int(security),
                 "exchange_segment": segment, "option_type": side, "strike": strike,
@@ -659,6 +679,20 @@ class SignalLifecycle:
                     event = event_key.split(":")[0]
                     signal = db.execute("SELECT * FROM lifecycle_signals WHERE id=?",
                                         (signal_id,)).fetchone()
+                    expected_chat_id = None
+                    if signal is not None:
+                        current_position = json.loads(signal["data"])
+                        expected_chat_id = current_position.get("telegram_chat_id")
+                        configured_chat_id = self._resolve_chat_id(row["category"])
+                        if expected_chat_id is None and event == "OPEN" and configured_chat_id is not None:
+                            expected_chat_id = configured_chat_id
+                            current_position["telegram_chat_id"] = expected_chat_id
+                            db.execute("UPDATE lifecycle_signals SET data=? WHERE id=?",
+                                       (json.dumps(current_position), signal_id))
+                        if expected_chat_id is not None and configured_chat_id != expected_chat_id:
+                            db.execute("UPDATE lifecycle_outbox SET delivered=-1,last_error='destination_changed' "
+                                       "WHERE event_id=?", (row["event_id"],))
+                            continue
                     kwargs = {}
                     if signal is not None:
                         kwargs["return_message_id"] = True
@@ -670,6 +704,14 @@ class SignalLifecycle:
                             inspect.signature(self.notify).bind(row["category"], row["message"], **kwargs)
                         except (TypeError, ValueError):
                             kwargs = {}
+                    if expected_chat_id is not None:
+                        try:
+                            inspect.signature(self.notify).bind(
+                                row["category"], row["message"], **kwargs, expected_chat_id=expected_chat_id)
+                        except (TypeError, ValueError):
+                            pass
+                        else:
+                            kwargs["expected_chat_id"] = expected_chat_id
                     message = row["message"]
                     position = None
                     if signal is not None:
@@ -683,11 +725,13 @@ class SignalLifecycle:
                                                     "Hypothetical signal outcomes")))
                         if "Hypothetical signal outcomes" in row["message"]:
                             message += "\nHypothetical signal results (1 lot per signal), not broker fills."
+                    deliver_chart = getattr(self.chart_jobs, "deliver_event", None)
                     if (position is not None and event in {"OPEN", "STOP", "TARGET", "SESSION_CLOSE"}
-                            and self.chart_jobs is not None):
-                        chart_result = self.chart_jobs.deliver_event(db, {
+                            and callable(deliver_chart)):
+                        chart_result = deliver_chart(db, {
                             "job_id": row["event_id"], "signal_id": signal_id,
                             "event": event, "category": row["category"],
+                            "chat_id": expected_chat_id,
                             "reply_to_message_id": (
                                 signal["telegram_message_id"] if event != "OPEN" else None),
                             "overlay": self._chart_overlay(position, event),
@@ -711,6 +755,8 @@ class SignalLifecycle:
                         position = json.loads(signal["data"])
                         if event == "OPEN":
                             position["telegram_message_id"] = message_id
+                            if expected_chat_id is not None:
+                                position["telegram_chat_id"] = expected_chat_id
                             db.execute("UPDATE lifecycle_signals SET telegram_message_id=?,data=? WHERE id=?",
                                        (message_id, json.dumps(position), signal_id))
                         db.execute("""INSERT OR REPLACE INTO lifecycle_event_messages
@@ -728,8 +774,11 @@ class SignalLifecycle:
                     if chart_result is not None:
                         delay = max(delay, chart_result.get("retry_at", stamp) - stamp)
                         failed = failed or bool(chart_result.get("terminal"))
-                        if failed:
+                        if failed and not chart_result.get("terminal"):
                             self.chart_jobs.abandon_event(db, row["event_id"])
+                            # Exhausting optional photo attempts must not discard the alert.
+                            # The next attempt sends text after the current rate-limit wait.
+                            attempts, failed = 0, False
                     db.execute("UPDATE lifecycle_outbox SET attempts=?,retry_at=?,delivered=? WHERE event_id=?",
                                (attempts, stamp + delay, -1 if failed else 0, row["event_id"]))
         return delivered
@@ -766,6 +815,8 @@ class SignalLifecycle:
                     "stop": counts.get("STOP", 0), "session_close": counts.get("SESSION_CLOSE", 0),
                     "pending_notifications": pending,
                     "retrying_notifications": retries,
+                    "blocked_destination_notifications": db.execute(
+                        "SELECT COUNT(*) FROM lifecycle_outbox WHERE last_error='destination_changed'").fetchone()[0],
                     "advisory_trailing": {
                         "enabled_for_new_signals": _trailing_settings() is not None,
                         "live_broker_modifications_supported": False,

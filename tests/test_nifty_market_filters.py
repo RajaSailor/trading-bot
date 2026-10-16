@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta
+from collections import OrderedDict
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -194,3 +196,27 @@ def test_delayed_latest_bar_does_not_cache_for_whole_bucket(monkeypatch):
     instance.refresh(NOW + timedelta(seconds=120))
     assert instance.data_manager.fetch_contract_candles.call_count == 2
     assert instance.rejection("CE", {}, NOW + timedelta(seconds=120)) is None
+
+
+def test_delayed_retry_refreshes_real_shared_candle_cache(monkeypatch):
+    from data_manager import DataManager
+
+    monkeypatch.setattr("data_manager._apply_rate_limit", lambda: None)
+    manager = DataManager.__new__(DataManager)
+    manager._contract_cache = OrderedDict()
+    manager._contract_cache_lock = threading.RLock()
+    manager.resolve_underlying = MagicMock(return_value=SimpleNamespace(
+        security_id=13, exchange_segment="IDX_I", instrument_type="INDEX"))
+    manager._fetch_dhan_intraday_data = MagicMock(side_effect=[
+        spot_candles()[:-1], spot_candles()])
+    instance = gate(monkeypatch)
+    instance.data_manager = manager
+    instance.refresh(NOW)
+    instance.refresh(NOW + timedelta(seconds=120))
+    assert manager._fetch_dhan_intraday_data.call_count == 2
+    assert instance.rejection("CE", {}, NOW + timedelta(seconds=120)) is None
+    result = manager.fetch_contract_candles(
+        13, "IDX_I", "INDEX", "2026-10-15", "2026-10-16", 15,
+        now=(NOW + timedelta(seconds=125)).timestamp())
+    assert len(result) == len(spot_candles())
+    assert manager._fetch_dhan_intraday_data.call_count == 2

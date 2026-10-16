@@ -44,6 +44,8 @@ The shared Dhan candle path resolves the **NIFTY spot index**, fetching the
 previous NSE trading day through today. Requests are coalesced once per
 session-anchored HTF bucket, with failed, empty or delayed latest-bar fetches
 retried after 120 seconds.
+These explicit retries refresh the shared candle cache; ordinary reads retain
+bucket caching and all broker request pacing remains in force.
 No external data source or new dependency is introduced.
 
 Only valid completed, non-future OHLC bars are used. Latest completion must be

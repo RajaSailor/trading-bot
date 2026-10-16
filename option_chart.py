@@ -129,7 +129,10 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
                 ax.add_patch(Rectangle((xpos - width / 2, lower), width, body,
                                        facecolor=color, edgecolor=color, alpha=0.85))
         ax.axhline(entry, color="#1f77b4", linestyle="--", linewidth=1.2, label=f"Entry {entry:.2f}")
-        ax.axhline(stop, color="#d62728", linestyle="-", linewidth=1.2, label=f"Stop {stop:.2f}")
+        stop_label = "Stop (protected gain)" if stop > entry else (
+            "Stop (breakeven)" if stop == entry else "Stop")
+        ax.axhline(stop, color="#2ca02c" if stop >= entry else "#d62728", linestyle="-",
+                   linewidth=1.2, label=f"{stop_label} {stop:.2f}")
         ax.axhline(target, color="#2ca02c", linestyle="-", linewidth=1.2, label=f"Target {target:.2f}")
 
         ref_time = overlay.get("breakout_timestamp") or overlay.get("reference_timestamp")

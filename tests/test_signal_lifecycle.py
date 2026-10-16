@@ -405,6 +405,25 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("-₹1,447.50", calls[1][1])
         self.assertNotIn("trade_control", [call[0] for call in calls])
 
+    def test_text_only_destination_frozen_and_exit_blocked_after_channel_change(self):
+        calls = []
+        destination = [-1001]
+        def notify(category, message, **kwargs):
+            calls.append((message, kwargs))
+            return 77
+        notify.resolve_chat_id = lambda category: destination[0]
+        lifecycle = self.restart(notify=notify)
+        lifecycle.open_once(payload())
+        self.assertEqual(1, lifecycle.dispatch_notifications())
+        self.assertEqual(-1001, calls[0][1]["expected_chat_id"])
+        destination[0] = -2001
+        restarted = self.restart(notify=notify)
+        self.now += timedelta(seconds=1)
+        restarted.observe_quotes(self.quote(200), self.now)
+        self.assertEqual(0, restarted.dispatch_notifications())
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, restarted.status()["blocked_destination_notifications"])
+
     def test_exit_waits_for_id_and_permanently_failed_open_falls_back(self):
         calls = []
 

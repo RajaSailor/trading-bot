@@ -284,8 +284,8 @@ class LifecycleChartService:
     def deliver_event(self, db, job, caption):
         """Attempt one photo in the caller's durable outbox transaction.
 
-        None means a definite pre-send failure: send the full text instead.
-        Transport failures return retry state and must not trigger a second send.
+        None means preparation failed or bounded photo attempts exhausted:
+        send the full text instead. Retry state defers that fallback.
         """
         if not self.enabled or len(caption.encode("utf-16-le")) // 2 > 1024:
             return None
@@ -297,6 +297,8 @@ class LifecycleChartService:
         if row["status"] == "SENT":
             return {"ok": True, "message_id": row["photo_message_id"]}
         if row["status"] in {"FAILED", "SKIPPED"}:
+            if row["retry_at"] > self._now():
+                return {"ok": False, "retry_at": row["retry_at"]}
             return None
         now = self._now()
         if row["retry_at"] > now:
@@ -339,10 +341,12 @@ class LifecycleChartService:
             return result
         updated = db.execute("SELECT * FROM lifecycle_chart_jobs WHERE job_id=?", (row["job_id"],)).fetchone()
         if updated["status"] in {"FAILED", "SKIPPED"}:
-            if result.get("ambiguous") or result.get("error") in {
+            if result.get("error") in {
                 "destination_changed", "trade_control", "disabled", "unknown", "missing_destination"
             }:
                 return {"ok": False, "terminal": True}
+            if result.get("retry_after") is not None:
+                return {"ok": False, "retry_at": updated["retry_at"]}
             return None
         return {"ok": False, "retry_at": updated["retry_at"]}
 
@@ -382,7 +386,9 @@ class LifecycleChartService:
         now = self._now()
         if result.get("retry_after") is not None:
             retry = max(1, min(300, int(result.get("retry_after") or 1)))
-            self._mark(db, row["job_id"], "PENDING", retry_at=now + retry,
+            attempts = int(row["attempts"]) + 1
+            self._mark(db, row["job_id"], "FAILED" if attempts >= self.max_attempts else "PENDING",
+                       attempts=attempts, retry_at=now + retry,
                        error=result.get("error") or "retry_after")
             return False
         if result.get("ambiguous"):

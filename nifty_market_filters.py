@@ -102,6 +102,7 @@ class NiftyMarketFilter:
         bucket = (local.date(), int((now.timestamp() - anchor) // (self.minutes * 60)))
         if self._bucket == bucket and (not self._retry_at or now.timestamp() < self._retry_at):
             return
+        retry = self._bucket == bucket and bool(self._retry_at)
         self._bucket = bucket
         self._retry_at = 0
         try:
@@ -112,7 +113,7 @@ class NiftyMarketFilter:
             candles = self.data_manager.fetch_contract_candles(
                 ref.security_id, ref.exchange_segment, ref.instrument_type,
                 previous_trading_day("NSE", day).isoformat(), day.isoformat(),
-                self.minutes, symbol="NIFTY", now=now.timestamp(),
+                self.minutes, symbol="NIFTY", now=now.timestamp(), force_refresh=retry,
             )
             self._candles = candles or []
             context = market_context(self._candles, now, self.minutes)
