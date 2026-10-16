@@ -318,6 +318,7 @@ class TelegramHandler:
         *,
         return_message_id: bool = False,
         reply_to_message_id: Optional[int] = None,
+        expected_chat_id: Optional[int] = None,
     ) -> bool | int:
         """Send raw alert to a configured Telegram channel."""
         try:
@@ -332,6 +333,9 @@ class TelegramHandler:
             bot_token, chat_id = self._get_bot_for_category(normalized_channel)
             if not bot_token or not chat_id:
                 logger.warning("❌ Channel config missing for %s", channel_type)
+                return False
+            if expected_chat_id is not None and int(expected_chat_id) != int(chat_id):
+                logger.warning("❌ Channel destination changed for %s", channel_type)
                 return False
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"

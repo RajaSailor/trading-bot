@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -63,6 +64,45 @@ def candles(base=NOW):
 
 
 class ChartRenderTests(unittest.TestCase):
+    def test_trailed_stop_above_entry_has_no_negative_risk_zone(self):
+        from matplotlib.figure import Figure
+        saved = []
+        original = Figure.savefig
+        def capture(figure, *args, **kwargs):
+            saved.append(figure.axes[0])
+            return original(figure, *args, **kwargs)
+        with patch.object(Figure, "savefig", capture):
+            render_premium_chart(candles(), {
+                "event": "STOP", "event_time": NOW.timestamp(), "entry": 100,
+                "stop": 110, "target": 150, "event_premium": 109,
+            })
+        zones = [p for p in saved[0].patches if p.get_alpha() == .10]
+        self.assertEqual(1, len(zones))
+        self.assertGreater(zones[0].get_height(), 0)
+        self.assertIn("Stop (protected gain) 110.00", saved[0].get_legend_handles_labels()[1])
+
+    def test_projection_is_visible_beyond_event_without_future_candles(self):
+        import matplotlib.dates as mdates
+        from matplotlib.figure import Figure
+        saved = []
+        original = Figure.savefig
+        def capture(figure, *args, **kwargs):
+            saved.append(figure.axes[0])
+            return original(figure, *args, **kwargs)
+        overlay = {"event": "OPEN", "event_time": NOW.timestamp(), "entry": 112.45,
+                   "stop": 93.15, "target": 151.05}
+        with patch.object(Figure, "savefig", capture):
+            render_premium_chart(candles(), overlay)
+        axes = saved[0]
+        event_x = mdates.date2num(NOW)
+        self.assertGreaterEqual(axes.get_xlim()[1] - event_x, 39 / 1440)
+        zones = [p for p in axes.patches if p.get_alpha() == .10]
+        self.assertEqual(2, len(zones))
+        self.assertTrue(all(zone.get_x() >= event_x for zone in zones))
+        self.assertTrue(all(zone.get_width() >= 39 / 1440 for zone in zones))
+        bodies = [p for p in axes.patches if p.get_alpha() == .85]
+        self.assertEqual(len(select_chart_candles(candles(), NOW.timestamp())), len(bodies))
+
     def test_render_valid_png_bounded_and_closes_figures(self):
         overlay = {"event": "OPEN", "event_time": NOW.timestamp(), "event_premium": 112.41,
                    "entry": 112.45, "stop": 93.15, "target": 151.05,
@@ -212,7 +252,7 @@ class LifecycleChartServiceTests(unittest.TestCase):
         self.assertEqual(150, settings["window"])
         self.assertFalse(settings["enabled"])
 
-    def test_signal_lifecycle_enqueues_text_message_ids_for_all_categories_and_events(self):
+    def test_signal_lifecycle_single_photo_full_caption_all_categories_and_events(self):
         service, sender = self.service()
         sent = []
         next_id = [100]
@@ -235,19 +275,23 @@ class LifecycleChartServiceTests(unittest.TestCase):
                                   ("MCX_COMM", 303): {"price": 80, "trade_timestamp": self.now}},
                                  datetime.fromtimestamp(self.now, IST))
         self.assertEqual(3, lifecycle.dispatch_notifications())
-        self.assertTrue(all(call[2].get("return_message_id") is True for call in sent))
-        self.assertTrue(all("reply_to_message_id" in call[2] for call in sent[3:]))
+        self.assertEqual([], sent)
+        self.assertEqual(6, len(sender.calls))
+        self.assertTrue(all(call[3] is None for call in sender.calls[:3]))
+        self.assertTrue(all(call[3] == 900 for call in sender.calls[3:]))
+        self.assertTrue(all("Entry trigger:" in call[2] and "Lot size:" in call[2] for call in sender.calls))
+        self.assertTrue(all("P&amp;L" in call[2] for call in sender.calls[3:]))
         with sqlite3.connect(self.path) as db:
             rows = db.execute("SELECT event,reply_to_message_id FROM lifecycle_chart_jobs").fetchall()
         self.assertEqual(6, len(rows))
-        self.assertEqual({101, 102, 103}, {row[1] for row in rows if row[0] == "OPEN"})
-        self.assertEqual({104, 105, 106}, {row[1] for row in rows if row[0] != "OPEN"})
-        while service.run_once():
-            pass
-        self.assertTrue(sender.calls)
+        self.assertEqual({None}, {row[1] for row in rows if row[0] == "OPEN"})
+        self.assertEqual({900}, {row[1] for row in rows if row[0] != "OPEN"})
+        self.assertEqual(0, service.run_once())
+        self.assertEqual(0, lifecycle.dispatch_notifications())
+        self.assertEqual(6, len(sender.calls))
 
-    def test_session_close_chart_replies_to_session_close_text(self):
-        service, _ = self.service()
+    def test_session_close_photo_replies_to_open_photo(self):
+        service, sender = self.service()
         ids = [200]
         sent = []
         def notify(category, message, **kwargs):
@@ -263,11 +307,261 @@ class LifecycleChartServiceTests(unittest.TestCase):
         lifecycle.maintenance(MagicMock(fetch_quotes=MagicMock(return_value={
             ("NSE_FNO", 101): {"price": 140, "trade_timestamp": self.now}
         })), datetime.fromtimestamp(self.now, IST))
-        self.assertTrue(any("SESSION CLOSE EXIT" in message for message, _ in sent))
+        self.assertTrue(all("DAILY SIGNAL REPORT" in message for message, _ in sent))
+        self.assertIn("SESSION CLOSE EXIT", sender.calls[-1][2])
+        self.assertIn("Exit premium: 140.00", sender.calls[-1][2])
+        self.assertIn("P&amp;L", sender.calls[-1][2])
         with sqlite3.connect(self.path) as db:
             row = db.execute("SELECT event,reply_to_message_id FROM lifecycle_chart_jobs "
                              "WHERE event='SESSION_CLOSE'").fetchone()
-        self.assertEqual(("SESSION_CLOSE", 202), row)
+        self.assertEqual(("SESSION_CLOSE", 900), row)
+
+    def lifecycle(self, service, sent):
+        def notify(category, message, **kwargs):
+            sent.append((category, message, kwargs))
+            return 77
+        return SignalLifecycle(self.path, notify=notify,
+                               clock=lambda: datetime.fromtimestamp(self.now, IST), chart_jobs=service)
+
+    def test_preparation_failure_disabled_and_long_caption_fall_back_to_one_text(self):
+        for reason in ("no_candles", "render", "disabled", "long_caption"):
+            with self.subTest(reason=reason):
+                path = self.path + "." + reason
+                service = LifecycleChartService(
+                    path, _Sender(), lambda *args: [], enabled=reason != "disabled", clock=lambda: self.now)
+                sent = []
+                lifecycle = SignalLifecycle(path, notify=lambda c, m, **kw: sent.append((m, kw)) or 77,
+                                            clock=lambda: NOW, chart_jobs=service)
+                incoming = payload()
+                if reason == "long_caption":
+                    incoming["metadata"]["option_symbol"] = "X" * 1100
+                lifecycle.open_once(incoming)
+                with patch("lifecycle_charts.render_premium_chart", side_effect=ChartRenderError(reason)):
+                    self.assertEqual(1, lifecycle.dispatch_notifications())
+                self.assertEqual(1, len(sent))
+                self.assertIn("POSITION OPEN TRIGGER", sent[0][0])
+                self.assertEqual([], service.sender.calls)
+                self.assertEqual(0, lifecycle.dispatch_notifications())
+
+    def test_retry_after_uses_same_snapshot_after_restart_and_no_text(self):
+        sender = _Sender({"ok": False, "retry_after": 30, "error": "rate_limited"})
+        service, _ = self.service(sender=sender)
+        sent = []
+        lifecycle = self.lifecycle(service, sent)
+        position = lifecycle.open_once(payload())
+        self.assertEqual(0, lifecycle.dispatch_notifications())
+        self.assertEqual([], sent)
+        self.assertEqual(1, len(sender.calls))
+        self.now += 2
+        lifecycle.observe_quotes({("NSE_FNO", 101): {"price": 80, "trade_timestamp": self.now}},
+                                 datetime.fromtimestamp(self.now, IST))
+        self.assertEqual(0, lifecycle.dispatch_notifications())
+        self.assertEqual(1, len(sender.calls))
+        self.now += 30
+        restarted_service, new_sender = self.service()
+        self.provider_calls.clear()
+        restarted = self.lifecycle(restarted_service, sent)
+        self.assertEqual(2, restarted.dispatch_notifications())
+        self.assertEqual(1, len(self.provider_calls))  # Exit fetch; OPEN reuses its durable snapshot.
+        self.assertEqual([], sent)
+        self.assertIn("Observed breakout premium: 112.41", new_sender.calls[0][2])
+        self.assertNotIn("Exit premium:", new_sender.calls[0][2])
+        self.assertEqual(900, new_sender.calls[1][3])
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT event_id,chat_message_id FROM lifecycle_event_messages").fetchall()
+        self.assertEqual({position["id"] + ":OPEN", position["id"] + ":STOP"}, {r[0] for r in rows})
+
+    def test_concurrent_photo_drains_do_not_duplicate_and_attempt_cap_releases_queue(self):
+        service, sender = self.service()
+        sent = []
+        lifecycle = self.lifecycle(service, sent)
+        lifecycle.open_once(payload())
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            counts = list(pool.map(lambda _: lifecycle.dispatch_notifications(), range(4)))
+        self.assertEqual(1, sum(counts))
+        self.assertEqual(1, len(sender.calls))
+        self.assertEqual([], sent)
+        sender.result = {"ok": False, "retry_after": 30, "error": "rate_limited"}
+        lifecycle.open_once(payload(underlying="BANKNIFTY", key="bank"))
+        with patch.dict(os.environ, {"SIGNAL_NOTIFICATION_MAX_ATTEMPTS": "2"}):
+            lifecycle.dispatch_notifications()
+            self.now += 31
+            lifecycle.dispatch_notifications()
+            self.assertEqual([], sent)
+            self.now += 31
+            self.assertEqual(1, lifecycle.dispatch_notifications())
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM lifecycle_outbox WHERE delivered=0").fetchone()[0])
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM lifecycle_chart_jobs WHERE status='PENDING'").fetchone()[0])
+        self.assertEqual(1, len(sent))
+
+    def test_bounded_photo_failures_fall_back_but_destination_refusals_remain_blocked(self):
+        for index, (result, expected_text) in enumerate((
+            ({"ok": False, "permanent": True, "error": "http_400"}, True),
+            ({"ok": False, "ambiguous": True, "error": "transport_timeout"}, True),
+            ({"ok": False, "permanent": True, "error": "destination_changed"}, False),
+            ({"ok": False, "permanent": True, "error": "trade_control"}, False),
+            ({"ok": False, "permanent": True, "error": "disabled"}, False),
+        )):
+            with self.subTest(result=result):
+                service, sender = self.service(sender=_Sender(result))
+                sent = []
+                lifecycle = self.lifecycle(service, sent)
+                position = lifecycle.open_once(payload(
+                    datetime.fromtimestamp(self.now, IST), underlying=f"TEST{index}", key=str(self.now)))
+                lifecycle.dispatch_notifications()
+                self.now += 5
+                lifecycle.dispatch_notifications()
+                self.assertEqual(expected_text, bool(sent))
+                with sqlite3.connect(self.path) as db:
+                    state = db.execute("SELECT delivered FROM lifecycle_outbox WHERE event_id=?",
+                                       (position["id"] + ":OPEN",)).fetchone()[0]
+                    db.execute("UPDATE lifecycle_signals SET status='STOP'")
+                self.assertEqual(1 if expected_text else -1, state)
+
+    def test_exhausted_ambiguous_photo_fallback_text_retries_and_exit_threads_to_text_open(self):
+        service, sender = self.service(sender=_Sender({"ok": False, "ambiguous": True}))
+        texts = []
+        accepted = [False]
+        def notify(category, message, **kwargs):
+            texts.append((message, kwargs))
+            return 77 if accepted[0] else False
+        lifecycle = SignalLifecycle(self.path, notify=notify, chart_jobs=service,
+                                    clock=lambda: datetime.fromtimestamp(self.now, IST))
+        lifecycle.open_once(payload())
+        self.assertEqual(0, lifecycle.dispatch_notifications())
+        self.assertEqual([], texts)
+        self.now += 3
+        self.assertEqual(0, lifecycle.dispatch_notifications())
+        self.assertEqual(1, len(texts))
+        self.assertIn("POSITION OPEN TRIGGER", texts[0][0])
+        self.assertEqual(2, len(sender.calls))
+        accepted[0] = True
+        self.now += 5
+        self.assertEqual(1, lifecycle.dispatch_notifications())
+        self.assertEqual(2, len(sender.calls))
+        self.now += 1
+        lifecycle.observe_quotes({("NSE_FNO", 101): {"price": 80, "trade_timestamp": self.now}},
+                                 datetime.fromtimestamp(self.now, IST))
+        sender.result = {"ok": True, "message_id": 900}
+        self.assertEqual(1, lifecycle.dispatch_notifications())
+        self.assertEqual(77, sender.calls[-1][3])
+
+    def test_rate_limited_photo_attempts_wait_before_text_fallback(self):
+        service, sender = self.service(sender=_Sender(
+            {"ok": False, "retry_after": 30, "error": "rate_limited"}), max_attempts=1)
+        sent = []
+        lifecycle = self.lifecycle(service, sent)
+        lifecycle.open_once(payload())
+        self.assertEqual(0, lifecycle.dispatch_notifications())
+        self.assertEqual([], sent)
+        self.now += 29
+        self.assertEqual(0, lifecycle.dispatch_notifications())
+        self.assertEqual([], sent)
+        self.now += 1
+        self.assertEqual(1, lifecycle.dispatch_notifications())
+        self.assertEqual(1, len(sender.calls))
+        self.assertEqual(1, len(sent))
+
+    def test_legacy_chart_service_without_inline_method_keeps_text_delivery(self):
+        legacy = SimpleNamespace(enqueue=MagicMock())
+        sent = []
+        lifecycle = self.lifecycle(legacy, sent)
+        lifecycle.open_once(payload())
+        self.assertEqual(1, lifecycle.dispatch_notifications())
+        self.assertEqual(1, len(sent))
+        legacy.enqueue.assert_not_called()
+
+    def test_frozen_photo_destination_blocks_modify_and_exit_after_restart(self):
+        service, sender = self.service()
+        sent = []
+        lifecycle = self.lifecycle(service, sent)
+        with patch.dict(os.environ, {"SIGNAL_ADVISORY_TRAILING_ENABLED": "true"}):
+            lifecycle.open_once(payload())
+        self.assertEqual(1, lifecycle.dispatch_notifications())
+        self.assertEqual(-1001, lifecycle.open_positions()[0]["telegram_chat_id"])
+        restarted_service, restarted_sender = self.service()
+        restarted_sender.chat["index_options"] = -2001
+        restarted = self.lifecycle(restarted_service, sent)
+        self.now += 1
+        restarted.observe_quotes({("NSE_FNO", 101): {"price": 135, "trade_timestamp": self.now}},
+                                 datetime.fromtimestamp(self.now, IST))
+        self.assertEqual(0, restarted.dispatch_notifications())
+        self.now += 1
+        restarted.observe_quotes({("NSE_FNO", 101): {"price": 80, "trade_timestamp": self.now}},
+                                 datetime.fromtimestamp(self.now, IST))
+        self.assertEqual(0, restarted.dispatch_notifications())
+        self.assertEqual([], restarted_sender.calls)
+        self.assertEqual([], sent)
+        self.assertEqual(2, restarted.status()["blocked_destination_notifications"])
+        with sqlite3.connect(self.path) as db:
+            blocked = db.execute("SELECT event_id,last_error FROM lifecycle_outbox WHERE delivered=-1").fetchall()
+        self.assertEqual(2, len(blocked))
+        self.assertTrue(all(error == "destination_changed" for _, error in blocked))
+
+    def test_removed_or_changed_destination_blocks_pending_open_before_transport(self):
+        for index, chat in enumerate((-2001, None)):
+            with self.subTest(chat=chat):
+                path = self.path + f".routing{index}"
+                sender = _Sender()
+                service = LifecycleChartService(path, sender, lambda *args: candles(), clock=lambda: self.now)
+                sent = []
+                lifecycle = SignalLifecycle(path, notify=lambda *args, **kw: sent.append(args) or 77,
+                                            chart_jobs=service, clock=lambda: NOW)
+                lifecycle.open_once(payload())
+                sender.chat["index_options"] = chat
+                self.assertEqual(0, lifecycle.dispatch_notifications())
+                self.assertEqual([], sender.calls)
+                self.assertEqual([], sent)
+                self.assertEqual(1, lifecycle.status()["blocked_destination_notifications"])
+
+    def test_queue_and_fetch_budget_fall_back_without_burst_fetches(self):
+        service, sender = self.service(max_fetches_per_minute=1, max_queue=1)
+        sent = []
+        lifecycle = self.lifecycle(service, sent)
+        lifecycle.open_once(payload())
+        lifecycle.open_once(payload(underlying="RELIANCE", category="nifty50_stock_options", key="stock"))
+        self.assertEqual(2, lifecycle.dispatch_notifications())
+        self.assertEqual(1, len(self.provider_calls))
+        self.assertEqual(1, len(sender.calls))
+        self.assertEqual(1, len(sent))
+        self.assertIn("RELIANCE", sent[0][1])
+
+    def test_full_queue_and_missing_real_candles_use_text(self):
+        service, sender = self.service(max_queue=1)
+        sent = []
+        lifecycle = self.lifecycle(service, sent)
+        with sqlite3.connect(self.path) as db:
+            self.enqueue_job(service, db, job_id="pending:OPEN")
+        lifecycle.open_once(payload())
+        self.assertEqual(1, lifecycle.dispatch_notifications())
+        self.assertEqual([], sender.calls)
+        self.assertEqual([], self.provider_calls)
+        self.assertEqual(1, len(sent))
+        empty_path = self.path + ".empty"
+        empty = LifecycleChartService(empty_path, _Sender(), lambda *args: [], clock=lambda: self.now)
+        lifecycle = SignalLifecycle(empty_path, notify=lambda *args, **kw: 77, chart_jobs=empty, clock=lambda: NOW)
+        lifecycle.open_once(payload())
+        self.assertEqual(1, lifecycle.dispatch_notifications())
+        with sqlite3.connect(empty_path) as db:
+            self.assertEqual(("SKIPPED", "no_completed_candles"), db.execute(
+                "SELECT status,last_error FROM lifecycle_chart_jobs").fetchone())
+
+    def test_binding_skips_legacy_secondary_jobs_and_enqueue_does_not_commit(self):
+        service, _ = self.service()
+        with sqlite3.connect(self.path) as db:
+            self.enqueue_job(service, db)
+        service.bind_lifecycle()
+        self.assertEqual(0, service.run_once())
+        self.assertIsNone(service.start())
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(("SKIPPED", "legacy_text_already_sent"), db.execute(
+                "SELECT status,last_error FROM lifecycle_chart_jobs").fetchone())
+            db.execute("BEGIN IMMEDIATE")
+            self.enqueue_job(service, db, job_id="rollback:OPEN")
+            db.rollback()
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM lifecycle_chart_jobs "
+                                         "WHERE job_id='rollback:OPEN'").fetchone()[0])
 
 
 class TelegramPhotoTests(unittest.TestCase):
@@ -304,6 +598,14 @@ class TelegramPhotoTests(unittest.TestCase):
             response.status_code = 200
             response.json.return_value = {"ok": True, "result": {"message_id": 123}}
             self.assertEqual(123, handler.send_to_channel("index_options", "OPEN", return_message_id=True))
+
+    def test_text_expected_destination_guard_never_posts_to_changed_channel(self):
+        with patch.dict(os.environ, self.env(), clear=True):
+            handler = TelegramHandler()
+            handler._http_session = MagicMock()
+            self.assertFalse(handler.send_to_channel(
+                "index_options", "STOP", reply_to_message_id=77, expected_chat_id=-2001))
+            handler._http_session.assert_not_called()
 
 
 if __name__ == "__main__":

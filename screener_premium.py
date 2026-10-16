@@ -17,6 +17,7 @@ from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
 from premium_indicators import IndicatorDataError, completed_candles
+from nifty_market_filters import NiftyMarketFilter
 from state_manager import StateManager
 from telegram_handler import SCREENER_CATEGORIES, format_ist_timestamp
 
@@ -75,6 +76,7 @@ class PremiumScreener:
         self.trade_control_bot = trade_control_bot
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=LOOKBACK_CANDLES)
+        self.nifty_market_filter = NiftyMarketFilter(data_manager)
         self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.signal_callback = signal_callback
         self.paper_trade_notifier = paper_trade_notifier
@@ -178,6 +180,8 @@ class PremiumScreener:
     def _refresh_instrument(self, instrument, interval: str, now: datetime, spot: Optional[float] = None) -> int:
         if self._underlying_locked(instrument.symbol):
             return 0
+        if instrument.symbol == "NIFTY" and instrument.category == "index_options":
+            self.nifty_market_filter.refresh(now)
         bucket, _ = self._bucket(instrument, now)
         if spot is None:
             spot = self.fetcher.get_spot_price(instrument, interval)
@@ -339,6 +343,9 @@ class PremiumScreener:
         ]
         if not armed and not paper_contracts:
             return 0
+        if any(state["instrument"].symbol == "NIFTY"
+               and state["instrument"].category == "index_options" for state in armed):
+            self.nifty_market_filter.refresh(now)
         request: Dict[str, List[int]] = {}
         requested_ids: Dict[str, set[int]] = {}
         for state in armed:
@@ -553,6 +560,14 @@ class PremiumScreener:
             if require_armed and not was_armed:
                 # Another thread already consumed this reference.
                 return 0
+            if instrument.symbol == "NIFTY" and instrument.category == "index_options":
+                reason = self.nifty_market_filter.rejection(contract["option_type"], signal, now)
+                if reason:
+                    self._count_indicator_reason(reason)
+                    logger.debug("NIFTY entry skipped: %s (%s)", reason, self.nifty_market_filter.last_context)
+                    reference["armed"] = False
+                    state.pop("pending_signal", None)
+                    return 0
             entry_key = f"{instrument.category}:{instrument.symbol}:{contract['option_type']}"
             last = self._last_entries.get(entry_key)
             price = Decimal(str(signal["breakout_price"]))
@@ -853,6 +868,11 @@ class PremiumScreener:
                 ),
                 "tracked_underlyings": len(self._refresh_state),
                 "indicator_rejections": dict(self._indicator_counts),
+                "nifty_market_filter": {
+                    "direction_enabled": self.nifty_market_filter.direction_enabled,
+                    "sr_enabled": self.nifty_market_filter.sr_enabled,
+                    **self.nifty_market_filter.last_context,
+                },
             }
 
     @staticmethod

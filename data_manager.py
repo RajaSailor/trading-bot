@@ -777,7 +777,8 @@ class DataManager:
             return result
 
     def fetch_contract_candles(self, security_id, exchange_segment, instrument_type,
-                               from_date, to_date, interval=10, symbol="UNKNOWN", now=None):
+                               from_date, to_date, interval=10, symbol="UNKNOWN", now=None,
+                               *, force_refresh=False):
         """Share actual-contract candles between scanner and paper trailing."""
         minutes = _parse_interval_minutes(interval)
         now = time.time() if now is None else _timestamp_to_epoch(now)
@@ -786,7 +787,7 @@ class DataManager:
         bucket = int((now + _IST_OFFSET_SECONDS - anchor) // seconds)
         key = (int(security_id), exchange_segment, instrument_type, from_date, to_date, minutes, bucket)
         with self._contract_cache_lock:
-            if key in self._contract_cache:
+            if key in self._contract_cache and not force_refresh:
                 return [dict(candle) for candle in self._contract_cache[key]]
             _apply_rate_limit()
             candles = self._fetch_dhan_intraday_data(
