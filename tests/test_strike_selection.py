@@ -1,5 +1,6 @@
 import logging
 import unittest
+import unittest.mock
 from datetime import datetime
 
 from atm_options_fetcher import BAND_ATM, BAND_ITM_PLUS_1, BAND_OTM_PLUS_1, REASON_ATM, ATMOptionsFetcher
@@ -208,6 +209,49 @@ class ContractDrivenStrikeSelectionTests(unittest.TestCase):
     def test_unknown_symbol_returns_no_contracts(self):
         fetcher = _fetcher(_both_sides("GOLD", [72000]))
         self.assertEqual([], fetcher.resolve_strike_band(_instrument("PLATINUM"), 100.0, "CE", now=NON_EXPIRY_DAY))
+
+
+class UnlistedContractLoggingTests(unittest.TestCase):
+    def _unlisted_warnings(self, logs):
+        return [line for line in logs.output if "No listed" in line and line.startswith("WARNING")]
+
+    def test_repeated_unlisted_lookup_warns_once_but_still_looks_up(self):
+        fetcher = _fetcher(_both_sides("GOLD", [72000]))
+        index = fetcher.data_manager.security_index(NON_EXPIRY_DAY.date())
+        with self.assertLogs("atm_options_fetcher", level="DEBUG") as logs, unittest.mock.patch.object(
+            index, "option_chain", wraps=index.option_chain
+        ) as lookup:
+            for _ in range(5):
+                self.assertEqual([], fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "CE", now=NON_EXPIRY_DAY))
+                self.assertEqual([], fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "PE", now=NON_EXPIRY_DAY))
+        self.assertEqual(10, lookup.call_count)
+        self.assertEqual(2, len(self._unlisted_warnings(logs)))
+
+    def test_master_reload_finds_newly_listed_contracts_and_rewarns(self):
+        rows = list(_both_sides("GOLD", [72000]))
+        cache = SecurityMasterCache(row_source=lambda: iter(list(rows)))
+        fetcher = ATMOptionsFetcher(DataManager(security_master=cache))
+        with self.assertLogs("atm_options_fetcher", level="DEBUG") as logs:
+            self.assertEqual([], fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "CE", now=NON_EXPIRY_DAY))
+            self.assertEqual([], fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "CE", now=NON_EXPIRY_DAY))
+            rows.extend(_option_rows("SILVER", [89000, 90000, 91000], "CE", start_id=5000))
+            cache.release()
+            band = fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "CE", now=NON_EXPIRY_DAY)
+            self.assertEqual([89000, 90000, 91000], [item["strike"] for item in band])
+            self.assertEqual([], fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "PE", now=NON_EXPIRY_DAY))
+        self.assertEqual(
+            ["CE", "PE"],
+            [line.split("No listed ")[1].split(" ")[0] for line in self._unlisted_warnings(logs)],
+        )
+
+    def test_new_ist_day_rewarns(self):
+        fetcher = _fetcher(_both_sides("GOLD", [72000]))
+        next_day = datetime(2026, 10, 2, 11, 0, tzinfo=IST)
+        with self.assertLogs("atm_options_fetcher", level="DEBUG") as logs:
+            fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "CE", now=NON_EXPIRY_DAY)
+            fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "CE", now=NON_EXPIRY_DAY)
+            fetcher.resolve_strike_band(_instrument("SILVER"), 90000.0, "CE", now=next_day)
+        self.assertEqual(2, len(self._unlisted_warnings(logs)))
 
 
 if __name__ == "__main__":
