@@ -8,6 +8,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from premium_indicators import IndicatorDataError, completed_candles
+from price_action_confirmations import (
+    CONFIRMATION_NAMES, confirmations, gap_context, valid_confirmation,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 INDEX_SYMBOLS = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
@@ -190,6 +193,7 @@ def valid_entry(metadata, now):
             and (target - price) / risk >= MIN_REWARD_RISK
             and price <= trigger_close + .25 * (trigger_close - stop)
             and bool(metadata.get("setups"))
+            and valid_confirmation(metadata)
         )
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
@@ -218,6 +222,10 @@ class IndexSwingStrategy:
                 or green["volume"] < sum(volumes) / len(volumes)):
             raise IndicatorDataError("index_volume_confirmation")
         context = spot_setups(spot, side, now)
+        context["price_action_confirmations"] = confirmations(spot, side)
+        if not context["price_action_confirmations"]:
+            raise IndicatorDataError("index_price_action_confirmation")
+        context["gap_context"] = gap_context(spot, now)
         if (context["spot_next_zone"] is not None
                 and abs(context["spot_next_zone"] - context["spot_ltp"]) <= context["spot_ltp"] * .0008):
             raise IndicatorDataError("index_spot_room")
@@ -263,6 +271,7 @@ class IndexSwingStrategy:
             **{key: reference[key] for key in (
                 "setups", "spot_zone", "spot_direction", "spot_ltp", "spot_next_zone",
                 "opening_high", "opening_low",
+                "price_action_confirmations", "gap_context",
             )},
         }
         if not valid_entry(signal, now):
@@ -279,9 +288,20 @@ def describe_setup(metadata):
     }
     setup = ", ".join(labels[name] for name in metadata.get("setups", []) if name in labels)
     zone = metadata.get("spot_zone") or {}
+    evidence = ", ".join(dict.fromkeys(
+        CONFIRMATION_NAMES[item["kind"]]
+        for item in metadata.get("price_action_confirmations", [])
+        if item.get("kind") in CONFIRMATION_NAMES
+    ))
+    gap = metadata.get("gap_context") or {"direction": "unavailable"}
+    gap_label = gap["direction"].replace("_", " ")
+    if gap.get("percent") is not None:
+        gap_label += f" {gap['percent']:+.2f}%"
     return (
         f"Setup: {setup}\n"
         f"Spot: {metadata['spot_direction']} | Zone {zone['low']:.2f}-{zone['high']:.2f}\n"
+        f"Price action: {evidence or 'legacy / not recorded'}\n"
+        f"Opening: {gap_label} (context only)\n"
         "Confirmation: 5m option close above prior red high, then later green 1m close.\n"
         "Alerts only; stop updates are advisory, not broker orders."
     )

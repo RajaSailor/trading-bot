@@ -22,6 +22,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from zoneinfo import ZoneInfo
 
 from exchange_calendar import is_exchange_open, previous_trading_day, session_windows
+from alert_disclaimer import PUBLIC_DISCLAIMER, with_disclaimer
 from index_swing_strategy import (
     INDEX_SYMBOLS, aggregate_five_minutes, describe_setup, valid_entry as valid_index_entry,
 )
@@ -381,9 +382,9 @@ class SignalLifecycle:
             message += f"Observed breakout premium: {position['observed_entry']:.2f}"
             if position.get("index_swing"):
                 message += "\n" + _text(describe_setup(position["metadata"]))
-            return message
+            return with_disclaimer(message)
         if event == "MODIFY":
-            return (message + f"Step: {position['trailing_step']} | "
+            return with_disclaimer(message + f"Step: {position['trailing_step']} | "
                     f"Observed premium: {position['last_valid_premium']:.2f}\n"
                     f"Previous stop: {position['previous_stop_loss']:.2f} | "
                     f"Previous target: {position['previous_target']:.2f}\n"
@@ -405,8 +406,8 @@ class SignalLifecycle:
             message += f"closed at {clock}\n"
         pnl = position.get("pnl", SignalLifecycle._pnl(position, premium))
         if pnl is None:
-            return message + "P&amp;L: N/A (NO QUOTE or missing lot size)"
-        return (message + f"P&amp;L (1 lot x {position['lot_size']}): "
+            return with_disclaimer(message + "P&amp;L: N/A (NO QUOTE or missing lot size)")
+        return with_disclaimer(message + f"P&amp;L (1 lot x {position['lot_size']}): "
                 f"{'+' if pnl >= 0 else '-'}₹{abs(pnl):,.2f}")
 
     @staticmethod
@@ -717,7 +718,7 @@ class SignalLifecycle:
 
     def _enqueue_report(self, db, event_id, category, header, details):
         disclaimer = "\nHypothetical signal results (1 lot per signal), not broker fills."
-        budget = 3500 - len(header) - len(disclaimer) - 80
+        budget = 3500 - len(header) - len(disclaimer) - len(PUBLIC_DISCLAIMER) - 81
         chunks = [""]
         for line in details:
             if len(line) > budget:
@@ -729,8 +730,8 @@ class SignalLifecycle:
                 chunks[-1] = candidate
         for index, chunk in enumerate(chunks, 1):
             part_id = f"{event_id}:PART:{index:04d}"
-            message = (header + f"Part {index}/{len(chunks)}\n"
-                       + chunk + (disclaimer if index == len(chunks) else ""))
+            message = with_disclaimer(header + f"Part {index}/{len(chunks)}\n"
+                                      + chunk + (disclaimer if index == len(chunks) else ""))
             self._enqueue(db, part_id, category, message)
 
     def dispatch_notifications(self, now=None, limit=100):

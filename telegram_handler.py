@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from alert_disclaimer import with_disclaimer
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -127,8 +128,7 @@ def format_option_breakout_alert(
         lines.append("📌 SIGNAL ONLY: strategy observation, no broker entry implied")
     else:
         lines.append("📌 SIGNAL ONLY (mode unverified): strategy observation, no broker entry implied")
-    lines.extend(["", "📢 DISCLAIMER: Educational purposes only."])
-    return "\n".join(lines)
+    return with_disclaimer("\n".join(lines))
 
 
 class TelegramHandler:

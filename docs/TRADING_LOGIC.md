@@ -18,8 +18,9 @@ actual broker positions and disable `NIFTY_LIVE_ENABLED` and
 
 ### Alternative spot setups, shared mandatory confirmations
 
-At least **one complete setup**, not every setup, is required. Shared checks
-below are all mandatory. Bullish spot setups buy CE; bearish setups buy PE.
+At least **one complete setup**, not every setup, is required, together with
+**at least one relevant price-action confirmation** from the four below.
+Shared checks are all mandatory. Bullish spot setups buy CE; bearish setups buy PE.
 Both bought option premiums must demonstrate a bullish recovery.
 
 1. **Support/resistance reversal:** a previous completed spot candle touches a
@@ -45,6 +46,56 @@ high/low/close and classic pivot/S1/R1. Nearby levels are clustered within
 0.03% of spot-scale prices; touch tolerance is 0.08%. Opposing zones within
 0.08% of the confirmation spot block entry. These price-action proxies do not
 prove resting supply/demand, deliberate liquidity-taking or positioning.
+
+### Mandatory additional price-action confirmation
+
+The entry policy is **(setup 1 OR setup 2 OR setup 3) AND
+(FVG retest OR order-block retest OR liquidity sweep OR supply/demand-base retest)
+AND every shared premium, freshness, risk and open-signal check**.
+These are not four additional standalone entry setups. They can overlap; a
+larger number of labels is not an independent-confidence or win-probability score.
+
+Use the existing completed 5-minute spot history, not another data feed:
+
+| Confirmation | Bullish/CE definition (PE is the exact directional mirror) |
+| --- | --- |
+| `fvg_retest` | Three consecutive same-session candles form an imbalance: candle 3 low > candle 1 high, with a strong bullish middle displacement. After formation, one of the latest two candles intersects that gap; the current confirmation closes above its upper edge. |
+| `order_block_retest` | A strong displacement closes above the latest previously confirmed swing high. The last red candle within the three consecutive bars before displacement defines the zone by its full high/low. A later retest intersects it and the current confirmation closes above it. This is a candle-defined proxy, not an observed institutional order block. |
+| `liquidity_sweep` | One of the latest two candles trades strictly below a previously confirmed swing low or the actual opening-range low, then closes strictly back above it. The current confirmation remains above it. A simple equal touch or an unreclaimed break does not qualify. |
+| `supply_demand_retest` | A 2-3-candle compact base precedes a strong displacement close above its high. Each base body is <= half its range; combined base width is <=1.5 times the mean range of up to ten available preceding candles. A later return intersects the base and the current confirmation closes above it. Ordinary support touches are not automatically relabelled as demand. |
+
+For these definitions, strong displacement means body >=50% of candle range
+and close in its directional outer quarter. FVG, order-block and base
+formations must be consecutive and within one session: overnight gaps and
+missing bars do not manufacture them. A pivot is known only after its
+right-hand neighbour closes. Every zone must form **before** its retest candle
+starts. Any intervening close beyond the zone's invalidation edge disqualifies
+it. A previously broken liquidity boundary cannot later be called a fresh sweep.
+The relevant retest/sweep is in one of the two latest completed spot candles,
+not an unrelated historical event. Invalid/missing/future/wrong-side
+confirmation metadata fails durable admission.
+
+Store matched evidence (kind, side, zone bounds, formation, retest and
+confirmation times) with the signal/outbox, and show unique confirmation names
+in the alert. Already-open signals retain their original protection policy and
+do not need to retroactively satisfy this new entry requirement.
+
+### Gap-up and gap-down sessions
+
+Compare the actual 09:15 opening price with the last available completed
+previous-session candle close and include gap direction, points and percentage
+as **context only**. If the opening or previous-session data is missing, label
+it unavailable rather than infer a gap. This is a candle-history comparison,
+not a separate official closing-price feed.
+
+The same entry checks apply on gap-up, gap-down and flat openings. Today's
+opening range resets; valid historical zones remain observable. An overnight
+gap is not an intraday three-candle FVG, not a directional entry trigger, and
+not a promise that price will fill the gap. A gap session can produce CE or PE
+setups depending on subsequent confirmations; a gap with no qualified
+setup/retest is skipped.
+
+### Shared option and risk checks
 
 The latest **completed 5-minute option candle must be green and close strictly
 above the immediately preceding red candle's high**. Its volume must be at
@@ -118,6 +169,21 @@ reports still describe hypothetical, pre-cost outcomes, not broker returns.
 Rollback the entry strategy with the flag set to `false`; already-open signals
 retain their frozen strategy/protection policy until exit. Keep one scanner
 process and never delete state to switch strategies.
+
+### Public-channel disclaimer
+
+All three categories' signal alerts, lifecycle events (OPEN, MODIFY, TARGET,
+STOP and SESSION_CLOSE), chart captions and every daily-report part carry this
+shared one-line notice:
+
+> Educational information only - not investment advice or a recommendation; I am not a SEBI-registered investment adviser or research analyst; trading involves risk, and decisions and losses are your responsibility.
+
+The registration statement must remain factually accurate. This is a risk
+disclosure, **not legal clearance, immunity or a waiver of applicable SEBI
+requirements**. Labels/disclaimers do not determine the legal nature of public
+entry/stop/target signals. Obtain Indian securities-law advice before public
+distribution. Existing hypothetical-result labels remain; historical stored
+messages are not rewritten.
 
 ## Legacy strategy pipeline (stocks/commodities; indices when trial is off)
 1. Load completed 10-minute premium history for listed ITM+1 CE/PE contracts.

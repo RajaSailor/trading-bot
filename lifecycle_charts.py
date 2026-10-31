@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from option_chart import ChartRenderError, ChartUnavailable, render_premium_chart, select_chart_candles
+from alert_disclaimer import PUBLIC_DISCLAIMER, with_disclaimer
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -278,11 +279,14 @@ class LifecycleChartService:
             return False
 
     def _caption(self, overlay):
-        return (
+        heading = (
             f"{overlay.get('underlying', '')} {overlay.get('option_symbol', '')} "
             f"{overlay.get('event', '')} premium chart\n"
             "Signal-only / hypothetical — not a broker fill"
-        )[:1024]
+        )
+        budget = 1024 - len(PUBLIC_DISCLAIMER) - 1
+        heading = heading.encode("utf-16-le")[:budget * 2].decode("utf-16-le", errors="ignore")
+        return with_disclaimer(heading)
 
     def deliver_event(self, db, job, caption):
         """Attempt one photo in the caller's durable outbox transaction.

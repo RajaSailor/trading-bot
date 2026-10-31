@@ -916,6 +916,7 @@ class PremiumScreener:
                     "index_swing", "alerts_only", "confirmation_end", "one_minute_start",
                     "one_minute_close", "setups", "spot_zone", "spot_direction", "spot_ltp",
                     "spot_next_zone", "opening_high", "opening_low",
+                    "price_action_confirmations", "gap_context",
                 )
             })
         if signal.get("latency_marks"):
@@ -960,6 +961,7 @@ class PremiumScreener:
                     "enabled": self.index_swing_enabled, "alerts_only": True,
                     "underlyings": sorted(INDEX_SYMBOLS),
                     "setup_policy": "any_complete_setup_and_all_shared_checks",
+                    "price_action_policy": "at_least_one_relevant_confirmation",
                 },
                 "indicator_rejections": dict(self._indicator_counts),
                 "nifty_market_filter": {

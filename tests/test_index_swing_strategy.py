@@ -34,8 +34,11 @@ def history():
     spot = [
         bar(NOW.replace(day=1, hour=15, minute=20, second=0), 120, 130, 100, 120),
         bar(NOW.replace(hour=9, minute=15, second=0), 115, 120, 110, 115),
+        bar(NOW.replace(hour=10, minute=0, second=0), 112, 115, 110, 111),
+        bar(NOW.replace(hour=10, minute=5, second=0), 111, 112, 100, 103),
+        bar(NOW.replace(hour=10, minute=10, second=0), 103, 110, 102, 108),
         bar(NOW.replace(hour=10, minute=15, second=0), 109, 112, 106, 107),
-        bar(NOW.replace(hour=10, minute=20, second=0), 107, 108, 100, 102),
+        bar(NOW.replace(hour=10, minute=20, second=0), 107, 108, 99, 102),
         bar(NOW.replace(hour=10, minute=25, second=0), 102, 112, 101, 110),
     ]
     one = [bar(NOW.replace(minute=30, second=0), 68, 70, 68, 69, 150)]
@@ -60,6 +63,9 @@ def make_signal(symbol="NIFTY", side="CE", now=NOW):
         for field in ("breakout_timestamp", "first_crossing_timestamp", "confirmation_end",
                       "one_minute_start", "reference_timestamp"):
             signal[field] += delta
+        for item in signal["price_action_confirmations"]:
+            for field in ("formed_at", "retest_at", "confirmed_at"):
+                item[field] += delta
         signal["detected_at"] = now.isoformat()
     return signal
 
@@ -398,6 +404,8 @@ def test_scanner_routes_only_three_indices_and_opens_durably(tmp_path, monkeypat
     payload = callback.call_args.args[0]
     assert payload["metadata"]["alerts_only"] is True
     assert payload["metadata"]["timeframe"] == "5min"
+    assert payload["metadata"]["price_action_confirmations"][0]["kind"] == "liquidity_sweep"
+    assert payload["metadata"]["gap_context"]["direction"] == "gap_down"
     assert payload["stop_loss"] == 60
     assert payload["target_price"] == 90
     assert service.is_open("NIFTY")

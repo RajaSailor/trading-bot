@@ -8,6 +8,7 @@ from time import monotonic
 import time
 from typing import Callable, Optional
 
+from alert_disclaimer import with_disclaimer
 from data_manager import (
     REQUIRED_SCANNER_DEPENDENCIES,
     DataManager,
@@ -150,7 +151,7 @@ class SignalNotifier:
         lines.append(f"Source: {metadata.get('source', 'unknown')}")
         lines.append(f"Time: {signal.get('timestamp', now_local_iso())}")
         lines.append("Observed strategy signal only; no broker execution implied")
-        return "\n".join(lines)
+        return with_disclaimer("\n".join(lines))
 
     def notify_order(self, signal: dict, order: Order, practice_mode: bool) -> None:
         if practice_mode or self.practice_mode is True:
