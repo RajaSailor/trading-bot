@@ -2,6 +2,7 @@ import html
 import unittest
 from unittest.mock import patch
 
+from alert_disclaimer import PUBLIC_DISCLAIMER
 from latency_tracker import LatencyTracker, percentile
 from runtime_services import SignalNotifier
 from screener_premium import PremiumScreener
@@ -112,8 +113,8 @@ class AlertFormatTests(unittest.TestCase):
             "Target: 370.76\n\n"
             "⚡ Observed signal breakout: 07-Oct-2026 16:12:51 IST @ 318.50\n"
             "Underlying spot: 8714.00\n"
-            "🧪 PRACTICE MODE: signal only, no paper or live order placed\n\n"
-            "📢 DISCLAIMER: Educational purposes only."
+            "🧪 PRACTICE MODE: signal only, no paper or live order placed\n"
+            + PUBLIC_DISCLAIMER
         )
         for compact in (False, True):
             self.assertEqual(expected, _rendered_message(
@@ -182,8 +183,7 @@ class AlertFormatTests(unittest.TestCase):
             "⚡ Observed signal breakout: 05-Oct-2026 09:50:42 IST @ 10.95\n"
             "Underlying spot: 379.40\n"
             "🧪 PRACTICE MODE: signal only, no paper or live order placed\n"
-            "\n"
-            "📢 DISCLAIMER: Educational purposes only.",
+            + PUBLIC_DISCLAIMER,
             _rendered_message(message),
         )
 
@@ -221,8 +221,7 @@ class AlertFormatTests(unittest.TestCase):
             "⚡ Observed signal breakout: 05-Oct-2026 10:31:05 IST @ 4.62\n"
             "Underlying spot: N/A\n"
             "📌 SIGNAL ONLY: strategy observation, no broker entry implied\n"
-            "\n"
-            "📢 DISCLAIMER: Educational purposes only.",
+            + PUBLIC_DISCLAIMER,
             _rendered_message(message),
         )
         self.assertIn("M&amp;M", message)

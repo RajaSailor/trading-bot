@@ -8,6 +8,7 @@ from time import monotonic
 import time
 from typing import Callable, Optional
 
+from alert_disclaimer import with_disclaimer
 from data_manager import (
     REQUIRED_SCANNER_DEPENDENCIES,
     DataManager,
@@ -150,7 +151,7 @@ class SignalNotifier:
         lines.append(f"Source: {metadata.get('source', 'unknown')}")
         lines.append(f"Time: {signal.get('timestamp', now_local_iso())}")
         lines.append("Observed strategy signal only; no broker execution implied")
-        return "\n".join(lines)
+        return with_disclaimer("\n".join(lines))
 
     def notify_order(self, signal: dict, order: Order, practice_mode: bool) -> None:
         if practice_mode or self.practice_mode is True:
@@ -405,6 +406,9 @@ class QueueConsumerWorker:
             return True
 
     def _execute_signal(self, signal: dict):
+        metadata = signal.get("metadata") or {}
+        if isinstance(metadata, dict) and (metadata.get("alerts_only") or metadata.get("index_swing")):
+            return {"status": "signal_only", "reason": "index swing strategy is alerts-only"}
         live_config = self.runtime_config.get("nifty_live") or {}
         if live_config.get("enabled") and live_config.get("auto"):
             metadata = signal.get("metadata") or {}

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from alert_disclaimer import with_disclaimer
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -118,14 +119,16 @@ def format_option_breakout_alert(
         f"⚡ Observed signal breakout: {esc(breakout_ist)} @ {esc(_fmt_price(observed_price))}",
     ])
     lines.append(f"Underlying spot: {esc(_fmt_price(alert.get('spot_ltp')))}")
+    if alert.get("index_swing"):
+        from index_swing_strategy import describe_setup
+        lines.extend(["", esc(describe_setup(alert))])
     if practice_mode:
         lines.append("🧪 PRACTICE MODE: signal only, no paper or live order placed")
     elif practice_mode is False:
         lines.append("📌 SIGNAL ONLY: strategy observation, no broker entry implied")
     else:
         lines.append("📌 SIGNAL ONLY (mode unverified): strategy observation, no broker entry implied")
-    lines.extend(["", "📢 DISCLAIMER: Educational purposes only."])
-    return "\n".join(lines)
+    return with_disclaimer("\n".join(lines))
 
 
 class TelegramHandler:

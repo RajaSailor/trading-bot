@@ -5,14 +5,17 @@ import os
 import threading
 import time
 from collections import Counter
-from datetime import datetime, time as dt_time, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 import math
 from decimal import Decimal
 from typing import Dict, Iterable, List, Optional
 from zoneinfo import ZoneInfo
 
 from atm_options_fetcher import ATMOptionsFetcher, BAND_ITM_PLUS_1
-from exchange_calendar import MCX, exchange_for_instrument, open_exchanges
+from exchange_calendar import MCX, exchange_for_instrument, open_exchanges, previous_trading_day
+from index_swing_strategy import (
+    INDEX_SYMBOLS, IndexSwingStrategy, enabled as index_swing_enabled, valid_entry as valid_index_entry,
+)
 from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
@@ -76,6 +79,8 @@ class PremiumScreener:
         self.trade_control_bot = trade_control_bot
         self.fetcher = ATMOptionsFetcher(data_manager)
         self.engine = PremiumStrategyEngine(lookback=LOOKBACK_CANDLES)
+        self.index_swing_enabled = index_swing_enabled()
+        self.index_engine = IndexSwingStrategy()
         self.nifty_market_filter = NiftyMarketFilter(data_manager)
         self.live_signal_detector = live_signal_detector or LiveSignalDetector(freshness_minutes=24 * 60)
         self.signal_callback = signal_callback
@@ -138,12 +143,16 @@ class PremiumScreener:
             return True
         return bucket != state.get("bucket") and seconds_in >= CANDLE_SETTLE_SECONDS
 
-    @staticmethod
-    def _bucket(instrument, now: datetime) -> tuple[int, float]:
+    def _uses_index_swing(self, instrument) -> bool:
+        return (self.index_swing_enabled and instrument.category == "index_options"
+                and instrument.symbol in INDEX_SYMBOLS)
+
+    def _bucket(self, instrument, now: datetime) -> tuple[int, float]:
         # NSE/BSE sessions start 09:15 (buckets at :05/:15/...), MCX 09:00 (:00/:10/...).
         offset = 0 if exchange_for_instrument(instrument) == MCX else 300
         seconds = now.timestamp() - offset
-        return int(seconds // BUCKET_SECONDS), seconds % BUCKET_SECONDS
+        period = 60 if self._uses_index_swing(instrument) else BUCKET_SECONDS
+        return int(seconds // period), seconds % period
 
     def _scan_instruments(self, instruments, interval: str, now: datetime | None = None) -> int:
         now = self._as_ist(now)
@@ -180,6 +189,8 @@ class PremiumScreener:
     def _refresh_instrument(self, instrument, interval: str, now: datetime, spot: Optional[float] = None) -> int:
         if self._underlying_locked(instrument.symbol):
             return 0
+        if self._uses_index_swing(instrument):
+            return self._refresh_index_instrument(instrument, now, spot)
         if instrument.symbol == "NIFTY" and instrument.category == "index_options":
             self.nifty_market_filter.refresh(now)
         bucket, _ = self._bucket(instrument, now)
@@ -276,6 +287,70 @@ class PremiumScreener:
             self._schedule_retry(instrument, now)
         return alerts
 
+    def _refresh_index_instrument(self, instrument, now: datetime, spot: Optional[float]) -> int:
+        started = time.monotonic()
+        if self.signal_lifecycle is None:
+            self._count_indicator_reason("index_lifecycle_unavailable")
+            return 0
+        bucket, _ = self._bucket(instrument, now)
+        self._refresh_state[instrument.symbol] = {"bucket": bucket, "retry_at": None}
+        ref = self.data_manager.resolve_underlying(instrument.symbol, now.date())
+        if ref is None or ref.exchange_segment != "IDX_I" or ref.instrument_type != "INDEX":
+            self._count_indicator_reason("index_spot_unavailable")
+            self._drop_monitored_instrument(instrument)
+            return 0
+        from_day = now.date()
+        for _ in range(5):
+            from_day = previous_trading_day(exchange_for_instrument(instrument), from_day)
+        spot_candles = self.data_manager.fetch_contract_candles(
+            ref.security_id, ref.exchange_segment, ref.instrument_type,
+            from_day.isoformat(), now.date().isoformat(), 5,
+            symbol=instrument.symbol, now=now.timestamp(),
+        )
+        if spot is None:
+            complete = completed_candles(spot_candles, now, timeframe_seconds=300)
+            spot = complete[-1]["close"] if complete else None
+        if spot is None:
+            self._drop_monitored_instrument(instrument)
+            self._count_indicator_reason("index_spot_unavailable")
+            return 0
+        contracts = []
+        for side in ("CE", "PE"):
+            contracts.extend(self.fetcher.resolve_strike_band(
+                instrument, spot, side, now=now, bands=(BAND_ITM_PLUS_1,),
+            ))
+        self._drop_monitored_instrument(instrument)
+        alerts = 0
+        for contract in contracts:
+            if self._underlying_locked(instrument.symbol):
+                break
+            if contract.get("strike_band") != BAND_ITM_PLUS_1:
+                continue
+            try:
+                candles = self.fetcher.fetch_option_candles(contract, "5min", now)
+                reference = self.index_engine.prepare(
+                    instrument.symbol, contract["option_type"], spot_candles, candles, now,
+                )
+                one_minute = self.fetcher.fetch_option_candles(contract, "1min", now)
+                quotes = self.data_manager.fetch_quotes({
+                    contract["exchange_segment"]: [int(contract["security_id"])],
+                }) or {}
+                quote = quotes.get((contract["exchange_segment"], int(contract["security_id"])), {})
+                observed_now = now + timedelta(seconds=time.monotonic() - started)
+                signal = self.index_engine.evaluate(
+                    instrument.symbol, contract["option_type"], reference, one_minute, quote, observed_now,
+                )
+            except IndicatorDataError as exc:
+                self._count_indicator_reason(exc.reason)
+                continue
+            state = {"contract": contract, "instrument": instrument, "reference": reference,
+                     "candles": candles, "pending_signal": signal, "index_swing": True}
+            contract["premium_ltp"] = signal["breakout_price"]
+            with self._lock:
+                self._monitored[int(contract["security_id"])] = state
+            alerts += self._emit(state, signal, {}, observed_now, require_armed=True)
+        return alerts
+
     def _schedule_retry(self, instrument, now: datetime) -> None:
         bucket, _ = self._bucket(instrument, now)
         self._refresh_state[instrument.symbol] = {
@@ -321,6 +396,7 @@ class PremiumScreener:
             return [
                 state for state in self._monitored.values()
                 if state.get("reference") and state["reference"].get("armed")
+                and not state.get("index_swing")
             ]
 
     def live_check_once(self, now: datetime | None = None) -> int:
@@ -522,16 +598,19 @@ class PremiumScreener:
         now = self._as_ist(now if now is not None else self.clock())
         instrument = state["instrument"]
         contract = state["contract"]
+        index_signal = self._uses_index_swing(instrument) and signal.get("index_swing") is True
         if self._underlying_locked(instrument.symbol):
             return 0
         if (
             contract.get("strike_band") != BAND_ITM_PLUS_1
-            or signal.get("trigger") != TRIGGER_LIVE
             or state.get("pending_signal") is not signal
-            or self._finite_positive(signal.get("breakout_price")) is None
-            or not float(signal["breakout_price"]) > float(signal["reference_high"])
-            or self._finite_positive(signal.get("previous_observed_price")) is None
-            or float(signal["previous_observed_price"]) > float(signal["reference_high"])
+            or (not valid_index_entry(signal, now) if index_signal else (
+                signal.get("trigger") != TRIGGER_LIVE
+                or self._finite_positive(signal.get("breakout_price")) is None
+                or not float(signal["breakout_price"]) > float(signal["reference_high"])
+                or self._finite_positive(signal.get("previous_observed_price")) is None
+                or float(signal["previous_observed_price"]) > float(signal["reference_high"])
+            ))
         ):
             self._count_indicator_reason("entry_gate_rejected")
             return 0
@@ -560,7 +639,7 @@ class PremiumScreener:
             if require_armed and not was_armed:
                 # Another thread already consumed this reference.
                 return 0
-            if instrument.symbol == "NIFTY" and instrument.category == "index_options":
+            if not index_signal and instrument.symbol == "NIFTY" and instrument.category == "index_options":
                 reason = self.nifty_market_filter.rejection(contract["option_type"], signal, now)
                 if reason:
                     self._count_indicator_reason(reason)
@@ -571,7 +650,7 @@ class PremiumScreener:
             entry_key = f"{instrument.category}:{instrument.symbol}:{contract['option_type']}"
             last = self._last_entries.get(entry_key)
             price = Decimal(str(signal["breakout_price"]))
-            if last is not None and (
+            if not index_signal and last is not None and (
                 Decimal(str(last)) * Decimal(".95") <= price <= Decimal(str(last)) * Decimal("1.05")
             ):
                 reference["armed"] = False
@@ -673,7 +752,7 @@ class PremiumScreener:
                 "underlying": instrument.symbol,
                 "category": instrument.category,
                 "premium_strategy": True,
-                "timeframe": self._display_timeframe(INTERVAL),
+                "timeframe": "5min" if signal.get("index_swing") else self._display_timeframe(INTERVAL),
                 "action_text": "BUY CALL" if contract["option_type"] == "CE" else "BUY PUT",
                 "option_symbol": contract["option_symbol"],
                 "security_id": contract["security_id"],
@@ -684,7 +763,7 @@ class PremiumScreener:
                 "lot_size": contract.get("lot_size"),
                 "tick_size": contract.get("tick_size"),
                 "instrument_type": contract.get("instrument_type"),
-                "spot_ltp": contract.get("spot_ltp"),
+                "spot_ltp": signal.get("spot_ltp") if signal.get("index_swing") else contract.get("spot_ltp"),
                 "premium_ltp": contract.get("premium_ltp"),
                 "reference_time_ist": format_ist_timestamp(signal.get("reference_timestamp")),
                 "breakout_time_ist": format_ist_timestamp(signal.get("breakout_timestamp"), with_seconds=True),
@@ -735,6 +814,8 @@ class PremiumScreener:
 
     @staticmethod
     def _fresh_evidence(signal: dict, now: datetime) -> bool:
+        if signal.get("index_swing"):
+            return valid_index_entry(signal, now)
         try:
             value = signal["breakout_timestamp"]
             try:
@@ -789,7 +870,7 @@ class PremiumScreener:
                 "source": "scanner",
                 "route_category": route_category,
                 "signal": signal.get("signal"),
-                "timeframe": INTERVAL,
+                "timeframe": "5min" if signal.get("index_swing") else INTERVAL,
                 "display_timeframe": signal.get("timeframe"),
                 "detected_at": signal.get("detected_at"),
                 "reference_timestamp": signal.get("reference_timestamp"),
@@ -829,6 +910,15 @@ class PremiumScreener:
         }
         if signal.get("idempotency_key"):
             payload["idempotency_key"] = signal["idempotency_key"]
+        if signal.get("index_swing"):
+            payload["metadata"].update({
+                key: signal[key] for key in (
+                    "index_swing", "alerts_only", "confirmation_end", "one_minute_start",
+                    "one_minute_close", "setups", "spot_zone", "spot_direction", "spot_ltp",
+                    "spot_next_zone", "opening_high", "opening_low",
+                    "price_action_confirmations", "gap_context",
+                )
+            })
         if signal.get("latency_marks"):
             payload["metadata"]["latency_marks"] = dict(signal["latency_marks"])
         return payload
@@ -867,6 +957,12 @@ class PremiumScreener:
                     1 for s in self._monitored.values() if s.get("reference") and s["reference"].get("armed")
                 ),
                 "tracked_underlyings": len(self._refresh_state),
+                "index_swing_strategy": {
+                    "enabled": self.index_swing_enabled, "alerts_only": True,
+                    "underlyings": sorted(INDEX_SYMBOLS),
+                    "setup_policy": "any_complete_setup_and_all_shared_checks",
+                    "price_action_policy": "at_least_one_relevant_confirmation",
+                },
                 "indicator_rejections": dict(self._indicator_counts),
                 "nifty_market_filter": {
                     "direction_enabled": self.nifty_market_filter.direction_enabled,
