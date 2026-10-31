@@ -222,13 +222,14 @@ class LifecycleChartService:
         return len(self._fetch_times) < self.max_fetches_per_minute
 
     def _fetch_snapshot(self, overlay):
+        interval = _clamp_int(overlay.get("interval_minutes"), self.interval_minutes, 1, 60)
         security_id = int(overlay["security_id"])
         segment = str(overlay["exchange_segment"])
         instrument_type = str(overlay["instrument_type"])
         event_time = float(overlay["event_time"])
         from_date, to_date = self._date_range(event_time, segment)
-        bucket = int(event_time // (self.interval_minutes * 60))
-        key = (security_id, segment, instrument_type, self.interval_minutes, from_date, to_date, bucket)
+        bucket = int(event_time // (interval * 60))
+        key = (security_id, segment, instrument_type, interval, from_date, to_date, bucket)
         with self._cache_lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
@@ -239,7 +240,7 @@ class LifecycleChartService:
                     return None, "fetch_budget_exhausted"
                 self._fetch_times.append(now)
                 candles = self.candle_provider(
-                    security_id, segment, instrument_type, from_date, to_date, self.interval_minutes
+                    security_id, segment, instrument_type, from_date, to_date, interval
                 ) or []
                 candles = [dict(candle) for candle in candles]
                 self._cache[key] = [dict(candle) for candle in candles]
@@ -250,7 +251,7 @@ class LifecycleChartService:
                 "security_id": security_id,
                 "exchange_segment": segment,
                 "instrument_type": instrument_type,
-                "interval_minutes": self.interval_minutes,
+                "interval_minutes": interval,
                 "from_date": from_date,
                 "to_date": to_date,
             },
@@ -270,6 +271,8 @@ class LifecycleChartService:
                 int(request.get("security_id")) == int(overlay.get("security_id"))
                 and str(request.get("exchange_segment")) == str(overlay.get("exchange_segment"))
                 and str(request.get("instrument_type")) == str(overlay.get("instrument_type"))
+                and int(request.get("interval_minutes")) == _clamp_int(
+                    overlay.get("interval_minutes"), self.interval_minutes, 1, 60)
             )
         except (TypeError, ValueError):
             return False
@@ -318,7 +321,7 @@ class LifecycleChartService:
                 raise ChartRenderError("wrong_contract")
             png = render_premium_chart(
                 snapshot.get("candles") or [],
-                {**overlay, "interval_minutes": self.interval_minutes, "window": self.window},
+                {**overlay, "window": self.window},
                 max_bytes=self.max_bytes,
             )
         except Exception as exc:
@@ -447,7 +450,8 @@ class LifecycleChartService:
                 select_chart_candles(
                     snapshot.get("candles") or [],
                     overlay["event_time"],
-                    interval_seconds=self.interval_minutes * 60,
+                    interval_seconds=_clamp_int(
+                        overlay.get("interval_minutes"), self.interval_minutes, 1, 60) * 60,
                     window=self.window,
                 )
             except ChartRenderError as exc:
@@ -456,7 +460,7 @@ class LifecycleChartService:
             try:
                 png = render_premium_chart(
                     snapshot.get("candles") or [],
-                    {**overlay, "interval_minutes": self.interval_minutes, "window": self.window},
+                    {**overlay, "window": self.window},
                     max_bytes=self.max_bytes,
                 )
                 try:

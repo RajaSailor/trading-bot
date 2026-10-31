@@ -35,11 +35,15 @@ class LiveRoute:
 
     def targets(self, signal):
         metadata = signal.get("metadata")
+        if isinstance(metadata, dict) and (metadata.get("alerts_only") or metadata.get("index_swing")):
+            return False
         underlying = metadata.get("underlying") if isinstance(metadata, dict) else None
         return self.execution.enabled and signal.get("symbol") == "NIFTY" and underlying == "NIFTY"
 
     def propose(self, signal):
         metadata = signal.get("metadata") or {}
+        if isinstance(metadata, dict) and (metadata.get("alerts_only") or metadata.get("index_swing")):
+            return {"status": "rejected", "reason": "alerts-only strategies cannot create broker orders"}
         categories = {signal.get("category"), metadata.get("category") if isinstance(metadata, dict) else None}
         if categories - {None, "index_options"}:
             return {"status": "rejected", "reason": "only index_options NIFTY signals are live-eligible"}

@@ -106,6 +106,7 @@ from data_manager import get_shared_data_manager, market_quote_diagnostics
 from live_runtime import LiveWorker, build_live_route
 from lifecycle_charts import LifecycleChartService, chart_settings_from_env
 from signal_lifecycle import SignalLifecycle
+from index_swing_strategy import enabled as index_swing_enabled
 from trade_journal import TradeJournalExporter, TradeJournalWorker
 from live_broker import PRODUCTION_BLOCKERS
 
@@ -194,7 +195,7 @@ def _load_runtime_config() -> dict:
         "nifty_live": {
             "enabled": _env_bool("NIFTY_LIVE_ENABLED", False),
             "practice": _env_bool("PRACTICE_MODE", True),
-            "auto": _env_bool("AUTO_TRADING_ENABLED", False),
+            "auto": _env_bool("AUTO_TRADING_ENABLED", False) and not index_swing_enabled(),
             "db_path": os.getenv("LIVE_DB_PATH", "live_trading.db"),
             "allowed_users": os.getenv("LIVE_TELEGRAM_ALLOWED_USER_IDS", ""),
             "chat_id": os.getenv("LIVE_TELEGRAM_CHAT_ID", ""),

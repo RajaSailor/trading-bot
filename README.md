@@ -8,6 +8,23 @@
 
 ---
 
+## Index swing-recovery alerts (opt-in)
+
+Set `INDEX_SWING_STRATEGY_ENABLED=true` to replace the legacy 10-minute entry
+strategy **only for NIFTY, BANKNIFTY and SENSEX**. Stock and commodity strategies
+remain unchanged. Entries require one complete spot setup (support/resistance
+reversal, opening-range retest, or shallow-pullback continuation), a completed
+5-minute option confirmation and a subsequent completed green 1-minute candle.
+There are no unpaused momentum entries and no claim of a proven win rate.
+
+These are **alerts only**, not automated orders. This flag suppresses NIFTY
+automatic entry activation, and the queue and live route independently reject
+execution of the new signals. Keep `NIFTY_LIVE_ENABLED=false`,
+`AUTO_TRADING_ENABLED=false`, and `PRACTICE_MODE=true` during evaluation.
+Existing databases, charts, category-channel notifications and daily reports
+remain in use. Do not remove broker safety/recovery code or reset state.
+See [the exact trial rules and rollout](docs/TRADING_LOGIC.md#index-swing-recovery-trial).
+
 ## Persistent PRACTICE portfolio (`main.py`)
 
 The default application runtime is **PRACTICE-only**. Changing `PRACTICE_MODE` or

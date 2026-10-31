@@ -1,6 +1,125 @@
 # Trading Logic Guide
 
-## Strategy Pipeline
+## Index swing-recovery trial
+
+`INDEX_SWING_STRATEGY_ENABLED=true` replaces the 10-minute premium breakout
+**only for NIFTY, BANKNIFTY and SENSEX**. It defaults to `false` for a deliberate,
+operator-controlled rollout. Stocks, commodities and any other configured
+indices keep their existing entry rules. All three existing category channels,
+charts, persistent locks/outbox, journals and daily reports remain.
+
+The new index signals are **advisory only**: no Dhan orders, paper-order
+submissions or Trade Control execution messages. The runtime suppresses NIFTY
+auto-entry activation while this flag is enabled; queue and live-route guards
+also refuse the new signals independently of live/practice flags. Retained
+broker safety/reconciliation code is not deleted. Before rollout, reconcile any
+actual broker positions and disable `NIFTY_LIVE_ENABLED` and
+`AUTO_TRADING_ENABLED`; keep `PRACTICE_MODE=true`.
+
+### Alternative spot setups, shared mandatory confirmations
+
+At least **one complete setup**, not every setup, is required. Shared checks
+below are all mandatory. Bullish spot setups buy CE; bearish setups buy PE.
+Both bought option premiums must demonstrate a bullish recovery.
+
+1. **Support/resistance reversal:** a previous completed spot candle touches a
+   previously observable zone; the next completed candle reclaims/holds above it
+   and closes green above the preceding candle's high (CE). PE mirrors this:
+   resistance rejection, red close below the preceding candle's low.
+2. **Opening-range breakout and retest:** freeze the actual 09:15-09:20 IST
+   spot high/low. A later close breaks the relevant boundary, then 1-3 completed
+   5-minute candles pause while holding their closes beyond it. At least one
+   touches the boundary's tolerance band. A directional 5-minute close through
+   the pause high/low confirms resumption. A missing opening candle never gets
+   replaced by a later candle. No pre-09:20 opening-range signal is possible.
+3. **Shallow-pullback continuation:** same opening break and 1-3 candle pause,
+   but no full boundary retest. The breakout body's size is at least half its
+   range and its close is in the directional outer quarter. The pause includes
+   a counter-direction/doji candle and retraces no more than half that breakout
+   candle. A directional close through the pause confirms resumption.
+   **Uninterrupted momentum with no pause does not qualify.**
+
+Zones use five previous trading sessions plus the current completed spot bars:
+confirmed local pivots (one closed neighbour on either side), previous-session
+high/low/close and classic pivot/S1/R1. Nearby levels are clustered within
+0.03% of spot-scale prices; touch tolerance is 0.08%. Opposing zones within
+0.08% of the confirmation spot block entry. These price-action proxies do not
+prove resting supply/demand, deliberate liquidity-taking or positioning.
+
+The latest **completed 5-minute option candle must be green and close strictly
+above the immediately preceding red candle's high**. Its volume must be at
+least the mean of the preceding 10 completed option candles, with positive
+volume history available. No volume is invented for the spot index. The latest
+completed spot and option 5-minute timestamps must agree.
+
+After that 5-minute candle ends, one of the **next two completed 1-minute option
+candles** must be green and close above the 5-minute confirmation close.
+The confirming 1-minute candle must start at/after the 5-minute completion:
+an embedded candle cannot double-count as later confirmation. Require its
+completion to be no more than 75 seconds old, and a valid current quote with
+fresh last-trade evidence (maximum 10 seconds), both bid/ask and spread <=2%.
+No stale or future evidence, historical replay, or direct-to-order fallback.
+
+The entry reference is the fresh observed premium, not an assumed historical
+fill. It must remain above the 5-minute confirmation close and no more than
+25% of the one-minute close-to-initial-stop distance above that one-minute close.
+Initial premium risk must be <=15% of entry. The nearest already-confirmed
+option swing high above entry supplies the target; no synthetic 2R target is
+invented. Tick-rounded reward/risk must be at least 1.5. Missing target or
+insufficient room means no alert.
+
+### Protection and frequency
+
+- Initial stop is the confirming green **option 5-minute candle low**, rounded
+  down to the contract tick, not the legacy red-low-minus-5% stop.
+- After two consecutive, fully post-entry completed 1-minute candles trade
+  wholly above entry, raise the advisory stop to entry. This is **price**
+  breakeven, not a guarantee of net breakeven after charges/slippage.
+- After each later completed option 5-minute candle, tighten the stop to one
+  tick below its low if higher. Build this candle only from all five completed,
+  consecutive 1-minute bars; missing/in-progress bars do not qualify. Never
+  lower the stop. A fresh quote already below a newly raised stop closes the
+  advisory signal at the observed premium rather than claiming an impossible
+  protective fill.
+- Close the **whole signal at the first target**. No partial runner, moving an
+  unhit target farther away or target extension in this initial trial.
+- One SQLite-enforced OPEN signal per index across CE/PE, strikes and expiries.
+  NIFTY, BANKNIFTY and SENSEX are independent, not three signals for one index.
+  Trial defaults: at most three accepted signals per index per IST day; wait
+  10 minutes after any stop before another signal for that index. Both limits
+  and per-reference deduplication survive restart.
+- Use the existing NSE/BSE session square-off (default 15:25), calendar and
+  contract-selection protections. Listed ITM+1 contracts and the existing rule
+  skipping same-day expiry are deliberately retained.
+
+All numeric thresholds are **unproven starting settings**, not an optimized
+or historically established winning pattern. Evaluate multiple sessions,
+costs, loss size and drawdown as well as win rate; low frequency does not
+guarantee profitability.
+
+### Data budget and rollout
+
+No new vendor, news, fundamentals or OI feed is added. Reuse shared Dhan
+contract caches and rate limiting: spot and option 5-minute data are cached
+per completed bucket, and 1-minute confirmation data is requested only for a
+qualified candidate. The scanner checks these three indices at one-minute
+boundaries plus the existing five-second settling delay. Open-signal
+protection requests one-minute candles at most once per minute per open index.
+These requests add load; neither zero impact nor elimination of 429s is promised.
+
+Back up existing persistent state, deploy, keep live trading disabled and
+set `INDEX_SWING_STRATEGY_ENABLED=true` in Render. Check
+`workers.market_scanner.screener.index_swing_strategy` and rejection counters,
+then evaluate the upcoming sessions. Alerts explain the matched setup,
+spot zone/direction and premium confirmation. New index outcomes use observed
+quotes rather than guaranteed stop/target fills. Profitable protective-stop
+exits count as wins in reports; price-breakeven exits do not. Existing category
+reports still describe hypothetical, pre-cost outcomes, not broker returns.
+Rollback the entry strategy with the flag set to `false`; already-open signals
+retain their frozen strategy/protection policy until exit. Keep one scanner
+process and never delete state to switch strategies.
+
+## Legacy strategy pipeline (stocks/commodities; indices when trial is off)
 1. Load completed 10-minute premium history for listed ITM+1 CE/PE contracts.
 2. Trigger on the first observed fresh live crossing from premium ≤ reference high to premium > reference high, using the most recent RED candle within the last 20 completed 10-minute candles.
 3. Validate NIFTY auto-entry risk rules (fresh funds/margin, one metadata lot, two filled entries per IST day, one open position, and persisted deduplication).

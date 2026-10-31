@@ -118,6 +118,9 @@ def format_option_breakout_alert(
         f"⚡ Observed signal breakout: {esc(breakout_ist)} @ {esc(_fmt_price(observed_price))}",
     ])
     lines.append(f"Underlying spot: {esc(_fmt_price(alert.get('spot_ltp')))}")
+    if alert.get("index_swing"):
+        from index_swing_strategy import describe_setup
+        lines.extend(["", esc(describe_setup(alert))])
     if practice_mode:
         lines.append("🧪 PRACTICE MODE: signal only, no paper or live order placed")
     elif practice_mode is False:
