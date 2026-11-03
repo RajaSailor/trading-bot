@@ -12,12 +12,18 @@
 
 Set `INDEX_SWING_STRATEGY_ENABLED=true` to replace the legacy 10-minute entry
 strategy **only for NIFTY, BANKNIFTY and SENSEX**. Stock and commodity strategies
-remain unchanged. Entries require one complete spot setup (support/resistance
-reversal, opening-range retest, or shallow-pullback continuation), at least one
-directional spot-price confirmation (FVG/order-block retest, liquidity sweep or
-supply/demand-base retest), a completed 5-minute option confirmation and a
-subsequent completed green 1-minute candle.
-There are no unpaused momentum entries and no claim of a proven win rate.
+remain unchanged. Entries can use an opening-range break, an intraday support/resistance reversal,
+or a confirmed double-top/bottom or head-and-shoulders pattern on completed
+5/15/30/60-minute spot candles. The selected ATM option is the entry trigger:
+a completed 5-minute premium breakout, followed by a one-minute pullback and
+close above its high. A choppy, alternating narrow range is skipped.
+
+The initial advisory stop is the breakout five-minute option candle low. After
+each compounded 20% premium rise from entry, the advisory stop moves to 5% below
+the observed premium; targets stay fixed at a confirmed option-premium
+resistance. Re-entry requires a new completed trigger. There is no daily alert
+cap, so multiple independently confirmed signals may remain open per index.
+These are unproven trial rules, not a claim of a proven win rate.
 
 These are **alerts only**, not automated orders. This flag suppresses NIFTY
 automatic entry activation, and the queue and live route independently reject
@@ -28,7 +34,7 @@ remain in use. Do not remove broker safety/recovery code or reset state.
 Gap-up/down labels provide context only, not automatic entries. All three
 categories' public signal/lifecycle messages and report parts include a shared
 educational/risk notice; a disclaimer is not a guarantee of SEBI compliance.
-See [the exact trial rules and rollout](docs/TRADING_LOGIC.md#index-swing-recovery-trial).
+See [the exact trial rules and rollout](docs/TRADING_LOGIC.md#index-premium-pullback-trial).
 
 ## Persistent PRACTICE portfolio (`main.py`)
 

@@ -1,10 +1,9 @@
-from copy import deepcopy
 from datetime import datetime, timedelta
 
 import pytest
 
-from index_swing_strategy import IndexSwingStrategy, valid_entry
-from premium_indicators import IndicatorDataError, completed_candles
+from index_swing_strategy import valid_entry
+from premium_indicators import completed_candles
 from price_action_confirmations import confirmations, gap_context, valid_confirmation
 from signal_lifecycle import SignalLifecycle
 from tests.test_index_swing_strategy import IST, NOW, history, incoming, make_signal
@@ -116,45 +115,27 @@ def test_sweep_requires_reclaim_not_only_a_break_or_equal_touch():
         assert not any(item["kind"] == "liquidity_sweep" for item in confirmations(bars, "CE"))
 
 
-def test_engine_rejects_otherwise_valid_setup_without_new_confirmation():
-    spot, premium, _, _ = history()
-    spot[-2]["low"] = 100
-    with pytest.raises(IndicatorDataError, match="index_price_action_confirmation"):
-        IndexSwingStrategy().prepare("NIFTY", "CE", spot, premium, NOW)
+def test_price_action_labels_are_not_a_mandatory_entry_gate():
+    signal = make_signal()
+    assert "price_action_confirmations" not in signal
+    assert valid_entry(signal, NOW)
 
 
-@pytest.mark.parametrize("change", [
-    lambda signal: signal.pop("price_action_confirmations"),
-    lambda signal: signal.update(price_action_confirmations=[]),
-    lambda signal: signal["price_action_confirmations"][0].update(side="PE"),
-    lambda signal: signal["price_action_confirmations"][0].update(kind="unknown"),
-    lambda signal: signal["price_action_confirmations"][0].update(zone_low=float("nan")),
-    lambda signal: signal["price_action_confirmations"][0].update(formed_at=NOW.timestamp() + 300),
-    lambda signal: signal["price_action_confirmations"][0].update(retest_at=NOW.timestamp() - 3000),
-    lambda signal: signal["price_action_confirmations"][0].update(confirmed_at=NOW.timestamp() + 300),
-])
-def test_shared_admission_cannot_bypass_additional_confirmation(change):
-    signal = deepcopy(make_signal())
-    change(signal)
-    assert not valid_entry(signal, NOW)
-
-
-def test_durable_admission_rejects_missing_or_wrong_side_evidence(tmp_path):
+def test_durable_admission_does_not_require_legacy_price_action_evidence(tmp_path):
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: NOW)
     candidate = incoming()
-    candidate["metadata"].pop("price_action_confirmations")
-    assert service.open_once(candidate) is None
-    candidate = incoming()
-    candidate["metadata"]["price_action_confirmations"][0]["side"] = "PE"
-    assert service.open_once(candidate) is None
-    assert not service.open_positions()
-    assert service.open_once(incoming()) is not None
+    candidate["metadata"].pop("price_action_confirmations", None)
+    assert service.open_once(candidate) is not None
 
 
 @pytest.mark.parametrize("open_,direction", [(125, "gap_up"), (115, "gap_down"), (120, "flat")])
 def test_gap_direction_is_context_not_a_buy_side_or_fvg(open_, direction):
     spot, _, _, _ = history()
-    spot[1].update(open=open_, high=max(open_, 120), low=min(open_, 110))
+    prior = dict(spot[0])
+    prior["timestamp"] -= 86400
+    prior.update(open=120, high=130, low=110, close=120)
+    spot.insert(0, prior)
+    spot[1].update(open=open_, high=max(open_, 130), low=min(open_, 110), close=open_)
     bars = completed_candles(spot, NOW, timeframe_seconds=300)
     context = gap_context(bars, NOW)
     assert context["direction"] == direction
@@ -162,10 +143,6 @@ def test_gap_direction_is_context_not_a_buy_side_or_fvg(open_, direction):
     assert context["percent"] == round(100 * (open_ - 120) / 120, 4)
     assert "setups" not in context
     assert "price_action_confirmations" not in context
-    _, premium, _, _ = history()
-    reference = IndexSwingStrategy().prepare("NIFTY", "CE", spot, premium, NOW)
-    assert reference["gap_context"]["direction"] == direction
-    assert reference["spot_direction"] == "bullish"
 
 
 def test_missing_opening_or_prior_session_does_not_invent_gap():

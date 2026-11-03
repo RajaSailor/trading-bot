@@ -4,11 +4,16 @@ import pytest
 
 from alert_disclaimer import PUBLIC_DISCLAIMER
 from lifecycle_charts import LifecycleChartService
-from price_action_confirmations import CONFIRMATION_NAMES
 from signal_lifecycle import SignalLifecycle
 from telegram_handler import format_option_breakout_alert
 from tests.test_index_swing_strategy import NOW, incoming
 from tests.test_signal_lifecycle import payload
+
+
+def current_payload(*, underlying, category):
+    value = payload(now=NOW, underlying=underlying, category=category)
+    value["metadata"]["expiry"] = "27NOV2026"
+    return value
 
 
 @pytest.mark.parametrize("category,underlying", [
@@ -19,7 +24,7 @@ from tests.test_signal_lifecycle import payload
 def test_each_category_and_lifecycle_event_contains_full_one_line_notice(
         tmp_path, category, underlying, event):
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: NOW)
-    position = service.open_once(payload(underlying=underlying, category=category))
+    position = service.open_once(current_payload(underlying=underlying, category=category))
     assert position is not None
     position.update(
         closed_at=NOW.timestamp(), previous_stop_loss=position["stop_loss"],
@@ -55,21 +60,20 @@ def test_index_chart_caption_and_serialized_outbox_preserve_notice_and_evidence(
     with service._connection() as db:
         row = db.execute("SELECT message,position FROM lifecycle_outbox").fetchone()
     stored = json.loads(row["position"])
-    assert stored["metadata"]["price_action_confirmations"]
-    assert stored["metadata"]["gap_context"]["direction"] == "gap_down"
+    assert stored["metadata"]["spot_patterns"] == []
     assert row["message"].endswith(PUBLIC_DISCLAIMER)
-    # Even all four evidence labels stay within an ordinary photo caption.
-    for kind in CONFIRMATION_NAMES:
-        position["metadata"]["price_action_confirmations"].append({"kind": kind})
     message = service._signal_message(position, "OPEN")
     assert len(message.encode("utf-16-le")) // 2 <= 1024
-    assert message.count("Liquidity sweep and reclaim") == 1
     charts = LifecycleChartService(
         tmp_path / "charts.db", lambda *a, **k: True, lambda *a, **k: [], enabled=True)
-    assert charts._caption(position).endswith(PUBLIC_DISCLAIMER)
+    overlay = SignalLifecycle._chart_overlay(position, "OPEN")
+    assert charts._caption(overlay).endswith(PUBLIC_DISCLAIMER)
     long_caption = charts._caption({"option_symbol": "\U0001f4c8" * 1500})
     assert len(long_caption.encode("utf-16-le")) // 2 <= 1024
     assert long_caption.endswith(PUBLIC_DISCLAIMER)
+    escaped_caption = charts._caption({"option_symbol": "<&>" * 1000})
+    assert len(escaped_caption.encode("utf-16-le")) // 2 <= 1024
+    assert escaped_caption.endswith(PUBLIC_DISCLAIMER)
 
 
 def test_missing_pnl_terminal_message_still_has_notice(tmp_path):
