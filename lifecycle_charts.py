@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import html
 import logging
 import math
 import os
@@ -284,8 +285,25 @@ class LifecycleChartService:
             f"{overlay.get('event', '')} premium chart\n"
             "Signal-only / hypothetical — not a broker fill"
         )
+        patterns = overlay.get("spot_patterns") or []
+        if patterns:
+            labels = ", ".join(
+                f"{item.get('name', '').replace('_', ' ')} ({item.get('timeframe')}m)"
+                for item in patterns if isinstance(item, dict)
+            )
+            if labels:
+                heading += f"\nSpot pattern: {labels}"
         budget = 1024 - len(PUBLIC_DISCLAIMER) - 1
-        heading = heading.encode("utf-16-le")[:budget * 2].decode("utf-16-le", errors="ignore")
+        escaped = []
+        used = 0
+        for character in heading:
+            piece = html.escape(character)
+            width = len(piece.encode("utf-16-le")) // 2
+            if used + width > budget:
+                break
+            escaped.append(piece)
+            used += width
+        heading = "".join(escaped)
         return with_disclaimer(heading)
 
     def deliver_event(self, db, job, caption):

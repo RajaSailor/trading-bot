@@ -100,7 +100,7 @@ def _trailing_settings():
 
 
 class SignalLifecycle:
-    """One global OPEN lock per underlying, released at exit or session square-off."""
+    """Persistent advisory signals with per-signal lifecycle and durable notifications."""
 
     def __init__(self, db_path, notify=None, clock=time.time, calendar=None, send=None, chart_jobs=None):
         self.db_path = str(db_path)
@@ -124,8 +124,6 @@ class SignalLifecycle:
                     underlying TEXT NOT NULL, category TEXT NOT NULL,
                     status TEXT NOT NULL, opened_at REAL NOT NULL,
                     closed_at REAL, last_quote_at REAL NOT NULL, data TEXT NOT NULL);
-                CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_open_underlying
-                    ON lifecycle_signals(underlying) WHERE status='OPEN';
                 CREATE TABLE IF NOT EXISTS lifecycle_entries (
                     underlying TEXT NOT NULL, side TEXT NOT NULL, price REAL NOT NULL,
                     PRIMARY KEY(underlying,side));
@@ -153,6 +151,10 @@ class SignalLifecycle:
                 db.execute("ALTER TABLE lifecycle_outbox ADD COLUMN position TEXT")
             if "last_error" not in outbox_columns:
                 db.execute("ALTER TABLE lifecycle_outbox ADD COLUMN last_error TEXT")
+            db.execute("DROP INDEX IF EXISTS lifecycle_open_underlying")
+            db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_open_underlying
+                ON lifecycle_signals(underlying)
+                WHERE status='OPEN' AND COALESCE(json_extract(data,'$.index_swing'),0) != 1""")
             db.execute("INSERT OR IGNORE INTO lifecycle_meta VALUES('inception',?)",
                        (now.date().isoformat(),))
             for category in CATEGORY_EXCHANGES:
@@ -269,7 +271,8 @@ class SignalLifecycle:
                 or not underlying or meta["underlying"] is None
                 or not key or payload["idempotency_key"] is None
                 or meta["option_symbol"] is None or not str(meta["option_symbol"]).strip()
-                or side not in ("CE", "PE") or meta["strike_band"] != "ITM+1"
+                or side not in ("CE", "PE")
+                or meta["strike_band"] != ("ATM" if index_signal else "ITM+1")
                 or (index_signal and (not valid_index_entry(meta, now)
                                       or underlying not in INDEX_SYMBOLS or category != "index_options"))
                 or (not index_signal and meta.get("trigger") != TRIGGER_LIVE)
@@ -290,14 +293,15 @@ class SignalLifecycle:
             target = ((Decimal(str(_positive(meta["target"]))) / tick).to_integral_value(
                 rounding=ROUND_FLOOR) * tick if index_signal else
                 ((entry + 2 * (entry - stop)) / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
-            if index_signal and (target - entry) / (entry - stop) < Decimal("1.5"):
+            if index_signal and not stop < entry < target:
                 return None
             signal_id = uuid.uuid4().hex
             meta.update(entry=float(entry), stop_loss=float(stop), target=float(target),
                         targets=[float(target)], risk_points=float(entry - stop),
                         signal_id=signal_id, _lifecycle_managed=True,
                         durable_open_accepted=True, alert_sent=True,
-                        observed_entry=float(observed))
+                        observed_entry=float(observed),
+                        stop_policy="compound_20_5" if index_signal else None)
             position = {
                 "id": signal_id, "signal_id": signal_id, "signal_key": key,
                 "underlying": underlying, "category": category, "exchange": exchange,
@@ -306,12 +310,13 @@ class SignalLifecycle:
                 "initial_stop_loss": float(stop), "initial_target": float(target),
                 "trailing_step": 0, "advisory_trailing": None if index_signal else _trailing_settings(),
                 "index_swing": index_signal, "breakeven_applied": False,
+                "stop_policy": "compound_20_5" if index_signal else None,
                 "last_candle_stop_end": meta.get("confirmation_end"),
                 "telegram_chat_id": self._resolve_chat_id(category),
                 "risk_points": float(entry - stop),
                 "observed_entry": float(observed), "security_id": int(security),
                 "exchange_segment": segment, "option_type": side, "strike": strike,
-                "strike_band": "ITM+1", "expiry": expiry.isoformat(),
+                "strike_band": "ATM" if index_signal else "ITM+1", "expiry": expiry.isoformat(),
                 "tick_size": float(tick), "lot_size": int(lot),
                 "instrument_type": instrument_type,
                 "option_symbol": str(meta["option_symbol"]), "metadata": meta,
@@ -320,23 +325,15 @@ class SignalLifecycle:
             }
             with self._transaction() as db:
                 if db.execute("SELECT 1 FROM lifecycle_signals WHERE signal_key=? OR "
-                              "(underlying=? AND status='OPEN')", (key, underlying)).fetchone():
+                              "(underlying=? AND status='OPEN' AND "
+                              "(?=0 OR COALESCE(json_extract(data,'$.index_swing'),0) != 1))",
+                              (key, underlying, int(index_signal))).fetchone():
                     return None
                 last = db.execute("SELECT price FROM lifecycle_entries WHERE underlying=? AND side=?",
                                   (underlying, side)).fetchone()
                 if not index_signal and last and Decimal(str(last["price"])) * Decimal(".95") <= observed <= (
                         Decimal(str(last["price"])) * Decimal("1.05")):
                     return None
-                if index_signal:
-                    start = datetime.combine(now.date(), datetime.min.time(), tzinfo=IST).timestamp()
-                    recent = [json.loads(row["data"]) for row in db.execute(
-                        "SELECT data FROM lifecycle_signals WHERE underlying=? AND opened_at>=?",
-                        (underlying, start))]
-                    if sum(row.get("index_swing", False) for row in recent) >= 3:
-                        return None
-                    if any(row.get("index_swing") and row["status"] == "STOP"
-                           and now.timestamp() - row["closed_at"] < 600 for row in recent):
-                        return None
                 db.execute("""INSERT INTO lifecycle_signals
                            (id,signal_key,underlying,category,status,opened_at,closed_at,last_quote_at,data)
                            VALUES(?,?,?,?,?,?,NULL,?,?)""",
@@ -467,6 +464,8 @@ class SignalLifecycle:
             "breakout_timestamp": metadata.get("breakout_timestamp"),
             "reference_timestamp": metadata.get("reference_timestamp"),
             "timeframe": metadata.get("timeframe", "10min"),
+            "setups": metadata.get("setups", []),
+            "spot_patterns": metadata.get("spot_patterns", []),
             **({"interval_minutes": 5} if position.get("index_swing") else {}),
         }
 
@@ -482,6 +481,8 @@ class SignalLifecycle:
                         or not 0 <= current.timestamp() - position["last_quote_at"] <= 10
                         or not self.calendar(position["exchange"], current)
                         or current >= self._squareoff_at(position["exchange"], current.date())):
+                    continue
+                if position.get("stop_policy") == "compound_20_5":
                     continue
                 stop = position["stop_loss"]
                 entry = position["entry"]
@@ -521,6 +522,28 @@ class SignalLifecycle:
                            (json.dumps(position, allow_nan=False), position["id"]))
 
     def _trail(self, db, position, price, stamp):
+        if position.get("stop_policy") == "compound_20_5":
+            entry = Decimal(str(position["entry"]))
+            tick = Decimal(str(position["tick_size"]))
+            step = int(position.get("trailing_step", 0))
+            while Decimal(str(price)) >= entry * (Decimal("1.2") ** (step + 1)):
+                step += 1
+            if step <= position.get("trailing_step", 0):
+                return
+            stop = _positive(float(
+                ((Decimal(str(price)) * Decimal(".95") / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
+            ))
+            if stop <= position["stop_loss"]:
+                position["trailing_step"] = step
+                return
+            position.update(
+                previous_stop_loss=position["stop_loss"], previous_target=position["target"],
+                stop_loss=stop, trailing_step=step, modified_at=stamp,
+            )
+            position["metadata"].update(stop_loss=stop)
+            self._enqueue(db, f"{position['id']}:MODIFY:{step}", position["category"],
+                          self._signal_message(position, "MODIFY"), position)
+            return
         settings = position.get("advisory_trailing")
         if not settings:
             return
