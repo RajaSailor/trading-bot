@@ -12,8 +12,10 @@ from premium_indicators import IndicatorDataError, completed_candles
 IST = ZoneInfo("Asia/Kolkata")
 INDEX_SYMBOLS = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
 INDEX_TRIGGER = "index_swing_confirmed"
-MAX_SETUP_AGE = 15 * 60
 MAX_QUOTE_AGE = 10
+SUPPORT_TOLERANCE = .005
+RESISTANCE_TOLERANCE = .01
+PREMIUM_POLICY = "premium_support_recovery_v2"
 
 
 def enabled():
@@ -233,13 +235,48 @@ def valid_entry(metadata, now):
         numbers = (stamp, five_end, one_start, price, stop, target, trigger_close, pullback_high)
         if not all(math.isfinite(value) and value > 0 for value in numbers):
             return False
+        premium_only = metadata.get("entry_policy") == PREMIUM_POLICY
+        if premium_only:
+            support = float(metadata["premium_support"])
+            tested_low = float(metadata["retest_low"])
+            previous_start = float(metadata["previous_minute_start"])
+            support_end = float(metadata["support_known_at"])
+            recovery_open = float(metadata["one_minute_open"])
+            support_candle = float(metadata["support_candle_timestamp"])
+            confirmation_low = float(metadata["premium_confirmation_low"])
+            if not (
+                math.isfinite(support) and support > 0
+                and math.isfinite(tested_low) and tested_low > 0
+                and math.isfinite(support_end) and support_end > 0
+                and support_end <= previous_start
+                and support_end <= five_end
+                and math.isfinite(recovery_open) and recovery_open > 0
+                and trigger_close > recovery_open
+                and math.isfinite(support_candle) and support_candle > 0
+                and support_candle + 300 <= support_end
+                and stop == confirmation_low
+                and 0 <= now.timestamp() - five_end <= 375
+                and previous_start + 60 == one_start
+                and tested_low <= support * (1 + SUPPORT_TOLERANCE)
+                and trigger_close > support
+                and metadata.get("setups") in (
+                    ["premium_support_retest"], ["premium_average_reclaim"],
+                )
+            ):
+                return False
+            if (metadata["setups"] == ["premium_support_retest"]
+                    and tested_low < support * (1 - SUPPORT_TOLERANCE)):
+                return False
+            if metadata["setups"] == ["premium_average_reclaim"] and tested_low > support:
+                return False
         return (
             metadata.get("index_swing") is True and metadata.get("alerts_only") is True
             and metadata.get("trigger") == INDEX_TRIGGER
             and 0 <= now.timestamp() - stamp <= MAX_QUOTE_AGE
-            and five_end <= one_start and one_end <= now.timestamp()
+            and (premium_only or five_end <= one_start) and one_end <= now.timestamp()
             and 0 <= now.timestamp() - one_end <= 75
-            and price > trigger_close > pullback_high
+            and (price > max(support, pullback_high) if premium_only else price > trigger_close)
+            and trigger_close > pullback_high
             and 0 < stop < price < target
             and bool(metadata.get("setups"))
         )
@@ -249,40 +286,112 @@ def valid_entry(metadata, now):
 
 class IndexSwingStrategy:
     def prepare(self, symbol, side, spot_candles, premium_candles, now):
-        if symbol not in INDEX_SYMBOLS:
+        # spot_candles is retained only for call-site compatibility, never evaluated.
+        if symbol not in INDEX_SYMBOLS or side not in ("CE", "PE"):
             raise IndicatorDataError("index_unsupported")
-        spot = completed_candles(spot_candles, now, timeframe_seconds=300)
         premium = completed_candles(premium_candles, now, timeframe_seconds=300)
-        context = spot_setups(spot, side, now)
-        if len(premium) < 3 or not spot:
+        session = _session(premium, now)
+        if len(session) < 3:
             raise IndicatorDataError("index_insufficient_history")
-        previous, green = premium[-2:]
-        end = green["_timestamp_epoch"] + 300
-        if (datetime.fromtimestamp(green["_timestamp_epoch"], IST).date() != now.astimezone(IST).date()
-                or not 0 <= now.timestamp() - end <= MAX_SETUP_AGE
-                or green["_timestamp_epoch"] - previous["_timestamp_epoch"] != 300):
+        latest = session[-1]
+        end = latest["_timestamp_epoch"] + 300
+        if not 0 <= now.timestamp() - end <= 375:
             raise IndicatorDataError("index_confirmation_stale")
-        if not (green["close"] > green["open"] and green["close"] > previous["high"]):
-            raise IndicatorDataError("index_premium_confirmation")
-        targets = [high for high in swings(premium, "high") if high > green["close"]]
+        for index in range(len(session) - 1, 0, -1):
+            if session[index]["_timestamp_epoch"] - session[index - 1]["_timestamp_epoch"] != 300:
+                session = session[index:]
+                break
+        if len(session) < 3:
+            raise IndicatorDataError("index_premium_gap")
+        points = _swing_points(session)
+        lows = [point for point in points if point[1] == "L"]
+        highs = [point for point in points if point[1] == "H"]
+        candidates = []
+        for index, _, level in reversed(lows):
+            later_highs = [point for point in highs if point[0] > index]
+            if not later_highs:
+                continue
+            if any(bar["close"] < level * (1 - SUPPORT_TOLERANCE)
+                   for bar in session[index + 1:]):
+                continue
+            target_index, _, target = min(later_highs, key=lambda point: point[2])
+            if target <= level:
+                continue
+            candidates.append({
+                "setup": "premium_support_retest", "support": level,
+                "stop": session[index]["low"], "target": target,
+                "known_at": session[target_index + 1]["_timestamp_epoch"] + 300,
+                "support_candle": session[index], "pullback_lows": [level],
+            })
+        # Repeated rejections define resistance; use only lows between/after
+        # those already-confirmed highs, never unconfirmed current extremes.
+        for index, _, resistance in reversed(highs):
+            matching = [point for point in highs if point[0] <= index
+                        and abs(point[2] - resistance) <= resistance * RESISTANCE_TOLERANCE]
+            if len(matching) < 2:
+                continue
+            floor_points = [point for point in lows if point[0] > matching[0][0]
+                            and point[0] <= index]
+            if len(floor_points) < 2:
+                continue
+            floor_values = [point[2] for point in floor_points]
+            support = sum(floor_values) / len(floor_values)
+            support_index = min(floor_points, key=lambda point: point[2])[0]
+            if resistance <= support:
+                continue
+            if any(bar["close"] < session[support_index]["low"]
+                   for bar in session[index + 1:]):
+                continue
+            candidates.insert(0, {
+                "setup": "premium_average_reclaim", "support": support,
+                "stop": session[support_index]["low"],
+                "target": min(point[2] for point in matching),
+                "known_at": session[index + 1]["_timestamp_epoch"] + 300,
+                "support_candle": session[support_index],
+                "pullback_lows": floor_values,
+            })
+            break
+        if not candidates:
+            raise IndicatorDataError("index_premium_support_missing")
         return {
-            "candle": green, "timestamp": green["timestamp"],
-            "high": green["close"], "low": green["low"], "armed": True,
-            "confirmation_end": end, "swing_targets": sorted(set(targets)), **context,
+            "candle": latest, "timestamp": latest["timestamp"], "armed": True,
+            "confirmation_end": end, "candidates": candidates,
+            "setups": sorted({item["setup"] for item in candidates}),
         }
 
     def evaluate(self, symbol, side, reference, one_minute_candles, quote, now):
         bars = completed_candles(one_minute_candles, now, timeframe_seconds=60)
         if not bars:
             raise IndicatorDataError("index_one_minute_missing")
-        last = bars[-1]
         if len(bars) < 2:
             raise IndicatorDataError("index_one_minute_missing")
         pullback, last = bars[-2:]
-        if pullback["close"] >= pullback["open"]:
-            raise IndicatorDataError("index_pullback_candle_missing")
-        if last["close"] <= pullback["high"]:
-            raise IndicatorDataError("index_pullback_breakout_missing")
+        if (last["_timestamp_epoch"] - pullback["_timestamp_epoch"] != 60
+                or not 0 <= now.timestamp() - (last["_timestamp_epoch"] + 60) <= 75
+                or datetime.fromtimestamp(pullback["_timestamp_epoch"], IST).date() != now.date()):
+            raise IndicatorDataError("index_one_minute_stale_or_gap")
+        if last["close"] <= last["open"] or last["close"] <= pullback["high"]:
+            raise IndicatorDataError("index_recovery_close_missing")
+        matched = []
+        for candidate in reference["candidates"]:
+            support = candidate["support"]
+            if candidate["known_at"] > pullback["_timestamp_epoch"]:
+                continue
+            if min(pullback["low"], last["low"]) > support * (1 + SUPPORT_TOLERANCE):
+                continue
+            if (candidate["setup"] == "premium_average_reclaim"
+                    and min(pullback["low"], last["low"]) > support):
+                continue
+            if (candidate["setup"] == "premium_support_retest"
+                    and min(pullback["low"], last["low"]) < support * (1 - SUPPORT_TOLERANCE)):
+                continue
+            if last["close"] <= support:
+                continue
+            if candidate["stop"] >= last["close"]:
+                continue
+            matched.append(candidate)
+        if not matched:
+            raise IndicatorDataError("index_premium_retest_missing")
         try:
             price, bid, ask = (float(quote[key]) for key in ("price", "bid", "ask"))
             stamp = float(quote.get("trade_timestamp", quote.get("timestamp")))
@@ -293,30 +402,37 @@ class IndexSwingStrategy:
             raise IndicatorDataError("index_spread")
         if not 0 <= now.timestamp() - stamp <= MAX_QUOTE_AGE:
             raise IndicatorDataError("index_quote_stale")
-        targets = [level for level in reference["swing_targets"] if level > price]
-        if not targets:
+        matched = [item for item in matched
+                   if price > max(item["support"], item["stop"], pullback["high"])]
+        if not matched:
+            raise IndicatorDataError("index_entry_risk_or_timing")
+        candidate = next((item for item in matched if item["target"] > price), None)
+        if candidate is None:
             raise IndicatorDataError("index_target_passed")
-        if last["_timestamp_epoch"] < reference["confirmation_end"]:
-            raise IndicatorDataError("index_one_minute_not_after_breakout")
+        candle = candidate["support_candle"]
         signal = {
             "symbol": symbol, "underlying": symbol, "category": "index_options",
             "signal": "CALL" if side == "CE" else "PUT", "option_type": side,
             "trigger": INDEX_TRIGGER, "index_swing": True, "alerts_only": True,
             "timeframe": "5min", "confirmation_end": reference["confirmation_end"],
             "one_minute_start": last["_timestamp_epoch"], "one_minute_close": last["close"],
-            "reference_timestamp": pullback["timestamp"], "reference_color": "RED",
-            "reference_high": pullback["high"], "reference_low": reference["low"],
+            "one_minute_open": last["open"],
+            "reference_timestamp": pullback["timestamp"], "reference_color": "RECOVERY",
+            "reference_high": pullback["high"], "reference_low": candidate["stop"],
             "breakout_timestamp": stamp, "first_crossing_timestamp": stamp,
             "breakout_price": price, "entry": price, "entry_price": price,
             "strike_band": "ATM",
-            "stop_loss": reference["low"], "target": targets[0], "targets": [targets[0]],
-            "risk_points": price - reference["low"], "detected_at": now.isoformat(),
-            **{key: reference[key] for key in (
-                "setups", "spot_zone", "spot_direction", "spot_ltp", "spot_next_zone",
-                "opening_high", "opening_low", "spot_patterns",
-            )},
-            "pullback_low": pullback["low"], "premium_confirmation_high": reference["high"],
-            "premium_confirmation_low": reference["low"],
+            "stop_loss": candidate["stop"], "target": candidate["target"],
+            "targets": [candidate["target"]],
+            "risk_points": price - candidate["stop"], "detected_at": now.isoformat(),
+            "setups": [candidate["setup"]], "entry_policy": PREMIUM_POLICY,
+            "premium_support": candidate["support"], "support_known_at": candidate["known_at"],
+            "pullback_lows": candidate["pullback_lows"],
+            "retest_low": min(pullback["low"], last["low"]),
+            "previous_minute_start": pullback["_timestamp_epoch"],
+            "pullback_low": pullback["low"], "premium_confirmation_high": candle["high"],
+            "premium_confirmation_low": candle["low"],
+            "support_candle_timestamp": candle["_timestamp_epoch"],
         }
         if not valid_entry(signal, now):
             raise IndicatorDataError("index_entry_risk_or_timing")
@@ -324,6 +440,19 @@ class IndexSwingStrategy:
 
 
 def describe_setup(metadata):
+    if metadata.get("entry_policy") == PREMIUM_POLICY:
+        label = ("Repeated premium support / W recovery"
+                 if metadata["setups"] == ["premium_support_retest"]
+                 else "Average pullback support reclaim")
+        return (
+            f"Setup: {label}\n"
+            f"Premium support: {metadata['premium_support']:.2f} | "
+            f"Retest low: {metadata['retest_low']:.2f}\n"
+            f"Recovery: 1m close {metadata['one_minute_close']:.2f} above "
+            f"previous 1m high {metadata['reference_high']:.2f}\n"
+            "Spot is used for ATM selection only, not entry confirmation.\n"
+            "Alerts only; stop updates are advisory, not broker orders."
+        )
     labels = {
         "opening_range_break": "Opening-range break",
         "intraday_support_reclaim": "Intraday support reclaim",

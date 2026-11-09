@@ -46,11 +46,10 @@ def history():
     ]
     premiums = [bar(start + timedelta(minutes=5 * n), 72, 75, 70, 71)
                 for n in range(15)]
-    premiums[4].update(high=100)
-    premiums[-2].update(open=66, high=70, low=60, close=62)
-    premiums[-1].update(open=62, high=75, low=60, close=72, volume=200)
+    premiums[5].update(low=60)
+    premiums[8].update(high=100)
     one = [
-        bar(NOW.replace(minute=29, second=0), 70, 73, 68, 69),
+        bar(NOW.replace(minute=29, second=0), 70, 73, 60.2, 69),
         bar(NOW.replace(minute=30, second=0), 69, 75, 68.5, 74),
     ]
     quote = {"price": 74.5, "bid": 74.45, "ask": 74.55, "trade_timestamp": NOW.timestamp()}
@@ -85,17 +84,130 @@ def incoming(symbol="NIFTY", side="CE", now=NOW, key="setup-1"):
 
 @pytest.mark.parametrize("symbol", sorted(INDEX_SYMBOLS))
 @pytest.mark.parametrize("side", ["CE", "PE"])
-def test_index_entry_uses_spot_opening_break_and_option_pullback_confirmation(symbol, side):
+def test_index_entry_uses_only_premium_support_and_recovery(symbol, side):
     signal = make_signal(symbol, side)
     assert signal["alerts_only"] is True
     assert signal["strike_band"] == "ATM"
     assert signal["stop_loss"] == 60
     assert signal["target"] == 100
-    assert "opening_range_break" in signal["setups"]
-    assert signal["spot_direction"] == ("bullish" if side == "CE" else "bearish")
+    assert signal["setups"] == ["premium_support_retest"]
+    assert signal["premium_support"] == 60
+    assert "spot_direction" not in signal
     assert signal["reference_high"] == 73
     assert signal["one_minute_close"] == 74
     assert valid_entry(signal, NOW)
+
+
+def test_recovery_can_finish_with_latest_five_minute_bar():
+    _, premium, one, quote = history()
+    now = NOW - timedelta(minutes=1)
+    one = [{**item, "timestamp": item["timestamp"] - 60} for item in one]
+    quote["trade_timestamp"] = now.timestamp()
+    engine = IndexSwingStrategy()
+    reference = engine.prepare("NIFTY", "CE", [], premium, now)
+    signal = engine.evaluate("NIFTY", "CE", reference, one, quote, now)
+    assert signal["confirmation_end"] == signal["one_minute_start"] + 60
+    assert valid_entry(signal, now)
+
+
+def test_previous_minute_can_be_green():
+    _, premium, one, quote = history()
+    one[-2]["open"] = 68
+    engine = IndexSwingStrategy()
+    reference = engine.prepare("NIFTY", "CE", [], premium, NOW)
+    signal = engine.evaluate("NIFTY", "CE", reference, one, quote, NOW)
+    assert valid_entry(signal, NOW)
+
+
+def premium_bars(values):
+    start = NOW.replace(hour=9, minute=15, second=0)
+    return [bar(start + timedelta(minutes=5 * i), *value)
+            for i, value in enumerate(values)]
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_user_w_example_enters_near_47_without_waiting_for_60(side):
+    premium = premium_bars([
+        (70, 72, 65, 66), (66, 67, 55, 56), (56, 57, 47, 49),
+        (49, 56, 49, 55), (55, 60, 53, 58), (58, 59, 52, 54),
+        (54, 55, 49, 50),
+    ])
+    # Fill the current history without a five-minute green breakout.
+    while len(premium) < 15:
+        stamp = datetime.fromtimestamp(premium[-1]["timestamp"], IST) + timedelta(minutes=5)
+        premium.append(bar(stamp, 50, 51, 48, 49))
+    one = [
+        bar(NOW.replace(minute=29, second=0), 49, 49.5, 47, 47.5),
+        bar(NOW.replace(minute=30, second=0), 47.5, 50, 47.4, 49.8),
+    ]
+    quote_ = {"price": 49.7, "bid": 49.65, "ask": 49.75, "trade_timestamp": NOW.timestamp()}
+    engine = IndexSwingStrategy()
+    reference = engine.prepare("NIFTY", side, [{"invalid": "spot ignored"}], premium, NOW)
+    signal = engine.evaluate("NIFTY", side, reference, one, quote_, NOW)
+    assert signal["premium_support"] == 47
+    assert signal["entry"] == 49.7  # Fresh price can be below the 1m close, not its trigger.
+    assert signal["target"] == 60
+    assert signal["stop_loss"] == 47
+    assert signal["one_minute_close"] < 60
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_user_average_reclaim_uses_confirmed_lows_and_repeated_resistance(side):
+    premium = premium_bars([
+        (105, 110, 102, 108), (108, 120, 106, 115), (115, 116, 100, 103),
+        (103, 105, 90, 93), (93, 110, 93, 108), (108, 120, 106, 116),
+        (116, 117, 103, 106), (106, 108, 100, 102), (102, 112, 101, 110),
+        (110, 120, 109, 115), (115, 116, 102, 105),
+    ])
+    while len(premium) < 15:
+        stamp = datetime.fromtimestamp(premium[-1]["timestamp"], IST) + timedelta(minutes=5)
+        premium.append(bar(stamp, 105, 108, 102, 104))
+    one = [
+        bar(NOW.replace(minute=29, second=0), 96, 96.5, 94, 94.5),
+        bar(NOW.replace(minute=30, second=0), 94.5, 98, 94.4, 97),
+    ]
+    quote_ = {"price": 97, "bid": 96.95, "ask": 97.05, "trade_timestamp": NOW.timestamp()}
+    engine = IndexSwingStrategy()
+    reference = engine.prepare("NIFTY", side, [], premium, NOW)
+    signal = engine.evaluate("NIFTY", side, reference, one, quote_, NOW)
+    assert signal["setups"] == ["premium_average_reclaim"]
+    assert signal["pullback_lows"] == [90, 100]
+    assert signal["premium_support"] == 95
+    assert signal["stop_loss"] == 90
+    assert signal["target"] == 120
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda s: s.update(support_known_at=NOW.timestamp() + 1),
+    lambda s: s.update(previous_minute_start=s["one_minute_start"] - 120),
+    lambda s: s.update(retest_low=70),
+    lambda s: s.update(retest_low=50),
+    lambda s: s.update(one_minute_open=s["one_minute_close"]),
+    lambda s: s.update(premium_confirmation_low=59),
+    lambda s: s.update(confirmation_end=NOW.timestamp() - 400),
+])
+def test_durable_premium_gate_rejects_missing_or_impossible_confirmation(mutation):
+    signal = make_signal()
+    mutation(signal)
+    assert not valid_entry(signal, NOW)
+
+
+def test_support_requires_known_rebound_not_unconfirmed_or_previous_session_low():
+    _, premium, _, _ = history()
+    engine = IndexSwingStrategy()
+    with pytest.raises(IndicatorDataError, match="index_premium_support_missing"):
+        engine.prepare("NIFTY", "CE", [], premium[:6], NOW.replace(hour=9, minute=45))
+    yesterday = [{**item, "timestamp": item["timestamp"] - 86400} for item in premium]
+    today_flat = premium_bars([(70, 75, 69, 71)] * 15)
+    with pytest.raises(IndicatorDataError, match="index_premium_support_missing"):
+        engine.prepare("NIFTY", "CE", [], yesterday + today_flat, NOW)
+
+
+def test_support_explicitly_fails_after_a_completed_close_breaks_it():
+    _, premium, _, _ = history()
+    premium[-1].update(open=65, low=50, close=55)
+    with pytest.raises(IndicatorDataError, match="index_premium_support_missing"):
+        IndexSwingStrategy().prepare("NIFTY", "CE", [], premium, NOW)
 
 
 def test_only_completed_spot_patterns_are_reported():
@@ -133,9 +245,9 @@ def test_head_and_shoulders_patterns_require_neckline_break(bars, expected, side
 
 
 @pytest.mark.parametrize("mutation,reason", [
-    (lambda spot, premium, one, quote: one[-1].update(close=72), "index_pullback_breakout_missing"),
-    (lambda spot, premium, one, quote: one[-2].update(open=70, high=75, close=74),
-     "index_pullback_candle_missing"),
+    (lambda spot, premium, one, quote: one[-1].update(close=72), "index_recovery_close_missing"),
+    (lambda spot, premium, one, quote: one[-2].update(low=68),
+     "index_premium_retest_missing"),
     (lambda spot, premium, one, quote: quote.update(trade_timestamp=NOW.timestamp() - 11),
      "index_quote_stale"),
     (lambda spot, premium, one, quote: quote.update(bid=60), "index_spread"),
@@ -253,6 +365,19 @@ def test_lifecycle_rejects_non_atm_index_contracts(lifecycle):
     assert service.open_once(signal) is None
 
 
+def test_lifecycle_accepts_a_support_reclaim_after_previous_minute_was_below_stop(lifecycle):
+    service, _, _ = lifecycle
+    signal = incoming()
+    signal["metadata"].update(
+        reference_high=59.9, breakout_price=61.5,
+        one_minute_open=59.8, one_minute_close=61, retest_low=59.8,
+    )
+    position = service.open_once(signal)
+    assert position is not None
+    assert position["stop_loss"] == 60
+    assert position["entry"] == 61.5
+
+
 def test_scanner_routes_only_three_indices_and_uses_atm_contracts(tmp_path, monkeypatch):
     monkeypatch.setenv("INDEX_SWING_STRATEGY_ENABLED", "true")
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: NOW)
@@ -284,5 +409,14 @@ def test_scanner_routes_only_three_indices_and_uses_atm_contracts(tmp_path, monk
     assert payload["metadata"]["strike_band"] == BAND_ATM
     assert service.is_open("NIFTY")
     evaluation = scanner.status()["recent_index_evaluations"][-1]
-    assert evaluation["result"] == "QUALIFIED"
+    assert evaluation["result"] == "ACCEPTED"
     assert all(check["status"] == "PASS" for check in evaluation["checks"])
+    dm.fetch_contract_candles.assert_not_called()
+    assert all(check["name"] != "spot_setup" for check in evaluation["checks"])
+    scanner_policy = scanner.status()["index_swing_strategy"]
+    assert scanner_policy["spot_confirmation_required"] is False
+    assert scanner_policy["entry_policy"] == "premium_support_recovery_v2"
+    assert scanner._refresh_instrument(instrument, "10min", NOW, spot=130) == 0
+    assert scanner.status()["recent_index_evaluations"][-1]["result"] == "QUALIFIED_NOT_ACCEPTED"
+    assert len(service.open_positions()) == 1
+    assert callback.call_count == 1

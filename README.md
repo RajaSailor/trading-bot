@@ -12,13 +12,15 @@
 
 Set `INDEX_SWING_STRATEGY_ENABLED=true` to replace the legacy 10-minute entry
 strategy **only for NIFTY, BANKNIFTY and SENSEX**. Stock and commodity strategies
-remain unchanged. Entries can use an opening-range break, an intraday support/resistance reversal,
-or a confirmed double-top/bottom or head-and-shoulders pattern on completed
-5/15/30/60-minute spot candles. The selected ATM option is the entry trigger:
-a completed 5-minute premium breakout, followed by a one-minute pullback and
-close above its high. A choppy, alternating narrow range is skipped.
+remain unchanged. Both CALL and PUT entries now use **only their own premium**:
+five-minute same-session support structure, followed by a completed green
+one-minute candle closing above support and the preceding one-minute high.
+The alternatives are a repeated-support/W recovery or an average-pullback-low
+reclaim below repeated premium resistance. No spot direction, opening range,
+spot pattern, five-minute premium breakout, or volume filter must agree.
+Spot is used only to select the listed ATM strike; same-day expiry is skipped.
 
-The initial advisory stop is the breakout five-minute option candle low. After
+The initial advisory stop is the five-minute support candle low. After
 each compounded 20% premium rise from entry, the advisory stop moves to 5% below
 the observed premium; targets stay fixed at a confirmed option-premium
 resistance. Re-entry requires a new completed trigger. There is no daily alert
@@ -31,7 +33,7 @@ execution of the new signals. Keep `NIFTY_LIVE_ENABLED=false`,
 `AUTO_TRADING_ENABLED=false`, and `PRACTICE_MODE=true` during evaluation.
 Existing databases, charts, category-channel notifications and daily reports
 remain in use. Do not remove broker safety/recovery code or reset state.
-Gap-up/down labels provide context only, not automatic entries. All three
+Gap-up, gap-down and flat sessions use the same premium-only entry rules. All three
 categories' public signal/lifecycle messages and report parts include a shared
 educational/risk notice; a disclaimer is not a guarantee of SEBI compliance.
 See [the exact trial rules and rollout](docs/TRADING_LOGIC.md#index-premium-pullback-trial).

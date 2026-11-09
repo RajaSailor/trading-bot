@@ -8,26 +8,38 @@ and other indices retain their existing rules. These alerts never place broker
 or paper orders; keep `NIFTY_LIVE_ENABLED=false`, `AUTO_TRADING_ENABLED=false`,
 and `PRACTICE_MODE=true`.
 
-### Independent spot setup routes
+### Premium-only support routes
 
-Any one completed spot route may qualify an option side:
+Both bought CALL and bought PUT contracts use the same bullish-premium rules.
+The scanner does **not** require spot direction, opening-range breaks, spot
+patterns, spot support/resistance, option volume, or a five-minute green
+breakout candle. Spot is needed only for ATM contract selection, not entry
+confirmation. Each candidate uses its own contract's same-session candles;
+neither the opposite option nor another strike supplies its structure.
 
-1. **Opening range:** retain the actual 09:15-09:20 IST spot candle. A later
-   completed 5-minute spot candle must cross and remain beyond its high for CE
-   or low for PE. If opening data is absent, do not substitute a later bar.
-2. **Intraday reversal:** use a confirmed same-session five-minute pivot as
-   support/resistance. The prior candle must test the level and the latest
-   completed candle must reclaim its high for CE or reject its low for PE.
-3. **Confirmed chart pattern:** identify double top/bottom and
-   head-and-shoulders/inverse patterns on completed 5, 15, 30 and 60-minute
-   spot bars. The neckline/boundary must be closed through before it is
-   reported. A pattern is a candle-geometry heuristic, not a prediction.
+Five-minute pivots need one completed neighbour on either side. Use the
+latest contiguous block of today's completed five-minute candles; an overnight
+gap or a missing candle cannot manufacture a pivot across the gap.
 
-Skip a narrow, alternating intraday range rather than repeatedly signalling
-inside consolidation. A spot route supplies direction and context; it does not
-replace the option-premium trigger. Calls use bullish spot routes; puts use
-bearish routes. Premium/spot disagreement can be shown as context but is not
-proof that a reversal will continue.
+1. **Repeated support / W recovery:** a confirmed five-minute low defines
+   support. There must also be a subsequently confirmed swing high (the
+   intervening rebound) before the new one-minute retest begins. A completed
+   five-minute close more than 0.5% below support invalidates that candidate.
+   The one-minute test must be within +/-0.5% of support, then confirm upward.
+   The target is the nearest already-confirmed intervening swing high.
+   Example: 70 -> 47 -> 60 -> approximately 47 -> recovery. Entry can occur
+   near support after confirmation, without waiting to break the 60 neckline.
+2. **Average support reclaim:** at least two confirmed five-minute swing highs
+   within 1% define repeated resistance. At least two confirmed pullback lows
+   after the first rejection and before the latest matching rejection define
+   an arithmetic mean support level. Only already-confirmed lows participate:
+   today's current retest is not included in its own average. The initial stop
+   is the lowest contributing five-minute support candle's low; the fixed
+   target is the lowest matching resistance high. Example: pullbacks of 90 and
+   100 between repeated rejections at 120 give mean support 95.
+
+The two routes are alternatives, not cumulative requirements. The tolerances
+are explicit trial settings, not empirically optimized probabilities.
 
 ### Option entry, expiry and target
 
@@ -35,17 +47,27 @@ For each side, select the listed **ATM** contract nearest to spot, using the
 nearest listed expiry strictly after today. On expiry day, same-day contracts
 are skipped and the next available expiry is selected.
 
-Require a completed, green five-minute option candle closing above the previous
-five-minute high. That candle's low is the initial advisory stop. After its
-close, wait for a completed red one-minute option pullback candle; enter only
-when a later completed one-minute candle closes above that pullback candle's
-high. Use a fresh observed market premium as the entry reference, not a
-historical candle close or assumed fill. Fresh quote evidence and a valid
-positive stop/target remain mandatory.
+After support and its target are known, examine the latest two consecutive
+completed one-minute option candles. At least one must test the support band
+(the average route must actually reach or dip below the mean). The latest must
+be green and close strictly above both support and the preceding one-minute
+high. The preceding candle need not be red. Do not wait for another five-minute
+breakout or the W neckline. The support structure must have been known before
+the preceding one-minute candle started; future or embedded confirmation is
+not allowed. A recovery may end at a five-minute boundary: the latest completed
+five-minute bar need not finish before that recovery starts, provided the actual
+support and target were already known before the retest.
 
-The target is the nearest already-confirmed option-premium swing-high resistance
-above entry, using today's and available previous-session candles for the same
-contract. If there is no such level, skip the alert rather than invent a target.
+Require the latest five-minute bar to have ended no more than 375 seconds ago,
+the one-minute recovery to have ended no more than 75 seconds ago, and source
+last-trade evidence no more than 10 seconds old, with positive valid bid/ask and
+spread <=2%. The current premium must still exceed support and the previous
+one-minute high, and remain below target and above stop. It need not exceed
+the confirming one-minute close. Use the current observed premium, never a
+retroactive entry below the level that already confirmed.
+
+Targets come only from the same-session premium structure described above.
+If there is no target above entry, skip the alert rather than invent a target.
 The target remains fixed after entry. Stop/target alerts use observed premium;
 they are not broker orders or guaranteed execution prices.
 
@@ -56,7 +78,7 @@ they are not broker orders or guaranteed execution prices.
   contract/pullback candle, not distinct valid entries.
 - There is no daily entry-alert cap. Multiple index signals can be open at once;
   each has its own signal ID, contract, entry, stop, target and lifecycle.
-- Initial stop is the five-minute option confirmation candle low, rounded to
+- Initial stop is the five-minute option support candle low, rounded to
   tick size. Do not delay the initial advisory stop until a profitable candle.
 - For each entry, the first stop update activates at a 20% gain from that
   entry. Later thresholds compound (entry x 1.2, x 1.2^2, etc.). At each new
@@ -69,18 +91,22 @@ they are not broker orders or guaranteed execution prices.
   their prior lifecycle behavior. Already-open old-policy signals retain their
   frozen stop logic.
 
-Every threshold and chart-pattern rule is an experimental starting point, not
+Every threshold and support-structure rule is an experimental starting point, not
 an optimized or historically validated strategy. Compare alerts with the exact
 ATM contract and contemporaneous candles; record missed/late alerts, fees,
 spread, drawdown and losses across multiple sessions before considering changes.
-No new market-data vendor is added; extra premium/spot requests may still meet
-Dhan rate limits.
+No new market-data vendor is added. Full spot history is no longer requested
+for index entry checks, but premium and quote requests may still meet Dhan rate
+limits. A missing ATM selection price still prevents selecting a contract.
 
 Back up existing persistent state before deployment. Check the health endpoint's
 `workers.market_scanner.screener.index_swing_strategy` and rejection counters.
 `recent_index_evaluations` retains the last 50 ATM-side evaluations with matched
-spot setups and each gate marked `PASS`, `FAIL`, or `NOT_EVALUATED`; rejected
-records include the first failing check and reason.
+premium support candidates, their support/stop/target levels and each gate
+marked `PASS`, `FAIL`, or `NOT_EVALUATED`; rejected records include the first
+failing check and reason. `ACCEPTED` means durable signal/outbox acceptance,
+not confirmed Telegram delivery. `QUALIFIED_NOT_ACCEPTED` distinguishes
+duplicate/admission rejection from a setup failure.
 Leave live execution disabled, review the first sessions, and change the flag
 to `false` to stop new revised index entries. Do not reset or delete lifecycle
 state during rollout.

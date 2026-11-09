@@ -64,6 +64,22 @@ def candles(base=NOW):
 
 
 class ChartRenderTests(unittest.TestCase):
+    def test_premium_only_support_level_is_drawn_on_contract_chart(self):
+        from matplotlib.figure import Figure
+        saved = []
+        original = Figure.savefig
+
+        def capture(figure, *args, **kwargs):
+            saved.append(figure.axes[0])
+            return original(figure, *args, **kwargs)
+
+        with patch.object(Figure, "savefig", capture):
+            render_premium_chart(candles(), {
+                "event": "OPEN", "event_time": NOW.timestamp(), "entry": 110,
+                "stop": 95, "target": 130, "premium_support": 100,
+            })
+        self.assertIn("Premium support 100.00", saved[0].get_legend_handles_labels()[1])
+
     def test_trailed_stop_above_entry_has_no_negative_risk_zone(self):
         from matplotlib.figure import Figure
         saved = []

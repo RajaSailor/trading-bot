@@ -134,6 +134,10 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
         ax.axhline(stop, color="#2ca02c" if stop >= entry else "#d62728", linestyle="-",
                    linewidth=1.2, label=f"{stop_label} {stop:.2f}")
         ax.axhline(target, color="#2ca02c", linestyle="-", linewidth=1.2, label=f"Target {target:.2f}")
+        if overlay.get("premium_support") is not None:
+            support = _finite_positive(overlay["premium_support"], "premium_support")
+            ax.axhline(support, color="#9467bd", linestyle=":", linewidth=1.2,
+                       label=f"Premium support {support:.2f}")
 
         ref_time = overlay.get("breakout_timestamp") or overlay.get("reference_timestamp")
         ref_price = overlay.get("breakout_price") or overlay.get("reference_high")

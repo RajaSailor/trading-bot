@@ -285,6 +285,8 @@ class LifecycleChartService:
             f"{overlay.get('event', '')} premium chart\n"
             "Signal-only / hypothetical — not a broker fill"
         )
+        if overlay.get("premium_support") is not None:
+            heading += f"\nPremium support: {overlay['premium_support']:.2f} | Premium-only entry"
         patterns = overlay.get("spot_patterns") or []
         if patterns:
             labels = ", ".join(

@@ -14,8 +14,8 @@ from zoneinfo import ZoneInfo
 from atm_options_fetcher import ATMOptionsFetcher, BAND_ATM, BAND_ITM_PLUS_1
 from exchange_calendar import MCX, exchange_for_instrument, open_exchanges, previous_trading_day
 from index_swing_strategy import (
-    INDEX_SYMBOLS, IndexSwingStrategy, enabled as index_swing_enabled,
-    spot_setups, valid_entry as valid_index_entry,
+    INDEX_SYMBOLS, PREMIUM_POLICY, IndexSwingStrategy, enabled as index_swing_enabled,
+    valid_entry as valid_index_entry,
 )
 from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
@@ -296,22 +296,8 @@ class PremiumScreener:
             return 0
         bucket, _ = self._bucket(instrument, now)
         self._refresh_state[instrument.symbol] = {"bucket": bucket, "retry_at": None}
-        ref = self.data_manager.resolve_underlying(instrument.symbol, now.date())
-        if ref is None or ref.exchange_segment != "IDX_I" or ref.instrument_type != "INDEX":
-            self._count_indicator_reason("index_spot_unavailable")
-            self._drop_monitored_instrument(instrument)
-            return 0
-        from_day = now.date()
-        for _ in range(5):
-            from_day = previous_trading_day(exchange_for_instrument(instrument), from_day)
-        spot_candles = self.data_manager.fetch_contract_candles(
-            ref.security_id, ref.exchange_segment, ref.instrument_type,
-            from_day.isoformat(), now.date().isoformat(), 5,
-            symbol=instrument.symbol, now=now.timestamp(),
-        )
         if spot is None:
-            complete = completed_candles(spot_candles, now, timeframe_seconds=300)
-            spot = complete[-1]["close"] if complete else None
+            spot = self.fetcher.get_spot_price(instrument, "5min")
         if spot is None:
             self._drop_monitored_instrument(instrument)
             self._count_indicator_reason("index_spot_unavailable")
@@ -320,16 +306,12 @@ class PremiumScreener:
         for side in ("CE", "PE"):
             contracts.extend(self.fetcher.resolve_strike_band(
                 instrument, spot, side, now=now,
-                bands=(BAND_ATM,) if self._uses_index_swing(instrument) else (BAND_ITM_PLUS_1,),
+                bands=(BAND_ATM,),
             ))
         self._drop_monitored_instrument(instrument)
         alerts = 0
         for contract in contracts:
-            if self._underlying_locked(instrument.symbol):
-                if not self._uses_index_swing(instrument):
-                    break
-            expected_band = BAND_ATM if self._uses_index_swing(instrument) else BAND_ITM_PLUS_1
-            if contract.get("strike_band") != expected_band:
+            if contract.get("strike_band") != BAND_ATM:
                 continue
             reference = None
             evaluation = {
@@ -337,9 +319,8 @@ class PremiumScreener:
                 "option_symbol": contract.get("option_symbol"),
                 "evaluated_at": now.isoformat(), "setups": [],
                 "checks": [
-                    {"name": "spot_setup", "status": "NOT_EVALUATED"},
-                    {"name": "5m_option_breakout", "status": "NOT_EVALUATED"},
-                    {"name": "1m_pullback_reclaim", "status": "NOT_EVALUATED"},
+                    {"name": "5m_premium_support", "status": "NOT_EVALUATED"},
+                    {"name": "1m_premium_recovery", "status": "NOT_EVALUATED"},
                     {"name": "fresh_quote", "status": "NOT_EVALUATED"},
                     {"name": "premium_resistance_target", "status": "NOT_EVALUATED"},
                     {"name": "entry_safety", "status": "NOT_EVALUATED"},
@@ -348,12 +329,21 @@ class PremiumScreener:
             try:
                 candles = self.fetcher.fetch_option_candles(contract, "5min", now)
                 reference = self.index_engine.prepare(
-                    instrument.symbol, contract["option_type"], spot_candles, candles, now,
+                    instrument.symbol, contract["option_type"], [], candles, now,
                 )
                 evaluation["setups"] = reference["setups"]
+                evaluation["support_candidates"] = [
+                    {key: item[key] for key in ("setup", "support", "stop", "target", "known_at",
+                                                "pullback_lows")}
+                    for item in reference["candidates"]
+                ]
                 evaluation["checks"][0]["status"] = "PASS"
-                evaluation["checks"][1]["status"] = "PASS"
                 one_minute = self.fetcher.fetch_option_candles(contract, "1min", now)
+                minutes = completed_candles(one_minute, now, timeframe_seconds=60)
+                evaluation["recovery_candles"] = [
+                    {key: item[key] for key in ("timestamp", "open", "high", "low", "close")}
+                    for item in minutes[-2:]
+                ]
                 quotes = self.data_manager.fetch_quotes({
                     contract["exchange_segment"]: [int(contract["security_id"])],
                 }) or {}
@@ -365,46 +355,39 @@ class PremiumScreener:
             except IndicatorDataError as exc:
                 self._count_indicator_reason(exc.reason)
                 failed_check = (
-                    "spot_setup" if exc.reason.startswith("index_spot")
-                    or exc.reason in {"index_no_setup", "index_sideways_range"}
-                    else "5m_option_breakout" if exc.reason.startswith("index_premium")
-                    or exc.reason == "index_confirmation_stale"
-                    else "1m_pullback_reclaim" if exc.reason.startswith("index_one_minute")
-                    or exc.reason.startswith("index_pullback")
+                    "5m_premium_support" if exc.reason in {
+                        "index_premium_support_missing", "index_premium_gap",
+                        "index_confirmation_stale", "index_insufficient_history",
+                    }
+                    else "1m_premium_recovery" if exc.reason.startswith("index_one_minute")
+                    or exc.reason in {"index_recovery_close_missing", "index_premium_retest_missing"}
                     else "fresh_quote" if exc.reason.startswith("index_quote")
                     or exc.reason == "index_spread"
                     else "premium_resistance_target" if exc.reason in {
                         "index_target_passed", "index_no_swing_target"
-                    } else "entry_safety" if exc.reason == "index_entry_risk_or_timing"
-                    else "5m_option_breakout" if exc.reason == "index_insufficient_history"
-                    else None
+                    } else "entry_safety"
                 )
                 if reference is not None:
                     evaluation["setups"] = reference.get("setups", [])
                     evaluation["checks"][0]["status"] = "PASS"
-                    evaluation["checks"][1]["status"] = "PASS"
-                elif failed_check != "spot_setup":
-                    try:
-                        spot_context = spot_setups(
-                            completed_candles(spot_candles, now, timeframe_seconds=300),
-                            contract["option_type"], now,
-                        )
-                    except IndicatorDataError:
-                        pass
-                    else:
-                        evaluation["setups"] = spot_context["setups"]
-                        evaluation["checks"][0]["status"] = "PASS"
+                    if (failed_check in {"fresh_quote", "premium_resistance_target"}
+                            or exc.reason == "index_entry_risk_or_timing"):
+                        evaluation["checks"][1]["status"] = "PASS"
+                    if (failed_check == "premium_resistance_target"
+                            or exc.reason == "index_entry_risk_or_timing"):
+                        evaluation["checks"][2]["status"] = "PASS"
                 if failed_check:
                     for check in evaluation["checks"]:
                         if check["name"] == failed_check:
                             check.update(status="FAIL", reason=exc.reason)
                             break
                 evaluation["result"] = "REJECTED"
+                evaluation["reason"] = exc.reason
                 self._record_index_evaluation(evaluation)
                 continue
             evaluation["checks"] = [
                 {"name": name, "status": "PASS"} for name in (
-                    "spot_setup", "5m_option_breakout", "1m_pullback_reclaim",
+                    "5m_premium_support", "1m_premium_recovery",
                     "fresh_quote", "premium_resistance_target", "entry_safety",
                 )
             ]
@@ -412,13 +395,15 @@ class PremiumScreener:
             evaluation["entry_premium"] = signal["breakout_price"]
             evaluation["stop"] = signal["stop_loss"]
             evaluation["target"] = signal["target"]
-            self._record_index_evaluation(evaluation)
             state = {"contract": contract, "instrument": instrument, "reference": reference,
                      "candles": candles, "pending_signal": signal, "index_swing": True}
             contract["premium_ltp"] = signal["breakout_price"]
             with self._lock:
                 self._monitored[int(contract["security_id"])] = state
-            alerts += self._emit(state, signal, {}, observed_now, require_armed=True)
+            accepted = self._emit(state, signal, {}, observed_now, require_armed=True)
+            alerts += accepted
+            evaluation["result"] = "ACCEPTED" if accepted else "QUALIFIED_NOT_ACCEPTED"
+            self._record_index_evaluation(evaluation)
         return alerts
 
     def _schedule_retry(self, instrument, now: datetime) -> None:
@@ -838,7 +823,7 @@ class PremiumScreener:
                 "lot_size": contract.get("lot_size"),
                 "tick_size": contract.get("tick_size"),
                 "instrument_type": contract.get("instrument_type"),
-                "spot_ltp": signal.get("spot_ltp") if signal.get("index_swing") else contract.get("spot_ltp"),
+                "spot_ltp": contract.get("spot_ltp"),
                 "premium_ltp": contract.get("premium_ltp"),
                 "reference_time_ist": format_ist_timestamp(signal.get("reference_timestamp")),
                 "breakout_time_ist": format_ist_timestamp(signal.get("breakout_timestamp"), with_seconds=True),
@@ -991,8 +976,9 @@ class PremiumScreener:
             payload["metadata"].update({
                 key: signal[key] for key in (
                     "index_swing", "alerts_only", "confirmation_end", "one_minute_start",
-                    "one_minute_close", "setups", "spot_zone", "spot_direction", "spot_ltp",
-                    "spot_next_zone", "opening_high", "opening_low", "spot_patterns",
+                    "one_minute_close", "one_minute_open", "setups", "entry_policy", "premium_support",
+                    "support_known_at", "pullback_lows", "retest_low", "previous_minute_start",
+                    "support_candle_timestamp",
                     "premium_confirmation_high", "premium_confirmation_low", "pullback_low",
                 )
             })
@@ -1038,8 +1024,11 @@ class PremiumScreener:
                 "index_swing_strategy": {
                     "enabled": self.index_swing_enabled, "alerts_only": True,
                     "underlyings": sorted(INDEX_SYMBOLS),
-                    "setup_policy": "opening_range_or_intraday_reversal_or_confirmed_spot_pattern",
-                    "premium_entry": "5m_high_break_then_1m_pullback_high_reclaim",
+                    "setup_policy": "premium_support_retest_or_average_support_reclaim",
+                    "premium_entry": "5m_support_structure_then_1m_recovery_close",
+                    "entry_policy": PREMIUM_POLICY,
+                    "spot_confirmation_required": False,
+                    "spot_usage": "ATM_selection_only",
                     "strike_band": "ATM",
                     "daily_entry_cap": None,
                     "stop_ladder": "compounded_20_percent_steps_then_5_percent_below_observed_premium",

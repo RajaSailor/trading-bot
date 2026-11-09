@@ -278,7 +278,7 @@ class SignalLifecycle:
                 or (not index_signal and meta.get("trigger") != TRIGGER_LIVE)
                 or security != int(security) or lot != int(lot)
                 or expiry <= now.date() or float(observed) <= high
-                or (not index_signal and previous > high) or float(low) > high
+                or (not index_signal and (previous > high or float(low) > high))
                 or not 0 <= now.timestamp() - stamp <= 10
                 or not self.calendar(exchange, now)
                 or not self.calendar(exchange, datetime.fromtimestamp(stamp, IST))
@@ -466,6 +466,8 @@ class SignalLifecycle:
             "timeframe": metadata.get("timeframe", "10min"),
             "setups": metadata.get("setups", []),
             "spot_patterns": metadata.get("spot_patterns", []),
+            "premium_support": metadata.get("premium_support"),
+            "entry_policy": metadata.get("entry_policy"),
             **({"interval_minutes": 5} if position.get("index_swing") else {}),
         }
 
@@ -949,7 +951,7 @@ class SignalLifecycle:
                         "SELECT COUNT(*) FROM lifecycle_outbox WHERE last_error='destination_changed'").fetchone()[0],
                     "advisory_trailing": {
                         "enabled_for_new_signals": _trailing_settings() is not None,
-                        "index_swing_policy": "breakeven_then_completed_5m_low",
+                        "index_swing_policy": "compounded_20_percent_steps_then_5_percent_below_observed_premium",
                         "live_broker_modifications_supported": False,
                     },
                     "reports": db.execute("SELECT COUNT(*) FROM lifecycle_reports").fetchone()[0]}
