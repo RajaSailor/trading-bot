@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from option_chart import ChartRenderError, ChartUnavailable, render_premium_chart, select_chart_candles
 from alert_disclaimer import PUBLIC_DISCLAIMER, with_disclaimer
+from premium_patterns import PATTERN_TIMEFRAMES, aggregate_minutes
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -223,17 +224,36 @@ class LifecycleChartService:
         self._fetch_times = [stamp for stamp in self._fetch_times if now - stamp < 60]
         return len(self._fetch_times) < self.max_fetches_per_minute
 
+    def _chart_interval(self, overlay):
+        pattern = overlay.get("premium_pattern")
+        if pattern:
+            minutes = pattern["timeframe"]
+            if minutes not in PATTERN_TIMEFRAMES or overlay.get("interval_minutes") != minutes:
+                raise ChartRenderError("pattern_timeframe_mismatch")
+            return minutes
+        return _clamp_int(overlay.get("interval_minutes"), self.interval_minutes, 1, 60)
+
     def _fetch_snapshot(self, overlay):
-        interval = _clamp_int(overlay.get("interval_minutes"), self.interval_minutes, 1, 60)
+        interval = self._chart_interval(overlay)
         security_id = int(overlay["security_id"])
         segment = str(overlay["exchange_segment"])
         instrument_type = str(overlay["instrument_type"])
         event_time = float(overlay["event_time"])
         from_date, to_date = self._date_range(event_time, segment)
+        pattern = overlay.get("premium_pattern")
+        if pattern:
+            from_date = datetime.fromtimestamp(
+                min(point["timestamp"] for point in pattern["points"]), IST,
+            ).date().isoformat()
         bucket = int(event_time // (interval * 60))
         key = (security_id, segment, instrument_type, interval, from_date, to_date, bucket)
         with self._cache_lock:
-            if key in self._cache:
+            if pattern and overlay.get("event") == "OPEN":
+                candles = select_chart_candles(
+                    overlay["chart_candles"], event_time,
+                    interval_seconds=interval * 60, window=150,
+                )
+            elif key in self._cache:
                 self._cache.move_to_end(key)
                 candles = [dict(candle) for candle in self._cache[key]]
             else:
@@ -242,8 +262,11 @@ class LifecycleChartService:
                     return None, "fetch_budget_exhausted"
                 self._fetch_times.append(now)
                 candles = self.candle_provider(
-                    security_id, segment, instrument_type, from_date, to_date, interval
+                    security_id, segment, instrument_type, from_date, to_date,
+                    1 if pattern else interval,
                 ) or []
+                if pattern:
+                    candles = aggregate_minutes(candles, interval, datetime.fromtimestamp(event_time, IST))
                 candles = [dict(candle) for candle in candles]
                 self._cache[key] = [dict(candle) for candle in candles]
                 while len(self._cache) > 128:
@@ -273,8 +296,7 @@ class LifecycleChartService:
                 int(request.get("security_id")) == int(overlay.get("security_id"))
                 and str(request.get("exchange_segment")) == str(overlay.get("exchange_segment"))
                 and str(request.get("instrument_type")) == str(overlay.get("instrument_type"))
-                and int(request.get("interval_minutes")) == _clamp_int(
-                    overlay.get("interval_minutes"), self.interval_minutes, 1, 60)
+                and int(request.get("interval_minutes")) == self._chart_interval(overlay)
             )
         except (TypeError, ValueError):
             return False
@@ -285,6 +307,14 @@ class LifecycleChartService:
             f"{overlay.get('event', '')} premium chart\n"
             "Signal-only / hypothetical — not a broker fill"
         )
+        if overlay.get("premium_support") is not None:
+            heading += f"\nPremium support: {overlay['premium_support']:.2f} | Premium-only entry"
+        pattern = overlay.get("premium_pattern")
+        if pattern:
+            heading += (f"\nConfirmed premium {pattern['name'].replace('_', ' ')} "
+                        f"| {pattern['timeframe']}m")
+        if overlay.get("previous_session_date"):
+            heading += f"\nLevel reference: {overlay['previous_session_date']} (same contract)"
         patterns = overlay.get("spot_patterns") or []
         if patterns:
             labels = ", ".join(
@@ -343,7 +373,7 @@ class LifecycleChartService:
                 raise ChartRenderError("wrong_contract")
             png = render_premium_chart(
                 snapshot.get("candles") or [],
-                {**overlay, "window": self.window},
+                {**overlay, "window": 150 if overlay.get("premium_pattern") else self.window},
                 max_bytes=self.max_bytes,
             )
         except Exception as exc:
@@ -472,9 +502,8 @@ class LifecycleChartService:
                 select_chart_candles(
                     snapshot.get("candles") or [],
                     overlay["event_time"],
-                    interval_seconds=_clamp_int(
-                        overlay.get("interval_minutes"), self.interval_minutes, 1, 60) * 60,
-                    window=self.window,
+                    interval_seconds=self._chart_interval(overlay) * 60,
+                    window=150 if overlay.get("premium_pattern") else self.window,
                 )
             except ChartRenderError as exc:
                 self._mark(db, row["job_id"], "SKIPPED", error=str(exc) or "no_completed_candles")
@@ -482,7 +511,7 @@ class LifecycleChartService:
             try:
                 png = render_premium_chart(
                     snapshot.get("candles") or [],
-                    {**overlay, "window": self.window},
+                    {**overlay, "window": 150 if overlay.get("premium_pattern") else self.window},
                     max_bytes=self.max_bytes,
                 )
                 try:

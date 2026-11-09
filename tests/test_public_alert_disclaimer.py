@@ -60,7 +60,8 @@ def test_index_chart_caption_and_serialized_outbox_preserve_notice_and_evidence(
     with service._connection() as db:
         row = db.execute("SELECT message,position FROM lifecycle_outbox").fetchone()
     stored = json.loads(row["position"])
-    assert stored["metadata"]["spot_patterns"] == []
+    assert stored["metadata"]["premium_support"] == 60
+    assert "spot_patterns" not in stored["metadata"]
     assert row["message"].endswith(PUBLIC_DISCLAIMER)
     message = service._signal_message(position, "OPEN")
     assert len(message.encode("utf-16-le")) // 2 <= 1024
