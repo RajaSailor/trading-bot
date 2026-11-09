@@ -77,8 +77,14 @@ class ChartRenderTests(unittest.TestCase):
             render_premium_chart(candles(), {
                 "event": "OPEN", "event_time": NOW.timestamp(), "entry": 110,
                 "stop": 95, "target": 130, "premium_support": 100,
+                "premium_reference_levels": [
+                    {"price": 90, "label": "Previous session low"},
+                    {"price": 140, "label": "Previous session high"},
+                ],
             })
         self.assertIn("Premium support 100.00", saved[0].get_legend_handles_labels()[1])
+        self.assertIn("Previous session low 90.00", saved[0].get_legend_handles_labels()[1])
+        self.assertIn("Previous session high 140.00", saved[0].get_legend_handles_labels()[1])
 
     def test_trailed_stop_above_entry_has_no_negative_risk_zone(self):
         from matplotlib.figure import Figure

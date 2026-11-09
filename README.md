@@ -12,20 +12,34 @@
 
 Set `INDEX_SWING_STRATEGY_ENABLED=true` to replace the legacy 10-minute entry
 strategy **only for NIFTY, BANKNIFTY and SENSEX**. Stock and commodity strategies
-remain unchanged. Both CALL and PUT entries now use **only their own premium**:
-five-minute same-session support structure, followed by a completed green
-one-minute candle closing above support and the preceding one-minute high.
-The alternatives are a repeated-support/W recovery or an average-pullback-low
-reclaim below repeated premium resistance. No spot direction, opening range,
-spot pattern, five-minute premium breakout, or volume filter must agree.
+remain unchanged. Both CALL and PUT entries use **only their own premium**.
+Support recovery has priority: five-minute same-session structure or a level
+from the immediately previous trading session of the **same contract**, followed
+by a completed green one-minute close above support and the preceding minute
+high. Repeated-support/W recovery and average-pullback support are alternatives.
+One confirmed prior-session recovery is sufficient; a second retest is optional,
+not an extra entry gate.
+
+An **independent** alternative is a completed bullish premium chart pattern:
+double/triple bottom, inverse head-and-shoulders, ascending triangle, falling
+wedge or bullish flag. Check **1/2/3/5/10/15/30/60/240-minute** charts; no support
+recovery must also agree. Each alert identifies its pattern and timeframe and
+draws the structure and breakout boundary on that timeframe's premium chart.
+Forming patterns and bearish-premium patterns do not trigger buys.
+No spot direction, opening range, spot pattern or volume filter must agree.
 Spot is used only to select the listed ATM strike; same-day expiry is skipped.
 
-The initial advisory stop is the five-minute support candle low. After
+The initial advisory stop is the support candle low for recovery entries,
+or the pattern's invalidation low for pattern entries. After
 each compounded 20% premium rise from entry, the advisory stop moves to 5% below
-the observed premium; targets stay fixed at a confirmed option-premium
-resistance. Re-entry requires a new completed trigger. There is no daily alert
+the observed premium; targets stay fixed at premium resistance for recoveries
+or the pattern's measured move. Re-entry requires a new completed trigger. There is no daily alert
 cap, so multiple independently confirmed signals may remain open per index.
-These are unproven trial rules, not a claim of a proven win rate.
+Up to ten prior trading sessions are requested for the exact contract; missing
+or insufficient history explicitly skips affected timeframes. Four-hour bars
+are full 09:15-13:15 IST bars, not partial afternoon or overnight candles.
+These are unproven trial rules, not a claim of a proven win rate or a complete
+catalogue of every market pattern.
 
 These are **alerts only**, not automated orders. This flag suppresses NIFTY
 automatic entry activation, and the queue and live route independently reject

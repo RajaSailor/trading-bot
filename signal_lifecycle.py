@@ -468,7 +468,14 @@ class SignalLifecycle:
             "spot_patterns": metadata.get("spot_patterns", []),
             "premium_support": metadata.get("premium_support"),
             "entry_policy": metadata.get("entry_policy"),
-            **({"interval_minutes": 5} if position.get("index_swing") else {}),
+            "premium_pattern": metadata.get("premium_pattern"),
+            "chart_candles": metadata.get("chart_candles"),
+            "previous_session_date": metadata.get("previous_session_date"),
+            "previous_level_kind": metadata.get("previous_level_kind"),
+            "premium_reference_levels": metadata.get("premium_reference_levels", []),
+            **({"interval_minutes": (metadata.get("premium_pattern") or {}).get("timeframe", 5)}
+               if position.get("index_swing") else {}),
+            **({"window": 150} if metadata.get("premium_pattern") else {}),
         }
 
     def observe_index_candles(self, security_id, segment, candles, now=None):

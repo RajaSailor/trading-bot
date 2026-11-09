@@ -21,6 +21,7 @@ from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
 from premium_indicators import IndicatorDataError, completed_candles
+from premium_patterns import PATTERN_LOOKBACK_SESSIONS, PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES
 from nifty_market_filters import NiftyMarketFilter
 from state_manager import StateManager
 from telegram_handler import SCREENER_CATEGORIES, format_ist_timestamp
@@ -314,10 +315,20 @@ class PremiumScreener:
             if contract.get("strike_band") != BAND_ATM:
                 continue
             reference = None
+            signal = None
+            candles = self.fetcher.fetch_option_candles(contract, "5min", now)
+            one_minute = self.fetcher.fetch_option_candles(
+                contract, "1min", now, lookback_sessions=PATTERN_LOOKBACK_SESSIONS,
+            )
+            quotes = self.data_manager.fetch_quotes({
+                contract["exchange_segment"]: [int(contract["security_id"])],
+            }) or {}
+            quote = quotes.get((contract["exchange_segment"], int(contract["security_id"])), {})
             evaluation = {
                 "underlying": instrument.symbol, "side": contract["option_type"],
                 "option_symbol": contract.get("option_symbol"),
                 "evaluated_at": now.isoformat(), "setups": [],
+                "route": "support_recovery",
                 "checks": [
                     {"name": "5m_premium_support", "status": "NOT_EVALUATED"},
                     {"name": "1m_premium_recovery", "status": "NOT_EVALUATED"},
@@ -327,7 +338,6 @@ class PremiumScreener:
                 ],
             }
             try:
-                candles = self.fetcher.fetch_option_candles(contract, "5min", now)
                 reference = self.index_engine.prepare(
                     instrument.symbol, contract["option_type"], [], candles, now,
                 )
@@ -338,16 +348,11 @@ class PremiumScreener:
                     for item in reference["candidates"]
                 ]
                 evaluation["checks"][0]["status"] = "PASS"
-                one_minute = self.fetcher.fetch_option_candles(contract, "1min", now)
                 minutes = completed_candles(one_minute, now, timeframe_seconds=60)
                 evaluation["recovery_candles"] = [
                     {key: item[key] for key in ("timestamp", "open", "high", "low", "close")}
                     for item in minutes[-2:]
                 ]
-                quotes = self.data_manager.fetch_quotes({
-                    contract["exchange_segment"]: [int(contract["security_id"])],
-                }) or {}
-                quote = quotes.get((contract["exchange_segment"], int(contract["security_id"])), {})
                 observed_now = now + timedelta(seconds=time.monotonic() - started)
                 signal = self.index_engine.evaluate(
                     instrument.symbol, contract["option_type"], reference, one_minute, quote, observed_now,
@@ -383,28 +388,56 @@ class PremiumScreener:
                             break
                 evaluation["result"] = "REJECTED"
                 evaluation["reason"] = exc.reason
-                self._record_index_evaluation(evaluation)
-                continue
-            evaluation["checks"] = [
-                {"name": name, "status": "PASS"} for name in (
-                    "5m_premium_support", "1m_premium_recovery",
-                    "fresh_quote", "premium_resistance_target", "entry_safety",
+            if signal is not None:
+                evaluation["checks"] = [
+                    {"name": name, "status": "PASS"} for name in (
+                        "5m_premium_support", "1m_premium_recovery",
+                        "fresh_quote", "premium_resistance_target", "entry_safety",
+                    )
+                ]
+                evaluation.update(entry_premium=signal["breakout_price"],
+                                  stop=signal["stop_loss"], target=signal["target"])
+                accepted = self._accept_index_signal(
+                    instrument, contract, reference, candles, signal, observed_now,
                 )
-            ]
-            evaluation["result"] = "QUALIFIED"
-            evaluation["entry_premium"] = signal["breakout_price"]
-            evaluation["stop"] = signal["stop_loss"]
-            evaluation["target"] = signal["target"]
-            state = {"contract": contract, "instrument": instrument, "reference": reference,
-                     "candles": candles, "pending_signal": signal, "index_swing": True}
-            contract["premium_ltp"] = signal["breakout_price"]
-            with self._lock:
-                self._monitored[int(contract["security_id"])] = state
-            accepted = self._emit(state, signal, {}, observed_now, require_armed=True)
-            alerts += accepted
-            evaluation["result"] = "ACCEPTED" if accepted else "QUALIFIED_NOT_ACCEPTED"
+                alerts += accepted
+                evaluation["result"] = "ACCEPTED" if accepted else "QUALIFIED_NOT_ACCEPTED"
+            observed_now = now + timedelta(seconds=time.monotonic() - started)
+            try:
+                patterns, diagnostics = self.index_engine.evaluate_patterns(
+                    instrument.symbol, contract["option_type"], one_minute, quote, observed_now,
+                )
+                evaluation["pattern_timeframes"] = diagnostics
+            except IndicatorDataError as exc:
+                patterns = []
+                evaluation["pattern_error"] = exc.reason
+                self._count_indicator_reason(exc.reason)
             self._record_index_evaluation(evaluation)
+            for pattern_signal in patterns:
+                pattern = pattern_signal["premium_pattern"]
+                accepted = self._accept_index_signal(
+                    instrument, contract, {"armed": True}, pattern_signal["chart_candles"],
+                    pattern_signal, observed_now,
+                )
+                alerts += accepted
+                self._record_index_evaluation({
+                    "underlying": instrument.symbol, "side": contract["option_type"],
+                    "option_symbol": contract.get("option_symbol"),
+                    "route": "premium_chart_pattern", "pattern": pattern["name"],
+                    "timeframe": pattern["timeframe"], "evaluated_at": observed_now.isoformat(),
+                    "entry_premium": pattern_signal["breakout_price"],
+                    "stop": pattern_signal["stop_loss"], "target": pattern_signal["target"],
+                    "result": "ACCEPTED" if accepted else "QUALIFIED_NOT_ACCEPTED",
+                })
         return alerts
+
+    def _accept_index_signal(self, instrument, contract, reference, candles, signal, now):
+        state = {"contract": contract, "instrument": instrument, "reference": reference,
+                 "candles": candles, "pending_signal": signal, "index_swing": True}
+        contract["premium_ltp"] = signal["breakout_price"]
+        with self._lock:
+            self._monitored[int(contract["security_id"])] = state
+        return self._emit(state, signal, {}, now, require_armed=True)
 
     def _schedule_retry(self, instrument, now: datetime) -> None:
         bucket, _ = self._bucket(instrument, now)
@@ -812,7 +845,8 @@ class PremiumScreener:
                 "underlying": instrument.symbol,
                 "category": instrument.category,
                 "premium_strategy": True,
-                "timeframe": "5min" if signal.get("index_swing") else self._display_timeframe(INTERVAL),
+                "timeframe": signal.get("timeframe", "5min") if signal.get("index_swing")
+                else self._display_timeframe(INTERVAL),
                 "action_text": "BUY CALL" if contract["option_type"] == "CE" else "BUY PUT",
                 "option_symbol": contract["option_symbol"],
                 "security_id": contract["security_id"],
@@ -932,7 +966,7 @@ class PremiumScreener:
                 "source": "scanner",
                 "route_category": route_category,
                 "signal": signal.get("signal"),
-                "timeframe": "5min" if signal.get("index_swing") else INTERVAL,
+                "timeframe": signal.get("timeframe", "5min") if signal.get("index_swing") else INTERVAL,
                 "display_timeframe": signal.get("timeframe"),
                 "detected_at": signal.get("detected_at"),
                 "reference_timestamp": signal.get("reference_timestamp"),
@@ -980,7 +1014,10 @@ class PremiumScreener:
                     "support_known_at", "pullback_lows", "retest_low", "previous_minute_start",
                     "support_candle_timestamp",
                     "premium_confirmation_high", "premium_confirmation_low", "pullback_low",
+                    "previous_session_date", "previous_level_kind", "premium_pattern", "chart_candles",
+                    "premium_reference_levels",
                 )
+                if key in signal
             })
         if signal.get("latency_marks"):
             payload["metadata"]["latency_marks"] = dict(signal["latency_marks"])
@@ -988,6 +1025,11 @@ class PremiumScreener:
 
     @staticmethod
     def _signal_key(category: str, signal: dict) -> str:
+        if signal.get("entry_policy") == PATTERN_POLICY:
+            pattern = signal["premium_pattern"]
+            return (f"{category}:{signal.get('symbol')}:{signal.get('option_symbol')}:pattern:"
+                    f"{pattern['timeframe']}:{pattern['name']}:{pattern['pattern_id']}:"
+                    f"{pattern['confirmed_start']}")
         if signal.get("option_symbol"):
             # The option contract and completed pullback candle uniquely identify an entry.
             return (
@@ -1024,9 +1066,15 @@ class PremiumScreener:
                 "index_swing_strategy": {
                     "enabled": self.index_swing_enabled, "alerts_only": True,
                     "underlyings": sorted(INDEX_SYMBOLS),
-                    "setup_policy": "premium_support_retest_or_average_support_reclaim",
-                    "premium_entry": "5m_support_structure_then_1m_recovery_close",
+                    "setup_policy": "support_recovery_or_independent_confirmed_premium_pattern",
+                    "premium_entry": "5m_support_then_1m_recovery_or_pattern_timeframe_breakout",
                     "entry_policy": PREMIUM_POLICY,
+                    "pattern_entry_policy": PATTERN_POLICY,
+                    "pattern_timeframes_minutes": list(PATTERN_TIMEFRAMES),
+                    "bullish_premium_patterns": list(PATTERN_NAMES),
+                    "pattern_history_sessions": PATTERN_LOOKBACK_SESSIONS,
+                    "previous_session_levels": True,
+                    "route_priority": ["support_recovery", "premium_chart_pattern"],
                     "spot_confirmation_required": False,
                     "spot_usage": "ATM_selection_only",
                     "strike_band": "ATM",

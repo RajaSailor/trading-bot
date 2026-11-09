@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 import weakref
+from collections import OrderedDict
 from datetime import date, datetime
 from typing import Iterable, List, Optional, Sequence
 
@@ -43,6 +45,8 @@ class ATMOptionsFetcher:
         self._unlisted_index: Optional[weakref.ref] = None
         self._unlisted_day: Optional[date] = None
         self._unlisted_warned: set = set()
+        self._premium_history = OrderedDict()
+        self._premium_history_lock = threading.RLock()
 
     # ------------------------------------------------------------------ spot
     def get_spot_price(self, instrument: Instrument, interval: str = "10min") -> Optional[float]:
@@ -170,21 +174,51 @@ class ATMOptionsFetcher:
         }
 
     # --------------------------------------------------------------- candles
-    def fetch_option_candles(self, contract: dict, interval: str = "10min", now: Optional[datetime] = None) -> List[dict]:
+    def fetch_option_candles(self, contract: dict, interval: str = "10min", now: Optional[datetime] = None,
+                            *, lookback_sessions: int = 1) -> List[dict]:
         """Premium candles for ``contract`` including the previous session for lookback."""
         today = self._ist_date(now)
         exchange = _SEGMENT_EXCHANGE.get(str(contract.get("exchange_segment", "")).upper(), NSE)
-        from_date = previous_trading_day(exchange, today).strftime("%Y-%m-%d")
-        return self.data_manager.fetch_contract_candles(
+        if not isinstance(lookback_sessions, int) or not 1 <= lookback_sessions <= 10:
+            raise ValueError("lookback_sessions must be between 1 and 10")
+        previous = previous_trading_day(exchange, today)
+        current = self.data_manager.fetch_contract_candles(
             security_id=contract["security_id"],
             exchange_segment=contract["exchange_segment"],
             instrument_type=contract["instrument_type"],
-            from_date=from_date,
-            to_date=today.strftime("%Y-%m-%d"),
-            interval=_parse_interval_minutes(interval),
-            symbol=contract["option_symbol"],
-            now=now,
+            from_date=previous.isoformat(), to_date=today.isoformat(),
+            interval=_parse_interval_minutes(interval), symbol=contract["option_symbol"], now=now,
         )
+        if lookback_sessions == 1:
+            return current
+        start = previous
+        for _ in range(lookback_sessions - 1):
+            start = previous_trading_day(exchange, start)
+        key = (
+            contract["security_id"], contract["exchange_segment"], contract["instrument_type"],
+            start.isoformat(), previous.isoformat(), interval,
+        )
+        with self._premium_history_lock:
+            history = self._premium_history.get(key)
+            if history is None:
+                history = self.data_manager.fetch_contract_candles(
+                    security_id=contract["security_id"],
+                    exchange_segment=contract["exchange_segment"],
+                    instrument_type=contract["instrument_type"],
+                    from_date=start.isoformat(), to_date=previous.isoformat(),
+                    interval=_parse_interval_minutes(interval), symbol=contract["option_symbol"], now=now,
+                )
+                if history:
+                    self._premium_history[key] = history
+                    while len(self._premium_history) > 24:
+                        self._premium_history.popitem(last=False)
+                else:
+                    logger.warning("[%s] Extended premium history unavailable; longer pattern timeframes "
+                                   "may be skipped", contract["option_symbol"])
+            else:
+                self._premium_history.move_to_end(key)
+        # Current data wins duplicate timestamps, including corrected prior-session bars.
+        return [dict(candle) for candle in history] + current
 
     def fetch_atm_premium_candles(
         self,

@@ -10,6 +10,20 @@ Charts show actual option-contract intraday candles, never underlying candles or
 
 Candles come from `DataManager.fetch_contract_candles`, backed by Dhan `/v2/charts/intraday`, using the signal's exact security ID, segment and instrument type. Only completed candles as of the event in IST are plotted; partial and future candles are excluded, including when an event is retried later. The default interval is 10 minutes to match the premium strategy timeframe. Missing or stale historical coverage is not supplemented with synthetic candles; delayed data is labelled.
 
+For the opt-in index trial, support-recovery charts use five-minute premium
+candles and label support (including the reference date for previous-session
+levels). Independent bullish-pattern alerts instead use their detected
+1/2/3/5/10/15/30/60/240-minute timeframe. OPEN charts use the frozen, completed
+exact-contract detection candles without another market-data request. They
+draw the pattern's swing vertices, shoulder/head/bottom labels where applicable,
+neckline or channel/triangle boundaries, and entry/stop/target. The plotted
+window is up to 150 bars for patterns so a smaller global window cannot remove
+the confirmed structure. Pattern exits fetch one-minute contract data from the
+structure's start and resample with the same 09:15 session alignment, never
+requesting unsupported custom intervals directly. If coverage cannot show
+the recorded structure, the existing explicit chart-error/text-fallback path
+applies rather than drawing a different or invented pattern.
+
 ## Settings
 
 | Env key | Default |

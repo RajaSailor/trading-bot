@@ -136,8 +136,34 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
         ax.axhline(target, color="#2ca02c", linestyle="-", linewidth=1.2, label=f"Target {target:.2f}")
         if overlay.get("premium_support") is not None:
             support = _finite_positive(overlay["premium_support"], "premium_support")
+            source = overlay.get("previous_session_date")
             ax.axhline(support, color="#9467bd", linestyle=":", linewidth=1.2,
-                       label=f"Premium support {support:.2f}")
+                       label=f"Premium support {support:.2f}" + (f" ({source})" if source else ""))
+        for level in overlay.get("premium_reference_levels") or []:
+            price = _finite_positive(level["price"], "premium_reference_level")
+            ax.axhline(price, color="#8c564b", linestyle="-.", linewidth=.9,
+                       label=f"{level['label']} {price:.2f}")
+        pattern = overlay.get("premium_pattern")
+        if pattern:
+            if int(pattern["timeframe"]) * 60 != interval_seconds:
+                raise ChartRenderError("pattern_timeframe_mismatch")
+            for vertices, label, style in [
+                (pattern["points"], pattern["name"].replace("_", " "), "-o"),
+                *((line["points"], line["label"], "--") for line in pattern["lines"]),
+            ]:
+                if not all(x[0] <= mdates.date2num(datetime.fromtimestamp(_epoch(p["timestamp"]), IST))
+                           <= event_x for p in vertices):
+                    raise ChartRenderError("pattern_outside_chart_window")
+                ax.plot(
+                    [mdates.date2num(datetime.fromtimestamp(_epoch(p["timestamp"]), IST)) for p in vertices],
+                    [_finite_positive(p["price"], "pattern_price") for p in vertices],
+                    style, linewidth=1.4, markersize=4, label=label,
+                )
+            for point in pattern["points"]:
+                ax.annotate(point["label"],
+                            (mdates.date2num(datetime.fromtimestamp(_epoch(point["timestamp"]), IST)),
+                             _finite_positive(point["price"], "pattern_price")),
+                            xytext=(0, -12), textcoords="offset points", fontsize=7)
 
         ref_time = overlay.get("breakout_timestamp") or overlay.get("reference_timestamp")
         ref_price = overlay.get("breakout_price") or overlay.get("reference_high")
@@ -172,11 +198,14 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
             f"{overlay.get('timeframe', overlay.get('interval_minutes', 10))} | {event_label} | "
             f"Data as of {as_of.strftime('%H:%M')} IST"
         )
+        if pattern:
+            title += f"\nConfirmed bullish premium {pattern['name'].replace('_', ' ')}"
         ax.set_title(title, fontsize=11)
         ax.set_ylabel("Option premium")
         ax.set_xlabel("Time (IST)")
         ax.set_xlim(x[0] - width * 2, right_x)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=IST))
+        date_format = "%d %b %H:%M" if dates[0].date() != dates[-1].date() else "%H:%M"
+        ax.xaxis.set_major_formatter(mdates.DateFormatter(date_format, tz=IST))
         ax.grid(True, linestyle=":", linewidth=0.5, alpha=0.5)
         ax.legend(loc="best", fontsize=8)
         lag_note = ""

@@ -192,15 +192,17 @@ def test_durable_premium_gate_rejects_missing_or_impossible_confirmation(mutatio
     assert not valid_entry(signal, NOW)
 
 
-def test_support_requires_known_rebound_not_unconfirmed_or_previous_session_low():
+def test_support_requires_known_rebound_and_labels_previous_session_separately():
     _, premium, _, _ = history()
     engine = IndexSwingStrategy()
     with pytest.raises(IndicatorDataError, match="index_premium_support_missing"):
         engine.prepare("NIFTY", "CE", [], premium[:6], NOW.replace(hour=9, minute=45))
     yesterday = [{**item, "timestamp": item["timestamp"] - 86400} for item in premium]
     today_flat = premium_bars([(70, 75, 69, 71)] * 15)
-    with pytest.raises(IndicatorDataError, match="index_premium_support_missing"):
-        engine.prepare("NIFTY", "CE", [], yesterday + today_flat, NOW)
+    reference = engine.prepare("NIFTY", "CE", [], yesterday + today_flat, NOW)
+    assert reference["candidates"]
+    assert all(item["setup"] == "premium_previous_session_recovery"
+               for item in reference["candidates"])
 
 
 def test_support_explicitly_fails_after_a_completed_close_breaks_it():
@@ -400,7 +402,7 @@ def test_scanner_routes_only_three_indices_and_uses_atm_contracts(tmp_path, monk
     scanner.fetcher = MagicMock()
     contract = incoming()["metadata"]
     scanner.fetcher.resolve_strike_band.side_effect = lambda i, p, side, **kw: [contract] if side == "CE" else []
-    scanner.fetcher.fetch_option_candles.side_effect = lambda c, interval, now: premium if interval == "5min" else one
+    scanner.fetcher.fetch_option_candles.side_effect = lambda c, interval, now, **kw: premium if interval == "5min" else one
     assert scanner._uses_index_swing(instrument)
     assert not scanner._uses_index_swing(stock)
     assert scanner._refresh_instrument(instrument, "10min", NOW, spot=130) == 1
