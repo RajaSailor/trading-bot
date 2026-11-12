@@ -392,6 +392,8 @@ def test_scanner_routes_only_three_indices_and_uses_atm_contracts(tmp_path, monk
     dm.resolve_underlying.return_value = SimpleNamespace(
         security_id=13, exchange_segment="IDX_I", instrument_type="INDEX")
     spot, premium, one, current_quote = history()
+    premium[-2].update(open=72, high=73, low=60.2, close=69)
+    premium[-1].update(open=69, high=75, low=68.5, close=74)
     dm.fetch_contract_candles.return_value = spot
     dm.fetch_quotes.return_value = {("NSE_FNO", 101): current_quote}
     callback = MagicMock(return_value=True)
@@ -410,15 +412,17 @@ def test_scanner_routes_only_three_indices_and_uses_atm_contracts(tmp_path, monk
     payload = callback.call_args.args[0]
     assert payload["metadata"]["strike_band"] == BAND_ATM
     assert service.is_open("NIFTY")
-    evaluation = scanner.status()["recent_index_evaluations"][-1]
+    evaluation = next(item for item in scanner.status()["recent_index_evaluations"]
+                      if item.get("route") == "support_5m_recovery")
     assert evaluation["result"] == "ACCEPTED"
-    assert all(check["status"] == "PASS" for check in evaluation["checks"])
     dm.fetch_contract_candles.assert_not_called()
-    assert all(check["name"] != "spot_setup" for check in evaluation["checks"])
+    assert "spot_setup" not in evaluation
     scanner_policy = scanner.status()["index_swing_strategy"]
     assert scanner_policy["spot_confirmation_required"] is False
-    assert scanner_policy["entry_policy"] == "premium_support_recovery_v2"
+    assert scanner_policy["entry_policy"] == "premium_structure_v3"
     assert scanner._refresh_instrument(instrument, "10min", NOW, spot=130) == 0
-    assert scanner.status()["recent_index_evaluations"][-1]["result"] == "QUALIFIED_NOT_ACCEPTED"
+    assert any(item.get("route") == "support_5m_recovery"
+               and item["result"] == "QUALIFIED_NOT_ACCEPTED"
+               for item in scanner.status()["recent_index_evaluations"])
     assert len(service.open_positions()) == 1
     assert callback.call_count == 1

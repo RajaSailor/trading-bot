@@ -104,7 +104,6 @@ class ChartRenderTests(unittest.TestCase):
         self.assertIn("Stop (protected gain) 110.00", saved[0].get_legend_handles_labels()[1])
 
     def test_projection_is_visible_beyond_event_without_future_candles(self):
-        import matplotlib.dates as mdates
         from matplotlib.figure import Figure
         saved = []
         original = Figure.savefig
@@ -116,12 +115,12 @@ class ChartRenderTests(unittest.TestCase):
         with patch.object(Figure, "savefig", capture):
             render_premium_chart(candles(), overlay)
         axes = saved[0]
-        event_x = mdates.date2num(NOW)
-        self.assertGreaterEqual(axes.get_xlim()[1] - event_x, 39 / 1440)
+        event_x = len(select_chart_candles(candles(), NOW.timestamp()))
+        self.assertGreaterEqual(axes.get_xlim()[1] - event_x, 4)
         zones = [p for p in axes.patches if p.get_alpha() == .10]
         self.assertEqual(2, len(zones))
         self.assertTrue(all(zone.get_x() >= event_x for zone in zones))
-        self.assertTrue(all(zone.get_width() >= 39 / 1440 for zone in zones))
+        self.assertTrue(all(zone.get_width() >= 4 for zone in zones))
         bodies = [p for p in axes.patches if p.get_alpha() == .85]
         self.assertEqual(len(select_chart_candles(candles(), NOW.timestamp())), len(bodies))
 

@@ -6,6 +6,18 @@ Where a configured destination resolver is available, the signal freezes its `te
 
 Charts show actual option-contract intraday candles, never underlying candles or fabricated future prices: green/red candlesticks, entry/stop/target levels, shaded risk/reward zones, reference/breakout markers when available, and the observed event premium marker. A clearly labelled empty projection area extends at least four candle intervals beyond the event so the levels are visible. It is a level projection, **not a price forecast or future candle series**.
 
+Images are **bot-rendered Dhan candle data, not Dhan website screenshots**.
+The chart uses equally spaced trading candles instead of calendar-time spacing,
+so nights/weekends do not squeeze the candles into tiny clusters. Non-pattern
+intraday events focus on the event's session; pattern charts preserve the
+multi-session candles needed to show their structure. Real intraday holes are
+marked with missing-bar warnings, never filled with synthetic OHLC. Volume has
+a separate pane; unavailable volume is labelled rather than made up. The
+default PNG is 1400x850 pixels, with actual date/time labels and data-as-of.
+FVG/OB, compression and BOS bands are drawn with named premium ranges.
+Entry markers on live-touch alerts do not pretend the current 5m candle is
+already complete. Later market movement cannot appear in an earlier OPEN image.
+
 ## Data source and timing
 
 Candles come from `DataManager.fetch_contract_candles`, backed by Dhan `/v2/charts/intraday`, using the signal's exact security ID, segment and instrument type. Only completed candles as of the event in IST are plotted; partial and future candles are excluded, including when an event is retried later. The default interval is 10 minutes to match the premium strategy timeframe. Missing or stale historical coverage is not supplemented with synthetic candles; delayed data is labelled.

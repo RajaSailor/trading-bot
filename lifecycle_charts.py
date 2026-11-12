@@ -248,7 +248,7 @@ class LifecycleChartService:
         bucket = int(event_time // (interval * 60))
         key = (security_id, segment, instrument_type, interval, from_date, to_date, bucket)
         with self._cache_lock:
-            if pattern and overlay.get("event") == "OPEN":
+            if overlay.get("chart_candles") and overlay.get("event") == "OPEN":
                 candles = select_chart_candles(
                     overlay["chart_candles"], event_time,
                     interval_seconds=interval * 60, window=150,

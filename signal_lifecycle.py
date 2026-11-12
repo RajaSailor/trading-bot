@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from zoneinfo import ZoneInfo
+from premium_structure import CANDLE_STOP_POLICY, STRUCTURE_POLICY
 
 from exchange_calendar import is_exchange_open, previous_trading_day, session_windows
 from alert_disclaimer import PUBLIC_DISCLAIMER, with_disclaimer
@@ -277,7 +278,8 @@ class SignalLifecycle:
                                       or underlying not in INDEX_SYMBOLS or category != "index_options"))
                 or (not index_signal and meta.get("trigger") != TRIGGER_LIVE)
                 or security != int(security) or lot != int(lot)
-                or expiry <= now.date() or float(observed) <= high
+                or expiry <= now.date()
+                or (meta.get("entry_policy") != STRUCTURE_POLICY and float(observed) <= high)
                 or (not index_signal and (previous > high or float(low) > high))
                 or not 0 <= now.timestamp() - stamp <= 10
                 or not self.calendar(exchange, now)
@@ -296,12 +298,15 @@ class SignalLifecycle:
             if index_signal and not stop < entry < target:
                 return None
             signal_id = uuid.uuid4().hex
+            stop_policy = (CANDLE_STOP_POLICY if index_signal
+                           and meta.get("requested_stop_policy") == CANDLE_STOP_POLICY
+                           else "compound_20_5" if index_signal else None)
             meta.update(entry=float(entry), stop_loss=float(stop), target=float(target),
                         targets=[float(target)], risk_points=float(entry - stop),
                         signal_id=signal_id, _lifecycle_managed=True,
                         durable_open_accepted=True, alert_sent=True,
                         observed_entry=float(observed),
-                        stop_policy="compound_20_5" if index_signal else None)
+                        stop_policy=stop_policy)
             position = {
                 "id": signal_id, "signal_id": signal_id, "signal_key": key,
                 "underlying": underlying, "category": category, "exchange": exchange,
@@ -310,7 +315,7 @@ class SignalLifecycle:
                 "initial_stop_loss": float(stop), "initial_target": float(target),
                 "trailing_step": 0, "advisory_trailing": None if index_signal else _trailing_settings(),
                 "index_swing": index_signal, "breakeven_applied": False,
-                "stop_policy": "compound_20_5" if index_signal else None,
+                "stop_policy": stop_policy,
                 "last_candle_stop_end": meta.get("confirmation_end"),
                 "telegram_chat_id": self._resolve_chat_id(category),
                 "risk_points": float(entry - stop),
@@ -473,6 +478,7 @@ class SignalLifecycle:
             "previous_session_date": metadata.get("previous_session_date"),
             "previous_level_kind": metadata.get("previous_level_kind"),
             "premium_reference_levels": metadata.get("premium_reference_levels", []),
+            "premium_zone": metadata.get("premium_zone"),
             **({"interval_minutes": (metadata.get("premium_pattern") or {}).get("timeframe", 5)}
                if position.get("index_swing") else {}),
             **({"window": 150} if metadata.get("premium_pattern") else {}),
@@ -492,6 +498,36 @@ class SignalLifecycle:
                         or current >= self._squareoff_at(position["exchange"], current.date())):
                     continue
                 if position.get("stop_policy") == "compound_20_5":
+                    continue
+                if position.get("stop_policy") == CANDLE_STOP_POLICY:
+                    if not five:
+                        continue
+                    last = five[-1]
+                    end = float(last["timestamp"]) + 300
+                    if (float(last["timestamp"]) < position["opened_at"]
+                            or end <= (position.get("last_candle_stop_end") or 0)
+                            or not 0 <= current.timestamp() - end <= 375
+                            or position["last_quote_at"] < end):
+                        continue
+                    tick = Decimal(str(position["tick_size"]))
+                    stop = float((Decimal(str(last["low"])) / tick).to_integral_value(
+                        rounding=ROUND_FLOOR) * tick)
+                    position["last_candle_stop_end"] = end
+                    if stop > position["stop_loss"]:
+                        position.update(
+                            previous_stop_loss=position["stop_loss"], previous_target=position["target"],
+                            stop_loss=stop, modified_at=current.timestamp(),
+                            trailing_step=position["trailing_step"] + 1,
+                        )
+                        position["metadata"]["stop_loss"] = stop
+                        if position["last_valid_premium"] <= stop:
+                            self._close(db, position, "STOP", position["last_quote_at"],
+                                        position["last_valid_premium"])
+                        else:
+                            self._enqueue(db, f"{position['id']}:MODIFY:{position['trailing_step']}",
+                                          position["category"], self._signal_message(position, "MODIFY"), position)
+                    db.execute("UPDATE lifecycle_signals SET data=? WHERE id=?",
+                               (json.dumps(position, allow_nan=False), position["id"]))
                     continue
                 stop = position["stop_loss"]
                 entry = position["entry"]
@@ -531,6 +567,8 @@ class SignalLifecycle:
                            (json.dumps(position, allow_nan=False), position["id"]))
 
     def _trail(self, db, position, price, stamp):
+        if position.get("stop_policy") == CANDLE_STOP_POLICY:
+            return
         if position.get("stop_policy") == "compound_20_5":
             entry = Decimal(str(position["entry"]))
             tick = Decimal(str(position["tick_size"]))
@@ -958,7 +996,7 @@ class SignalLifecycle:
                         "SELECT COUNT(*) FROM lifecycle_outbox WHERE last_error='destination_changed'").fetchone()[0],
                     "advisory_trailing": {
                         "enabled_for_new_signals": _trailing_settings() is not None,
-                        "index_swing_policy": "compounded_20_percent_steps_then_5_percent_below_observed_premium",
+                        "index_swing_policy": CANDLE_STOP_POLICY,
                         "live_broker_modifications_supported": False,
                     },
                     "reports": db.execute("SELECT COUNT(*) FROM lifecycle_reports").fetchone()[0]}

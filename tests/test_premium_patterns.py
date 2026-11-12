@@ -275,8 +275,12 @@ def test_scanner_pattern_survives_failed_support_and_deduplicates(tmp_path, monk
 def test_support_alert_is_first_without_blocking_independent_pattern(tmp_path, monkeypatch):
     scanner, instrument, service, callback, now = scanner_with_pattern(tmp_path, monkeypatch)
     frames, base, _, _ = pattern_history(minutes=5)
-    base[-2].update(open=60.4, low=60, high=60.8, close=60.5)
-    base[-1].update(open=60.5, low=60.3, high=61.2, close=61)
+    frames[-2].update(open=60, low=59.9, high=60.1, close=60)
+    frames[-1].update(open=60.5, low=60.3, high=61.2, close=61)
+    for bar in base[-10:-5]:
+        bar.update(open=60, low=59.9, high=60.1, close=60)
+    for bar in base[-5:]:
+        bar.update(open=60.5, low=60.3, high=61.2, close=61)
     prior = [{**frame, "timestamp": frame["timestamp"] - 86400,
               "open": 75, "high": 80, "low": 70, "close": 74} for frame in frames]
     prior[2]["low"] = 60
@@ -286,7 +290,7 @@ def test_support_alert_is_first_without_blocking_independent_pattern(tmp_path, m
     )
     assert scanner._refresh_index_instrument(instrument, now, 23000) >= 2
     policies = [call.args[0]["metadata"]["entry_policy"] for call in callback.call_args_list]
-    assert policies[0] == "premium_support_recovery_v2"
+    assert policies[0] == "premium_structure_v3"
     assert PATTERN_POLICY in policies[1:]
     assert len(service.open_positions()) == callback.call_count
     scanner._refresh_index_instrument(instrument, now, 23000)

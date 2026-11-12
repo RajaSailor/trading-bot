@@ -13,6 +13,7 @@ from premium_patterns import (
     PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES, bullish_patterns, contiguous_pattern_bars, scan_patterns,
     swing_points as _swing_points,
 )
+from premium_structure import STRUCTURE_POLICY, valid_structure_entry
 
 IST = ZoneInfo("Asia/Kolkata")
 INDEX_SYMBOLS = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
@@ -216,6 +217,8 @@ def aggregate_five_minutes(candles, now):
 
 def valid_entry(metadata, now):
     """Shared scanner/lifecycle admission gate for this strategy's evidence."""
+    if metadata.get("entry_policy") == STRUCTURE_POLICY:
+        return valid_structure_entry(metadata, now)
     if metadata.get("entry_policy") == PATTERN_POLICY:
         return _valid_pattern_entry(metadata, now)
     try:
@@ -586,6 +589,22 @@ class IndexSwingStrategy:
 
 
 def describe_setup(metadata):
+    if metadata.get("entry_policy") == STRUCTURE_POLICY:
+        candidate = metadata["structure_evidence"]["candidate"]
+        zone = metadata["premium_zone"]
+        timing = ("Live zone touch; no candle-close confirmation"
+                  if candidate["route"] in ("fvg_retest", "order_block_retest")
+                  else "Live lower-high reclaim after completed 5m BOS / rejection"
+                  if candidate["route"] == "bos_retest"
+                  else "Completed 1m range breakout" if candidate["route"] == "compression_breakout"
+                  else "Completed 5m recovery / reclaim")
+        return (
+            f"Setup: {zone['label']} | Premium zone {zone['low']:.2f}-{zone['high']:.2f}\n"
+            f"{timing}\n"
+            f"Trigger premium / close: {candidate['trigger_close']:.2f}\n"
+            "Trail: completed 5m candle low, upward only.\n"
+            "Premium only; spot selects ATM. Alerts only; not broker fills."
+        )
     if metadata.get("entry_policy") == PATTERN_POLICY:
         pattern = metadata["premium_pattern"]
         return (

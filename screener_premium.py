@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from atm_options_fetcher import ATMOptionsFetcher, BAND_ATM, BAND_ITM_PLUS_1
 from exchange_calendar import MCX, exchange_for_instrument, open_exchanges, previous_trading_day
 from index_swing_strategy import (
-    INDEX_SYMBOLS, PREMIUM_POLICY, IndexSwingStrategy, enabled as index_swing_enabled,
+    INDEX_SYMBOLS, IndexSwingStrategy, enabled as index_swing_enabled,
     valid_entry as valid_index_entry,
 )
 from latency_tracker import now_mark
@@ -22,6 +22,10 @@ from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
 from premium_indicators import IndicatorDataError, completed_candles
 from premium_patterns import PATTERN_LOOKBACK_SESSIONS, PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES
+from premium_structure import (
+    CANDLE_STOP_POLICY, STRUCTURE_POLICY, STRUCTURE_ROUTES, bos_candidate, build_signal, evaluate_structure,
+    zone_candidate,
+)
 from nifty_market_filters import NiftyMarketFilter
 from state_manager import StateManager
 from telegram_handler import SCREENER_CATEGORIES, format_ist_timestamp
@@ -108,6 +112,8 @@ class PremiumScreener:
         self._live_bars: Dict[int, dict] = {}
         self._indicator_counts: Counter = Counter()
         self._index_evaluations: list[dict] = []
+        self._index_zone_states: dict[tuple[str, int], dict] = {}
+        self._index_scan_status: dict[str, dict] = {}
         # underlying symbol -> {"bucket": int, "retry_at": float}
         self._refresh_state: Dict[str, dict] = {}
         universe = self.data_manager.get_instruments()
@@ -159,15 +165,24 @@ class PremiumScreener:
 
     def _scan_instruments(self, instruments, interval: str, now: datetime | None = None) -> int:
         now = self._as_ist(now)
+        scan_started = time.monotonic()
         spots = self._batch_spot_prices(instruments, now)
         alerts = 0
         for instrument in instruments:
+            instrument_now = (now + timedelta(seconds=time.monotonic() - scan_started)
+                              if self._uses_index_swing(instrument) else now)
             try:
-                alerts += self._refresh_instrument(instrument, interval, now, spots.get(instrument.symbol))
+                alerts += self._refresh_instrument(instrument, interval, instrument_now,
+                                                  spots.get(instrument.symbol))
             except Exception as exc:
                 self._drop_monitored_instrument(instrument)
                 logger.error("❌ Premium screener failed for %s: %s", instrument.symbol, exc, exc_info=True)
-                self._schedule_retry(instrument, now)
+                self._schedule_retry(instrument, instrument_now)
+                if self._uses_index_swing(instrument):
+                    self._index_scan_status[instrument.symbol] = {
+                        "evaluated_at": instrument_now.isoformat(), "result": "SCAN_ERROR",
+                        "reason": exc.__class__.__name__,
+                    }
         return alerts
 
     def _batch_spot_prices(self, instruments, now: datetime) -> Dict[str, float]:
@@ -227,7 +242,6 @@ class PremiumScreener:
             ]:
                 self._monitored.pop(security_id, None)
                 self._live_bars.pop(security_id, None)
-
         alerts = 0
         fetched = 0
         armed = 0
@@ -302,20 +316,31 @@ class PremiumScreener:
         if spot is None:
             self._drop_monitored_instrument(instrument)
             self._count_indicator_reason("index_spot_unavailable")
+            self._index_scan_status[instrument.symbol] = {
+                "evaluated_at": now.isoformat(), "result": "ATM_SELECTION_UNAVAILABLE",
+            }
             return 0
         contracts = []
         for side in ("CE", "PE"):
-            contracts.extend(self.fetcher.resolve_strike_band(
+            resolved = self.fetcher.resolve_strike_band(
                 instrument, spot, side, now=now,
                 bands=(BAND_ATM,),
-            ))
+            )
+            contracts.extend(resolved)
+            if not resolved:
+                self._record_index_evaluation({
+                    "underlying": instrument.symbol, "side": side, "evaluated_at": now.isoformat(),
+                    "result": "NO_LISTED_CONTRACT", "reason": "index_atm_contract_unavailable",
+                })
+        self._index_scan_status[instrument.symbol] = {
+            "evaluated_at": now.isoformat(), "result": "SCANNING" if contracts else "NO_LISTED_CONTRACT",
+            "resolved_sides": [contract["option_type"] for contract in contracts],
+        }
         self._drop_monitored_instrument(instrument)
         alerts = 0
         for contract in contracts:
             if contract.get("strike_band") != BAND_ATM:
                 continue
-            reference = None
-            signal = None
             candles = self.fetcher.fetch_option_candles(contract, "5min", now)
             one_minute = self.fetcher.fetch_option_candles(
                 contract, "1min", now, lookback_sessions=PATTERN_LOOKBACK_SESSIONS,
@@ -324,85 +349,46 @@ class PremiumScreener:
                 contract["exchange_segment"]: [int(contract["security_id"])],
             }) or {}
             quote = quotes.get((contract["exchange_segment"], int(contract["security_id"])), {})
-            evaluation = {
+            context = {
                 "underlying": instrument.symbol, "side": contract["option_type"],
                 "option_symbol": contract.get("option_symbol"),
-                "evaluated_at": now.isoformat(), "setups": [],
-                "route": "support_recovery",
-                "checks": [
-                    {"name": "5m_premium_support", "status": "NOT_EVALUATED"},
-                    {"name": "1m_premium_recovery", "status": "NOT_EVALUATED"},
-                    {"name": "fresh_quote", "status": "NOT_EVALUATED"},
-                    {"name": "premium_resistance_target", "status": "NOT_EVALUATED"},
-                    {"name": "entry_safety", "status": "NOT_EVALUATED"},
-                ],
+                "evaluated_at": now.isoformat(),
             }
+            observed_now = now + timedelta(seconds=time.monotonic() - started)
             try:
-                reference = self.index_engine.prepare(
-                    instrument.symbol, contract["option_type"], [], candles, now,
-                )
-                evaluation["setups"] = reference["setups"]
-                evaluation["support_candidates"] = [
-                    {key: item[key] for key in ("setup", "support", "stop", "target", "known_at",
-                                                "pullback_lows")}
-                    for item in reference["candidates"]
-                ]
-                evaluation["checks"][0]["status"] = "PASS"
-                minutes = completed_candles(one_minute, now, timeframe_seconds=60)
-                evaluation["recovery_candles"] = [
-                    {key: item[key] for key in ("timestamp", "open", "high", "low", "close")}
-                    for item in minutes[-2:]
-                ]
-                observed_now = now + timedelta(seconds=time.monotonic() - started)
-                signal = self.index_engine.evaluate(
-                    instrument.symbol, contract["option_type"], reference, one_minute, quote, observed_now,
+                signals, diagnostics, zones = evaluate_structure(
+                    instrument.symbol, contract["option_type"], candles, one_minute, quote,
+                    observed_now, contract.get("tick_size"),
                 )
             except IndicatorDataError as exc:
+                signals, zones = [], []
+                diagnostics = [{"route": "premium_structure", "result": "REJECTED", "reason": exc.reason}]
                 self._count_indicator_reason(exc.reason)
-                failed_check = (
-                    "5m_premium_support" if exc.reason in {
-                        "index_premium_support_missing", "index_premium_gap",
-                        "index_confirmation_stale", "index_insufficient_history",
-                    }
-                    else "1m_premium_recovery" if exc.reason.startswith("index_one_minute")
-                    or exc.reason in {"index_recovery_close_missing", "index_premium_retest_missing"}
-                    else "fresh_quote" if exc.reason.startswith("index_quote")
-                    or exc.reason == "index_spread"
-                    else "premium_resistance_target" if exc.reason in {
-                        "index_target_passed", "index_no_swing_target"
-                    } else "entry_safety"
-                )
-                if reference is not None:
-                    evaluation["setups"] = reference.get("setups", [])
-                    evaluation["checks"][0]["status"] = "PASS"
-                    if (failed_check in {"fresh_quote", "premium_resistance_target"}
-                            or exc.reason == "index_entry_risk_or_timing"):
-                        evaluation["checks"][1]["status"] = "PASS"
-                    if (failed_check == "premium_resistance_target"
-                            or exc.reason == "index_entry_risk_or_timing"):
-                        evaluation["checks"][2]["status"] = "PASS"
-                if failed_check:
-                    for check in evaluation["checks"]:
-                        if check["name"] == failed_check:
-                            check.update(status="FAIL", reason=exc.reason)
-                            break
-                evaluation["result"] = "REJECTED"
-                evaluation["reason"] = exc.reason
-            if signal is not None:
-                evaluation["checks"] = [
-                    {"name": name, "status": "PASS"} for name in (
-                        "5m_premium_support", "1m_premium_recovery",
-                        "fresh_quote", "premium_resistance_target", "entry_safety",
-                    )
-                ]
-                evaluation.update(entry_premium=signal["breakout_price"],
-                                  stop=signal["stop_loss"], target=signal["target"])
+            for signal in signals:
                 accepted = self._accept_index_signal(
-                    instrument, contract, reference, candles, signal, observed_now,
+                    instrument, contract, {"armed": True}, candles, signal, observed_now,
                 )
                 alerts += accepted
-                evaluation["result"] = "ACCEPTED" if accepted else "QUALIFIED_NOT_ACCEPTED"
+                for diagnostic in diagnostics:
+                    if diagnostic["route"] == signal["setups"][0]:
+                        diagnostic["result"] = "ACCEPTED" if accepted else "QUALIFIED_NOT_ACCEPTED"
+            for diagnostic in diagnostics:
+                self._record_index_evaluation({**context, **diagnostic})
+                if diagnostic.get("reason"):
+                    self._count_indicator_reason(diagnostic["reason"])
+            with self._lock:
+                self._index_zone_states[(contract["exchange_segment"], int(contract["security_id"]))] = {
+                    "instrument": instrument, "contract": contract, "zones": zones,
+                    "five": candles, "one": one_minute, "prepared_at": observed_now.timestamp(),
+                }
+            self._index_scan_status[instrument.symbol].setdefault("sides", {})[contract["option_type"]] = {
+                "option_symbol": contract.get("option_symbol"),
+                "routes": {item["route"]: {
+                    key: item[key] for key in ("result", "reason") if key in item
+                } for item in diagnostics},
+            }
             observed_now = now + timedelta(seconds=time.monotonic() - started)
+            evaluation = {**context, "route": "premium_chart_pattern"}
             try:
                 patterns, diagnostics = self.index_engine.evaluate_patterns(
                     instrument.symbol, contract["option_type"], one_minute, quote, observed_now,
@@ -413,7 +399,11 @@ class PremiumScreener:
                 evaluation["pattern_error"] = exc.reason
                 self._count_indicator_reason(exc.reason)
             self._record_index_evaluation(evaluation)
+            self._index_scan_status[instrument.symbol]["sides"][contract["option_type"]]["patterns"] = {
+                key: evaluation[key] for key in ("pattern_timeframes", "pattern_error") if key in evaluation
+            }
             for pattern_signal in patterns:
+                pattern_signal["requested_stop_policy"] = CANDLE_STOP_POLICY
                 pattern = pattern_signal["premium_pattern"]
                 accepted = self._accept_index_signal(
                     instrument, contract, {"armed": True}, pattern_signal["chart_candles"],
@@ -429,13 +419,17 @@ class PremiumScreener:
                     "stop": pattern_signal["stop_loss"], "target": pattern_signal["target"],
                     "result": "ACCEPTED" if accepted else "QUALIFIED_NOT_ACCEPTED",
                 })
+        self._index_scan_status[instrument.symbol].update(result="EVALUATED", accepted=alerts)
         return alerts
 
-    def _accept_index_signal(self, instrument, contract, reference, candles, signal, now):
+    def _accept_index_signal(self, instrument, contract, reference, candles, signal, now, zone_state=None):
         state = {"contract": contract, "instrument": instrument, "reference": reference,
                  "candles": candles, "pending_signal": signal, "index_swing": True}
         contract["premium_ltp"] = signal["breakout_price"]
         with self._lock:
+            if (zone_state is not None and self._index_zone_states.get(
+                    (contract["exchange_segment"], int(contract["security_id"]))) is not zone_state):
+                return 0
             self._monitored[int(contract["security_id"])] = state
         return self._emit(state, signal, {}, now, require_armed=True)
 
@@ -459,6 +453,11 @@ class PremiumScreener:
             ]:
                 self._monitored.pop(security_id, None)
                 self._live_bars.pop(security_id, None)
+            for security_id in [
+                sid for sid, state in self._index_zone_states.items()
+                if state["instrument"].symbol == instrument.symbol
+            ]:
+                self._index_zone_states.pop(security_id, None)
 
     @staticmethod
     def _slim(reference: Optional[dict]) -> Optional[dict]:
@@ -477,6 +476,11 @@ class PremiumScreener:
             ]:
                 self._monitored.pop(security_id, None)
                 self._live_bars.pop(security_id, None)
+            for security_id in [
+                sid for sid, state in self._index_zone_states.items()
+                if exchange_for_instrument(state["instrument"]) not in open_now
+            ]:
+                self._index_zone_states.pop(security_id, None)
         by_symbol = {i.symbol: i for i in self.option_instruments()}
         for symbol in list(self._refresh_state):
             instrument = by_symbol.get(symbol)
@@ -510,14 +514,21 @@ class PremiumScreener:
             if exchange_for_instrument(state["instrument"]) in open_now
             and not self._underlying_locked(state["instrument"].symbol)
         ]
-        if not armed and not paper_contracts:
+        with self._lock:
+            index_zones = [
+                state for state in self._index_zone_states.values()
+                if (state["zones"] or len(state["five"]) >= 7)
+                and exchange_for_instrument(state["instrument"]) in open_now
+                and 0 <= now.timestamp() - state["prepared_at"] <= 75
+            ]
+        if not armed and not paper_contracts and not index_zones:
             return 0
         if any(state["instrument"].symbol == "NIFTY"
                and state["instrument"].category == "index_options" for state in armed):
             self.nifty_market_filter.refresh(now)
         request: Dict[str, List[int]] = {}
         requested_ids: Dict[str, set[int]] = {}
-        for state in armed:
+        for state in [*armed, *index_zones]:
             contract = state["contract"]
             segment = contract["exchange_segment"]
             security_id = int(contract["security_id"])
@@ -542,6 +553,64 @@ class PremiumScreener:
             now = self._as_ist(self.clock())
 
         alerts = 0
+        for state in index_zones:
+            contract = state["contract"]
+            quote = quotes.get((contract["exchange_segment"], int(contract["security_id"])), {})
+            try:
+                from index_swing_strategy import _quote_values
+                price, stamp = _quote_values(quote, now)
+                if stamp <= state.get("last_zone_quote", 0):
+                    continue
+                previous = ([state["last_zone_price"], state["last_zone_quote"]]
+                            if state.get("last_zone_quote") else None)
+                state["last_zone_quote"] = stamp
+                state["last_zone_price"] = price
+                start = int(stamp // 300) * 300
+                bar = state.get("observed_bar")
+                if bar is None or bar["timestamp"] != start:
+                    bar = {"timestamp": start, "open": price, "high": price, "low": price,
+                           "close": price, "volume": None}
+                    known = completed_candles(state["five"], now + timedelta(seconds=300),
+                                              timeframe_seconds=300)
+                    known += completed_candles(state["one"], now + timedelta(seconds=60),
+                                               timeframe_seconds=60)
+                    for candle in known:
+                        if start <= candle["_timestamp_epoch"] <= stamp:
+                            bar.update(low=min(bar["low"], candle["low"]),
+                                       high=max(bar["high"], candle["high"]))
+                    state["observed_bar"] = bar
+                bar.update(high=max(bar["high"], price), low=min(bar["low"], price), close=price)
+                five = [*state["five"], dict(bar)]
+                candidates = []
+                for zone in state["zones"]:
+                    if not zone["low"] <= price <= zone["high"]:
+                        continue
+                    try:
+                        candidates.append(zone_candidate(zone, five, state["one"], price, stamp, now,
+                                                         contract["tick_size"]))
+                    except IndicatorDataError as exc:
+                        self._count_indicator_reason(exc.reason)
+                try:
+                    candidates.append(bos_candidate(five, state["one"], now, contract["tick_size"],
+                                                    price, stamp, previous))
+                except IndicatorDataError as exc:
+                    self._count_indicator_reason(exc.reason)
+                for candidate in candidates:
+                    signal = build_signal(state["instrument"].symbol, contract["option_type"], candidate,
+                                          five, state["one"], quote, now, contract["tick_size"])
+                    accepted = self._accept_index_signal(
+                        state["instrument"], contract, {"armed": True}, five, signal, now, zone_state=state,
+                    )
+                    alerts += accepted
+                    self._record_index_evaluation({
+                        "underlying": state["instrument"].symbol, "side": contract["option_type"],
+                        "route": candidate["route"], "evaluated_at": now.isoformat(),
+                        "result": "ACCEPTED" if accepted else "QUALIFIED_NOT_ACCEPTED",
+                        "entry_premium": signal["entry"], "stop": signal["stop_loss"],
+                        "target": signal["target"], "live_poll": True,
+                    })
+            except IndicatorDataError as exc:
+                self._count_indicator_reason(exc.reason)
         prices = {}
         for key, quote in quotes.items():
             if isinstance(quote, dict):
@@ -1016,6 +1085,7 @@ class PremiumScreener:
                     "premium_confirmation_high", "premium_confirmation_low", "pullback_low",
                     "previous_session_date", "previous_level_kind", "premium_pattern", "chart_candles",
                     "premium_reference_levels",
+                    "requested_stop_policy", "structure_id", "structure_evidence", "premium_zone",
                 )
                 if key in signal
             })
@@ -1025,6 +1095,9 @@ class PremiumScreener:
 
     @staticmethod
     def _signal_key(category: str, signal: dict) -> str:
+        if signal.get("entry_policy") == STRUCTURE_POLICY:
+            return (f"{category}:{signal.get('symbol')}:{signal.get('option_symbol')}:"
+                    f"structure:{signal['structure_id']}")
         if signal.get("entry_policy") == PATTERN_POLICY:
             pattern = signal["premium_pattern"]
             return (f"{category}:{signal.get('symbol')}:{signal.get('option_symbol')}:pattern:"
@@ -1063,23 +1136,29 @@ class PremiumScreener:
                 ),
                 "tracked_underlyings": len(self._refresh_state),
                 "recent_index_evaluations": list(self._index_evaluations),
+                "index_underlying_status": {
+                    symbol: {
+                        "configured": any(i.symbol == symbol for i in self.index_instruments),
+                        **self._index_scan_status.get(symbol, {"result": "NOT_YET_EVALUATED"}),
+                    } for symbol in sorted(INDEX_SYMBOLS)
+                },
                 "index_swing_strategy": {
                     "enabled": self.index_swing_enabled, "alerts_only": True,
                     "underlyings": sorted(INDEX_SYMBOLS),
-                    "setup_policy": "support_recovery_or_independent_confirmed_premium_pattern",
-                    "premium_entry": "5m_support_then_1m_recovery_or_pattern_timeframe_breakout",
-                    "entry_policy": PREMIUM_POLICY,
+                    "setup_policy": "premium_zones_or_support_compression_or_pattern_or_bos",
+                    "premium_entry": "live_zone_touch_or_completed_support_compression_pattern_bos",
+                    "entry_policy": STRUCTURE_POLICY,
                     "pattern_entry_policy": PATTERN_POLICY,
                     "pattern_timeframes_minutes": list(PATTERN_TIMEFRAMES),
                     "bullish_premium_patterns": list(PATTERN_NAMES),
                     "pattern_history_sessions": PATTERN_LOOKBACK_SESSIONS,
                     "previous_session_levels": True,
-                    "route_priority": ["support_recovery", "premium_chart_pattern"],
+                    "route_priority": [*STRUCTURE_ROUTES, "premium_chart_pattern"],
                     "spot_confirmation_required": False,
                     "spot_usage": "ATM_selection_only",
                     "strike_band": "ATM",
                     "daily_entry_cap": None,
-                    "stop_ladder": "compounded_20_percent_steps_then_5_percent_below_observed_premium",
+                    "stop_ladder": CANDLE_STOP_POLICY,
                 },
                 "indicator_rejections": dict(self._indicator_counts),
                 "nifty_market_filter": {
