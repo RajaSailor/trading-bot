@@ -15,10 +15,18 @@ strategy **only for NIFTY, BANKNIFTY and SENSEX**. Stock and commodity strategie
 remain unchanged. Both CALL and PUT entries use **only their own premium**.
 Support recovery has priority: five-minute same-session structure or a level
 from the immediately previous trading session of the **same contract**, followed
-by a completed green one-minute close above support and the preceding minute
-high. Repeated-support/W recovery and average-pullback support are alternatives.
+by a completed five-minute close above the previous five-minute candle high
+at support. Repeated-support/W recovery and average-pullback support are alternatives.
 One confirmed prior-session recovery is sufficient; a second retest is optional,
 not an extra entry gate.
+
+Independent alternatives also include **bullish five-minute FVG/OB retests**,
+which alert immediately on a fresh zone touch without waiting for a candle
+close, and **compression breakouts**: at least two completed five-minute candles
+inside a range no wider than 10% of its low, followed by a completed one-minute
+close above the frozen range high. A **BOS/retest** route requires a completed
+five-minute break above a lower high, a completed rejection candle at that
+level, then a fresh live crossing back above it. None requires spot confirmation.
 
 An **independent** alternative is a completed bullish premium chart pattern:
 double/triple bottom, inverse head-and-shoulders, ascending triangle, falling
@@ -29,17 +37,30 @@ Forming patterns and bearish-premium patterns do not trigger buys.
 No spot direction, opening range, spot pattern or volume filter must agree.
 Spot is used only to select the listed ATM strike; same-day expiry is skipped.
 
-The initial advisory stop is the support candle low for recovery entries,
-or the pattern's invalidation low for pattern entries. After
-each compounded 20% premium rise from entry, the advisory stop moves to 5% below
-the observed premium; targets stay fixed at premium resistance for recoveries
-or the pattern's measured move. Re-entry requires a new completed trigger. There is no daily alert
+Initial stops are the support/range low, pattern invalidation low, or the
+entry candle's **observed** low for FVG/OB/BOS. Targets stay fixed: known premium
+resistance for recovery, pre-decline swing high for compression, previous
+confirmed high plus one contract tick for FVG/OB/BOS, or the pattern measured move.
+**New index alerts trail upward to each fully post-entry completed five-minute
+candle low**, replacing the 20%/5% ladder. Stops never move down; old open signals
+retain their frozen stop policy. Live touches/crossings are observed prices,
+not guaranteed fills or knowledge of the forming candle's eventual final low.
+Duplicate zone touches do not reopen the same zone; BOS requires a distinct
+rejection and candle-triggered routes a distinct confirmation. There is no daily alert
 cap, so multiple independently confirmed signals may remain open per index.
 Up to ten prior trading sessions are requested for the exact contract; missing
 or insufficient history explicitly skips affected timeframes. Four-hour bars
 are full 09:15-13:15 IST bars, not partial afternoon or overnight candles.
 These are unproven trial rules, not a claim of a proven win rate or a complete
 catalogue of every market pattern.
+
+Charts use exact-contract **Dhan candle data**, not authenticated Dhan website
+screenshots. Trading-candle spacing removes empty overnight/weekend expanses;
+ordinary intraday charts focus on the event's session, show volume where
+available, mark actual intraday data holes and draw the premium zone. No candles
+are invented. Pattern charts retain their required multi-session structure.
+Health exposes each index's configuration, last scan, resolved option sides
+and route rejection results, including missing-contract/data cases.
 
 These are **alerts only**, not automated orders. This flag suppresses NIFTY
 automatic entry activation, and the queue and live route independently reject

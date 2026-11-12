@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import math
+from bisect import bisect_right
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -54,8 +55,16 @@ def select_chart_candles(candles, event_time, *, interval_seconds=600, window=80
         if high < max(open_, close) or low > min(open_, close):
             continue
         if ts + interval_seconds <= event_epoch:
-            selected.append({"timestamp": ts, "open": open_, "high": high, "low": low, "close": close})
-    selected.sort(key=lambda candle: candle["timestamp"])
+            try:
+                volume = float(raw.get("volume"))
+                if not math.isfinite(volume) or volume < 0:
+                    volume = None
+            except (TypeError, ValueError):
+                volume = None
+            selected.append({"timestamp": ts, "open": open_, "high": high, "low": low,
+                             "close": close, "volume": volume})
+    selected = sorted({bar["timestamp"]: bar for bar in selected}.values(),
+                      key=lambda candle: candle["timestamp"])
     if not selected:
         raise ChartRenderError("no_completed_candles")
     return selected[-window:]
@@ -74,9 +83,9 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
     try:
         import matplotlib
         matplotlib.use("Agg", force=True)
-        import matplotlib.dates as mdates
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
+        from matplotlib.ticker import FixedLocator, FuncFormatter
     except Exception as exc:  # pragma: no cover - environment dependent
         raise ChartUnavailable("matplotlib_unavailable") from exc
 
@@ -91,9 +100,23 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
             interval_seconds=interval_seconds,
             window=overlay.get("window", 80),
         )
+        if not overlay.get("premium_pattern"):
+            today = datetime.fromtimestamp(event_time, IST).date()
+            current_session = [bar for bar in plotted
+                               if datetime.fromtimestamp(bar["timestamp"], IST).date() == today]
+            if current_session:
+                plotted = current_session
         dates = [datetime.fromtimestamp(c["timestamp"], IST) for c in plotted]
-        x = mdates.date2num(dates)
-        width = (interval_seconds / 86400) * 0.65
+        stamps = [bar["timestamp"] for bar in plotted]
+        x = list(range(len(plotted)))
+        width = .65
+
+        def chart_x(stamp):
+            stamp = _epoch(stamp)
+            index = bisect_right(stamps, stamp) - 1
+            if index < 0:
+                return 0
+            return index + min(max((stamp - stamps[index]) / interval_seconds, 0), 1)
         entry = _finite_positive(overlay.get("entry"), "entry")
         stop = _finite_positive(overlay.get("stop") or overlay.get("stop_loss"), "stop")
         target = _finite_positive(overlay.get("target"), "target")
@@ -102,14 +125,16 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
             event_premium = overlay.get("observed_exit", overlay.get("observed_entry", entry))
         event_premium = _finite_positive(event_premium, "event_premium")
 
-        fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+        fig = plt.figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+        grid = fig.add_gridspec(4, 1, hspace=.05)
+        ax = fig.add_subplot(grid[:3, 0])
+        volume_ax = fig.add_subplot(grid[3, 0], sharex=ax)
         fig.patch.set_facecolor("white")
         ax.set_facecolor("#fbfbfb")
-        event_x = mdates.date2num(datetime.fromtimestamp(event_time, IST))
-        projection = max(interval_seconds / 86400 * 4, (event_x - x[0]) * .25)
+        event_x = chart_x(event_time)
+        projection = max(4, len(plotted) * .12)
         right_x = event_x + projection
-        opened_x = mdates.date2num(datetime.fromtimestamp(
-            _epoch(overlay.get("opened_at") or event_time), IST))
+        opened_x = chart_x(overlay.get("opened_at") or event_time)
         shade_start = max(min(opened_x, event_x), x[0])
         ax.add_patch(Rectangle((shade_start, entry), right_x - shade_start, target - entry,
                                facecolor="#2ca02c", alpha=0.10, edgecolor="none"))
@@ -128,6 +153,20 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
             else:
                 ax.add_patch(Rectangle((xpos - width / 2, lower), width, body,
                                        facecolor=color, edgecolor=color, alpha=0.85))
+            if candle["volume"] is not None:
+                volume_ax.bar(xpos, candle["volume"], width=width, color=color, alpha=.5)
+        gaps = 0
+        for index in range(1, len(plotted)):
+            if dates[index].date() != dates[index - 1].date():
+                ax.axvline(index - .5, color="#888888", linestyle=":", linewidth=.8)
+                continue
+            missing = (stamps[index] - stamps[index - 1]) / interval_seconds - 1
+            if missing > 0:
+                gaps += 1
+                ax.axvline(index - .5, color="#d73027", linestyle="--", linewidth=1)
+                ax.text(index - .5, .99, f"Missing {int(missing)} bars",
+                        transform=ax.get_xaxis_transform(), rotation=90, va="top",
+                        fontsize=7, color="#d73027")
         ax.axhline(entry, color="#1f77b4", linestyle="--", linewidth=1.2, label=f"Entry {entry:.2f}")
         stop_label = "Stop (protected gain)" if stop > entry else (
             "Stop (breakeven)" if stop == entry else "Stop")
@@ -143,6 +182,13 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
             price = _finite_positive(level["price"], "premium_reference_level")
             ax.axhline(price, color="#8c564b", linestyle="-.", linewidth=.9,
                        label=f"{level['label']} {price:.2f}")
+        zone = overlay.get("premium_zone")
+        if zone:
+            low, high = (_finite_positive(zone[key], f"zone_{key}") for key in ("low", "high"))
+            if low > high:
+                raise ChartRenderError("invalid_premium_zone")
+            ax.axhspan(low, high, color="#9467bd", alpha=.15,
+                       label=f"{zone['label']} {low:.2f}-{high:.2f}")
         pattern = overlay.get("premium_pattern")
         if pattern:
             if int(pattern["timeframe"]) * 60 != interval_seconds:
@@ -151,17 +197,16 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
                 (pattern["points"], pattern["name"].replace("_", " "), "-o"),
                 *((line["points"], line["label"], "--") for line in pattern["lines"]),
             ]:
-                if not all(x[0] <= mdates.date2num(datetime.fromtimestamp(_epoch(p["timestamp"]), IST))
-                           <= event_x for p in vertices):
+                if not all(stamps[0] <= _epoch(p["timestamp"]) <= event_time for p in vertices):
                     raise ChartRenderError("pattern_outside_chart_window")
                 ax.plot(
-                    [mdates.date2num(datetime.fromtimestamp(_epoch(p["timestamp"]), IST)) for p in vertices],
+                    [chart_x(p["timestamp"]) for p in vertices],
                     [_finite_positive(p["price"], "pattern_price") for p in vertices],
                     style, linewidth=1.4, markersize=4, label=label,
                 )
             for point in pattern["points"]:
                 ax.annotate(point["label"],
-                            (mdates.date2num(datetime.fromtimestamp(_epoch(point["timestamp"]), IST)),
+                            (chart_x(point["timestamp"]),
                              _finite_positive(point["price"], "pattern_price")),
                             xytext=(0, -12), textcoords="offset points", fontsize=7)
 
@@ -169,9 +214,9 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
         ref_price = overlay.get("breakout_price") or overlay.get("reference_high")
         if ref_time and ref_price:
             try:
-                ax.scatter([mdates.date2num(datetime.fromtimestamp(_epoch(ref_time), IST))],
+                ax.scatter([chart_x(ref_time)],
                            [_finite_positive(ref_price, "reference")], color="#ff7f0e", marker="^", zorder=4)
-                ax.annotate("reference/breakout", xy=(mdates.date2num(datetime.fromtimestamp(_epoch(ref_time), IST)),
+                ax.annotate("reference/breakout", xy=(chart_x(ref_time),
                                                        _finite_positive(ref_price, "reference")),
                             xytext=(5, 10), textcoords="offset points", fontsize=8, color="#ff7f0e")
             except (TypeError, ValueError, OverflowError, OSError):
@@ -184,7 +229,7 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
                     bbox={"boxstyle": "round,pad=0.25", "fc": "white", "ec": "#333333", "alpha": 0.85})
         if str(overlay.get("event") or "").upper() != "OPEN" and overlay.get("opened_at"):
             try:
-                ax.scatter([mdates.date2num(datetime.fromtimestamp(_epoch(overlay["opened_at"]), IST))],
+                ax.scatter([chart_x(overlay["opened_at"])],
                            [_finite_positive(overlay.get("observed_entry", entry), "observed_entry")],
                            color="#1f77b4", s=25, zorder=4)
             except (TypeError, ValueError, OverflowError, OSError):
@@ -196,24 +241,35 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
             f"{overlay.get('underlying', '')} {contract} | {overlay.get('option_type', '')} "
             f"{overlay.get('strike', '')} | Exp {overlay.get('expiry', '')}\n"
             f"{overlay.get('timeframe', overlay.get('interval_minutes', 10))} | {event_label} | "
-            f"Data as of {as_of.strftime('%H:%M')} IST"
+            f"Data as of {as_of.strftime('%d %b %H:%M')} IST"
         )
         if pattern:
             title += f"\nConfirmed bullish premium {pattern['name'].replace('_', ' ')}"
         ax.set_title(title, fontsize=11)
         ax.set_ylabel("Option premium")
-        ax.set_xlabel("Time (IST)")
+        volume_ax.set_xlabel("Trading candles (IST; closed sessions compressed)")
+        volume_ax.set_ylabel("Volume", fontsize=8)
+        if not any(bar["volume"] is not None for bar in plotted):
+            volume_ax.text(.01, .5, "Volume unavailable", transform=volume_ax.transAxes, fontsize=8)
         ax.set_xlim(x[0] - width * 2, right_x)
-        date_format = "%d %b %H:%M" if dates[0].date() != dates[-1].date() else "%H:%M"
-        ax.xaxis.set_major_formatter(mdates.DateFormatter(date_format, tz=IST))
+        stride = max(1, len(plotted) // 8)
+        volume_ax.xaxis.set_major_locator(FixedLocator(list(range(0, len(plotted), stride))))
+        date_format = "%d %b\n%H:%M" if dates[0].date() != dates[-1].date() else "%H:%M"
+        volume_ax.xaxis.set_major_formatter(FuncFormatter(
+            lambda value, _: dates[int(value)].strftime(date_format)
+            if 0 <= int(value) < len(dates) else ""))
+        ax.tick_params(labelbottom=False)
+        volume_ax.tick_params(labelsize=8)
         ax.grid(True, linestyle=":", linewidth=0.5, alpha=0.5)
         ax.legend(loc="best", fontsize=8)
         lag_note = ""
         if event_time - (plotted[-1]["timestamp"] + interval_seconds) > interval_seconds:
             lag_note = " | Delayed/historical candles"
-        fig.text(0.01, 0.015, "Signal-only / hypothetical — not a broker fill" + lag_note,
+        if gaps:
+            lag_note += f" | {gaps} data gaps marked; no fabricated candles"
+        fig.text(0.01, 0.015, "Dhan candle data | Bot-rendered | Not a broker fill" + lag_note,
                  fontsize=8, color="#555555")
-        fig.tight_layout(rect=(0, 0.035, 1, 1))
+        fig.subplots_adjust(left=.07, right=.98, bottom=.14, top=.86)
         buffer = io.BytesIO()
         fig.savefig(buffer, format="png", dpi=dpi)
         data = buffer.getvalue()
@@ -227,7 +283,7 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
             buffer.close()
 
 
-def render_premium_chart(candles, overlay, *, width_px=1000, height_px=600, dpi=100, max_bytes=900_000) -> bytes:
+def render_premium_chart(candles, overlay, *, width_px=1400, height_px=850, dpi=100, max_bytes=900_000) -> bytes:
     """Render a signal lifecycle premium chart as PNG bytes."""
     try:
         return _render_once(candles, overlay, width_px, height_px, dpi, max_bytes)
