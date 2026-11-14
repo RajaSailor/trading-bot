@@ -380,7 +380,7 @@ def test_lifecycle_accepts_a_support_reclaim_after_previous_minute_was_below_sto
     assert position["entry"] == 61.5
 
 
-def test_scanner_routes_only_three_indices_and_uses_atm_contracts(tmp_path, monkeypatch):
+def test_scanner_routes_indices_and_stocks_to_atm_premium_strategy(tmp_path, monkeypatch):
     monkeypatch.setenv("INDEX_SWING_STRATEGY_ENABLED", "true")
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: NOW)
     instrument = SimpleNamespace(symbol="NIFTY", category="index_options", exchange="NSE")
@@ -406,7 +406,7 @@ def test_scanner_routes_only_three_indices_and_uses_atm_contracts(tmp_path, monk
     scanner.fetcher.resolve_strike_band.side_effect = lambda i, p, side, **kw: [contract] if side == "CE" else []
     scanner.fetcher.fetch_option_candles.side_effect = lambda c, interval, now, **kw: premium if interval == "5min" else one
     assert scanner._uses_index_swing(instrument)
-    assert not scanner._uses_index_swing(stock)
+    assert scanner._uses_index_swing(stock)
     assert scanner._refresh_instrument(instrument, "10min", NOW, spot=130) == 1
     assert scanner.fetcher.resolve_strike_band.call_args_list[0].kwargs["bands"] == (BAND_ATM,)
     payload = callback.call_args.args[0]

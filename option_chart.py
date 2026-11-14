@@ -54,14 +54,15 @@ def select_chart_candles(candles, event_time, *, interval_seconds=600, window=80
             continue
         if high < max(open_, close) or low > min(open_, close):
             continue
-        if ts + interval_seconds <= event_epoch:
+        end = _epoch(raw.get("end_timestamp")) if raw.get("end_timestamp") else ts + interval_seconds
+        if end <= event_epoch:
             try:
                 volume = float(raw.get("volume"))
                 if not math.isfinite(volume) or volume < 0:
                     volume = None
             except (TypeError, ValueError):
                 volume = None
-            selected.append({"timestamp": ts, "open": open_, "high": high, "low": low,
+            selected.append({"timestamp": ts, "end_timestamp": end, "open": open_, "high": high, "low": low,
                              "close": close, "volume": volume})
     selected = sorted({bar["timestamp"]: bar for bar in selected}.values(),
                       key=lambda candle: candle["timestamp"])
@@ -235,7 +236,7 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
             except (TypeError, ValueError, OverflowError, OSError):
                 pass
 
-        as_of = datetime.fromtimestamp(plotted[-1]["timestamp"] + interval_seconds, IST)
+        as_of = datetime.fromtimestamp(plotted[-1]["end_timestamp"], IST)
         contract = overlay.get("option_symbol") or overlay.get("contract") or "Option contract"
         title = (
             f"{overlay.get('underlying', '')} {contract} | {overlay.get('option_type', '')} "

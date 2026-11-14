@@ -15,13 +15,16 @@ from atm_options_fetcher import ATMOptionsFetcher, BAND_ATM, BAND_ITM_PLUS_1
 from exchange_calendar import MCX, exchange_for_instrument, open_exchanges, previous_trading_day
 from index_swing_strategy import (
     INDEX_SYMBOLS, IndexSwingStrategy, enabled as index_swing_enabled,
-    valid_entry as valid_index_entry,
+    aggregate_five_minutes, valid_entry as valid_index_entry,
 )
 from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
 from premium_indicators import IndicatorDataError, completed_candles
-from premium_patterns import PATTERN_LOOKBACK_SESSIONS, PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES
+from premium_patterns import (
+    ASSET_PATTERN_TIMEFRAMES, INDEX_PATTERN_TIMEFRAMES, PATTERN_LOOKBACK_SESSIONS,
+    PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES,
+)
 from premium_structure import (
     CANDLE_STOP_POLICY, STRUCTURE_POLICY, STRUCTURE_ROUTES, bos_candidate, build_signal, evaluate_structure,
     zone_candidate,
@@ -56,7 +59,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 class PremiumScreener:
-    """Monitor legacy ITM+1 setups and ATM index premium-pullback entries.
+    """Monitor premium-only ATM setups across the three option categories.
 
     * Candles (10-minute, incl. previous session) are refreshed once per
       completed 10-minute bucket per underlying, only while its exchange is open.
@@ -153,8 +156,9 @@ class PremiumScreener:
         return bucket != state.get("bucket") and seconds_in >= CANDLE_SETTLE_SECONDS
 
     def _uses_index_swing(self, instrument) -> bool:
-        return (self.index_swing_enabled and instrument.category == "index_options"
-                and instrument.symbol in INDEX_SYMBOLS)
+        # Retain the deployed feature flag and persisted marker for compatibility.
+        return (self.index_swing_enabled and instrument.category in SUPPORTED_SCREENER_CATEGORIES
+                and (instrument.category != "index_options" or instrument.symbol in INDEX_SYMBOLS))
 
     def _bucket(self, instrument, now: datetime) -> tuple[int, float]:
         # NSE/BSE sessions start 09:15 (buckets at :05/:15/...), MCX 09:00 (:00/:10/...).
@@ -341,10 +345,17 @@ class PremiumScreener:
         for contract in contracts:
             if contract.get("strike_band") != BAND_ATM:
                 continue
-            candles = self.fetcher.fetch_option_candles(contract, "5min", now)
+            candles = (self.fetcher.fetch_option_candles(contract, "5min", now)
+                       if instrument.category == "index_options" else None)
             one_minute = self.fetcher.fetch_option_candles(
                 contract, "1min", now, lookback_sessions=PATTERN_LOOKBACK_SESSIONS,
             )
+            daily = (self.fetcher.fetch_option_candles(
+                contract, "1day", now, lookback_sessions=PATTERN_LOOKBACK_SESSIONS,
+            ) if instrument.category != "index_options" else [])
+            if candles is None:
+                # Reuse actual 1m observations; missing minutes never form a 5m bar.
+                candles = aggregate_five_minutes(one_minute, now)
             quotes = self.data_manager.fetch_quotes({
                 contract["exchange_segment"]: [int(contract["security_id"])],
             }) or {}
@@ -358,7 +369,7 @@ class PremiumScreener:
             try:
                 signals, diagnostics, zones = evaluate_structure(
                     instrument.symbol, contract["option_type"], candles, one_minute, quote,
-                    observed_now, contract.get("tick_size"),
+                    observed_now, contract.get("tick_size"), instrument.category,
                 )
             except IndicatorDataError as exc:
                 signals, zones = [], []
@@ -392,6 +403,7 @@ class PremiumScreener:
             try:
                 patterns, diagnostics = self.index_engine.evaluate_patterns(
                     instrument.symbol, contract["option_type"], one_minute, quote, observed_now,
+                    instrument.category, daily,
                 )
                 evaluation["pattern_timeframes"] = diagnostics
             except IndicatorDataError as exc:
@@ -597,7 +609,8 @@ class PremiumScreener:
                     self._count_indicator_reason(exc.reason)
                 for candidate in candidates:
                     signal = build_signal(state["instrument"].symbol, contract["option_type"], candidate,
-                                          five, state["one"], quote, now, contract["tick_size"])
+                                          five, state["one"], quote, now, contract["tick_size"],
+                                          state["instrument"].category)
                     accepted = self._accept_index_signal(
                         state["instrument"], contract, {"armed": True}, five, signal, now, zone_state=state,
                     )
@@ -973,8 +986,7 @@ class PremiumScreener:
 
     # ================================================================ helpers
     def _underlying_locked(self, symbol: str) -> bool:
-        instrument_is_new_index = self.index_swing_enabled and str(symbol).upper() in INDEX_SYMBOLS
-        return (not instrument_is_new_index and self.signal_lifecycle is not None
+        return (not self.index_swing_enabled and self.signal_lifecycle is not None
                 and self.signal_lifecycle.is_open(symbol))
 
     @staticmethod
@@ -1142,6 +1154,21 @@ class PremiumScreener:
                         **self._index_scan_status.get(symbol, {"result": "NOT_YET_EVALUATED"}),
                     } for symbol in sorted(INDEX_SYMBOLS)
                 },
+                "premium_underlying_status": {
+                    instrument.symbol: {
+                        "category": instrument.category,
+                        **self._index_scan_status.get(instrument.symbol, {"result": "NOT_YET_EVALUATED"}),
+                    } for instrument in self.option_instruments()
+                },
+                "buying_at_low_strategy": {
+                    "enabled": self.index_swing_enabled,
+                    "categories": sorted(SUPPORTED_SCREENER_CATEGORIES),
+                    "entry_policy": STRUCTURE_POLICY, "strike_band": "ATM",
+                    "alerts_only": True, "spot_confirmation_required": False,
+                    "routes": [*STRUCTURE_ROUTES, "premium_chart_pattern"],
+                    "stop_policy": CANDLE_STOP_POLICY,
+                    "daily_report_grouping": "strategy_within_category",
+                },
                 "index_swing_strategy": {
                     "enabled": self.index_swing_enabled, "alerts_only": True,
                     "underlyings": sorted(INDEX_SYMBOLS),
@@ -1150,6 +1177,11 @@ class PremiumScreener:
                     "entry_policy": STRUCTURE_POLICY,
                     "pattern_entry_policy": PATTERN_POLICY,
                     "pattern_timeframes_minutes": list(PATTERN_TIMEFRAMES),
+                    "pattern_timeframes_by_category": {
+                        "index_options": list(INDEX_PATTERN_TIMEFRAMES),
+                        "nifty50_stock_options": list(ASSET_PATTERN_TIMEFRAMES),
+                        "commodity_options": list(ASSET_PATTERN_TIMEFRAMES),
+                    },
                     "bullish_premium_patterns": list(PATTERN_NAMES),
                     "pattern_history_sessions": PATTERN_LOOKBACK_SESSIONS,
                     "previous_session_levels": True,

@@ -516,7 +516,7 @@ class LifecycleTests(unittest.TestCase):
         self.now = NOW.replace(hour=15, minute=25)
         self.lifecycle.maintenance(MagicMock(fetch_quotes=MagicMock(return_value={})), self.now)
         report = next(r for r in self.reports() if r["category"] == "index_options")
-        self.assertEqual((1, 1, 1, 1, 0, "0.00%"),
+        self.assertEqual((1, 1, 1, 1, 0, "N/A"),
                          tuple(report[k] for k in ("session_close", "no_quote", "missing_lot",
                                                    "excluded_pnl", "net_pnl", "winrate")))
         self.assertTrue(any("Exit premium: NO QUOTE" in message for _, message in self.sent))

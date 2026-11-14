@@ -7,11 +7,13 @@ import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from exchange_calendar import previous_trading_day
+from exchange_calendar import previous_trading_day, session_windows
 from premium_indicators import completed_candles
 
 IST = ZoneInfo("Asia/Kolkata")
-PATTERN_TIMEFRAMES = (1, 2, 3, 5, 10, 15, 30, 60, 240)
+INDEX_PATTERN_TIMEFRAMES = (2, 3, 5, 10, 15, 30, 60)
+ASSET_PATTERN_TIMEFRAMES = (5, 10, 15, 30, 60, 120, 240, 1440)
+PATTERN_TIMEFRAMES = tuple(sorted(set(INDEX_PATTERN_TIMEFRAMES + ASSET_PATTERN_TIMEFRAMES)))
 PATTERN_NAMES = (
     "double_bottom", "triple_bottom", "inverse_head_and_shoulders",
     "ascending_triangle", "falling_wedge", "bullish_flag",
@@ -32,9 +34,9 @@ def swing_points(bars):
     return sorted(points)
 
 
-def aggregate_minutes(candles, minutes, now):
-    """Build full bars anchored at 09:15 IST, never across sessions or gaps."""
-    if minutes not in PATTERN_TIMEFRAMES:
+def aggregate_minutes(candles, minutes, now, exchange="NSE"):
+    """Build full bars anchored to the exchange session, never across gaps."""
+    if minutes not in PATTERN_TIMEFRAMES or minutes == 1440:
         raise ValueError("unsupported_pattern_timeframe")
     base = completed_candles(candles, now, timeframe_seconds=60)
     groups = {}
@@ -42,10 +44,12 @@ def aggregate_minutes(candles, minutes, now):
     for bar in base:
         stamp = bar["_timestamp_epoch"]
         moment = datetime.fromtimestamp(stamp, IST)
-        opening = moment.replace(hour=9, minute=15, second=0, microsecond=0).timestamp()
-        closing = moment.replace(hour=15, minute=30, second=0, microsecond=0).timestamp()
-        if not opening <= stamp < closing:
+        window = next(((start, end) for start, end in session_windows(exchange, moment.date())
+                       if start <= moment.time().replace(tzinfo=None) < end), None)
+        if window is None:
             continue
+        opening = datetime.combine(moment.date(), window[0], tzinfo=IST).timestamp()
+        closing = datetime.combine(moment.date(), window[1], tzinfo=IST).timestamp()
         start = opening + int((stamp - opening) // seconds) * seconds
         if start + seconds <= min(now.timestamp(), closing):
             groups.setdefault(start, []).append(bar)
@@ -63,6 +67,36 @@ def aggregate_minutes(candles, minutes, now):
             "volume": sum(bar.get("volume") or 0 for bar in group),
         })
     return result
+
+
+def completed_daily_candles(candles, now, exchange):
+    """Normalize Dhan daily bars to exchange session opens and real close times."""
+    result = []
+    for bar in completed_candles(candles, now + timedelta(days=1), timeframe_seconds=86400):
+        day = datetime.fromtimestamp(bar["_timestamp_epoch"], IST).date()
+        windows = session_windows(exchange, day)
+        if not windows:
+            continue
+        opening = datetime.combine(day, windows[0][0], tzinfo=IST)
+        closing = datetime.combine(day, windows[-1][1], tzinfo=IST)
+        if closing.timestamp() > now.timestamp():
+            continue
+        result.append({
+            **bar, "timestamp": opening.timestamp(), "_timestamp_epoch": opening.timestamp(),
+            "end_timestamp": closing.timestamp(), "_end_timestamp_epoch": closing.timestamp(),
+        })
+    result.sort(key=lambda item: item["_timestamp_epoch"])
+    return result
+
+
+def contiguous_daily_candles(bars, exchange):
+    for index in range(len(bars) - 1, 0, -1):
+        previous, current = bars[index - 1:index + 1]
+        left = datetime.fromtimestamp(previous["_timestamp_epoch"], IST).date()
+        right = datetime.fromtimestamp(current["_timestamp_epoch"], IST).date()
+        if previous_trading_day(exchange, right) != left:
+            return bars[index:]
+    return bars
 
 
 def _alternating_points(bars):
@@ -90,13 +124,19 @@ def contiguous_pattern_bars(bars, minutes, exchange="NSE"):
         if left.date() == right.date():
             contiguous = current["_timestamp_epoch"] - previous["_timestamp_epoch"] == minutes * 60
         else:
-            last_start = left.replace(hour=9, minute=15, second=0, microsecond=0)
-            last_start += timedelta(minutes=(375 // minutes - 1) * minutes)
-            contiguous = (
-                previous_trading_day(exchange, right.date()) == left.date()
-                and left == last_start
-                and right.hour == 9 and right.minute == 15 and right.second == 0
-            )
+            left_windows = session_windows(exchange, left.date())
+            right_windows = session_windows(exchange, right.date())
+            contiguous = False
+            if left_windows and right_windows:
+                opening = datetime.combine(left.date(), left_windows[-1][0], tzinfo=IST)
+                closing = datetime.combine(left.date(), left_windows[-1][1], tzinfo=IST)
+                count = int((closing - opening).total_seconds() // (minutes * 60))
+                last_start = opening + timedelta(minutes=(count - 1) * minutes)
+                first_start = datetime.combine(right.date(), right_windows[0][0], tzinfo=IST)
+                contiguous = (
+                    count > 0 and previous_trading_day(exchange, right.date()) == left.date()
+                    and left == last_start and right == first_start
+                )
         if not contiguous:
             return bars[index:]
     return bars
@@ -159,7 +199,7 @@ def bullish_patterns(bars, minutes):
             "boundary": boundary, "stop": stop, "target": boundary + height,
             "points": vertices, "lines": segments,
             "confirmed_start": last["_timestamp_epoch"],
-            "confirmed_end": last["_timestamp_epoch"] + minutes * 60,
+            "confirmed_end": last.get("_end_timestamp_epoch", last["_timestamp_epoch"] + minutes * 60),
             "pattern_id": hashlib.sha256(identity.encode("ascii")).hexdigest()[:24],
         })
 
@@ -241,24 +281,34 @@ def bullish_patterns(bars, minutes):
     return found
 
 
-def scan_patterns(candles, now, exchange="NSE"):
+def scan_patterns(candles, now, exchange="NSE", category="index_options", daily_candles=None):
     hits, diagnostics = [], []
-    for minutes in PATTERN_TIMEFRAMES:
-        available = aggregate_minutes(candles, minutes, now)
-        bars = contiguous_pattern_bars(available, minutes, exchange)
+    timeframes = INDEX_PATTERN_TIMEFRAMES if category == "index_options" else ASSET_PATTERN_TIMEFRAMES
+    for minutes in timeframes:
+        available = (completed_daily_candles(daily_candles or [], now, exchange) if minutes == 1440
+                     else aggregate_minutes(candles, minutes, now, exchange))
+        bars = (contiguous_daily_candles(available, exchange) if minutes == 1440 else
+                contiguous_pattern_bars(available, minutes, exchange))
         status = {"timeframe": minutes, "completed_bars": len(bars),
                   "available_bars": len(available), "gap_excluded_bars": len(available) - len(bars)}
         if len(bars) < 7:
             status["status"] = "INSUFFICIENT_HISTORY"
-        elif not 0 <= now.timestamp() - (bars[-1]["_timestamp_epoch"] + minutes * 60) <= 75:
+        elif (minutes == 1440 and datetime.fromtimestamp(
+                bars[-1]["_timestamp_epoch"], IST).date() != previous_trading_day(exchange, now.date())):
+            status["status"] = "AWAITING_TODAY_CLOSE"
+        elif (minutes != 1440 and not 0 <= now.timestamp()
+              - (bars[-1]["_timestamp_epoch"] + minutes * 60) <= 75):
             status["status"] = "AWAITING_FRESH_CLOSE"
-        elif datetime.fromtimestamp(bars[-1]["_timestamp_epoch"], IST).date() != now.date():
+        elif (minutes != 1440 and datetime.fromtimestamp(
+                bars[-1]["_timestamp_epoch"], IST).date() != now.date()):
             status["status"] = "AWAITING_TODAY_CLOSE"
         else:
             patterns = bullish_patterns(bars, minutes)
             status["status"] = "CONFIRMED" if patterns else "NO_CONFIRMED_PATTERN"
             for pattern in patterns:
-                snapshot = [{key: bar[key] for key in ("timestamp", "open", "high", "low", "close")}
+                snapshot = [{key: bar[key] for key in (
+                    "timestamp", "open", "high", "low", "close", "end_timestamp",
+                ) if key in bar}
                             for bar in bars[-PATTERN_WINDOW:]]
                 hits.append({"pattern": pattern, "chart_candles": snapshot})
         diagnostics.append(status)

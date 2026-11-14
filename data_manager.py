@@ -782,6 +782,20 @@ class DataManager:
         """Share actual-contract candles between scanner and paper trailing."""
         minutes = _parse_interval_minutes(interval)
         now = time.time() if now is None else _timestamp_to_epoch(now)
+        if minutes == 1440:
+            bucket = int(now // 3600)
+            key = (int(security_id), exchange_segment, instrument_type, from_date, to_date, minutes, bucket)
+            with self._contract_cache_lock:
+                if key in self._contract_cache and not force_refresh:
+                    return [dict(candle) for candle in self._contract_cache[key]]
+                candles = self._request_dhan_daily_data(
+                    security_id, exchange_segment, instrument_type, from_date, to_date, symbol,
+                )
+                if candles:
+                    self._contract_cache[key] = [dict(candle) for candle in candles]
+                while len(self._contract_cache) > 512:
+                    self._contract_cache.popitem(last=False)
+                return candles
         seconds = minutes * 60
         anchor = _session_anchor_minutes(exchange_segment) * 60 % seconds
         bucket = int((now + _IST_OFFSET_SECONDS - anchor) // seconds)
@@ -800,6 +814,48 @@ class DataManager:
             while len(self._contract_cache) > 512:
                 self._contract_cache.popitem(last=False)
             return candles
+
+    def _request_dhan_daily_data(self, security_id, exchange_segment, instrument_type,
+                                 from_date, to_date, symbol="UNKNOWN"):
+        """Fetch exact-contract daily OHLC candles from Dhan's historical endpoint."""
+        access_token = os.getenv("ACCESS_TOKEN")
+        if not access_token:
+            logger.error("ACCESS_TOKEN not found")
+            return []
+        payload = {
+            "securityId": str(security_id), "exchangeSegment": exchange_segment,
+            "instrument": instrument_type, "fromDate": from_date, "toDate": to_date,
+            "expiryCode": -1, "oi": False,
+        }
+        try:
+            _apply_rate_limit()
+            response = requests.post(
+                "https://api.dhan.co/v2/charts/historical", json=payload,
+                headers={"access-token": access_token, "Content-Type": "application/json"},
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            logger.warning("[%s] Dhan daily candles unavailable: %s", symbol, exc.__class__.__name__)
+            return []
+        if response.status_code != 200:
+            logger.error("[%s] Dhan daily-candle API error: %s", symbol, response.status_code)
+            return []
+        try:
+            data = response.json()
+            candles = []
+            arrays = {key: data.get(key, []) for key in ("open", "high", "low", "close", "volume", "timestamp")}
+            for index, value in enumerate(arrays["open"]):
+                stamp = _timestamp_to_epoch(arrays["timestamp"][index])
+                candle = {
+                    "timestamp": stamp, "open": float(value), "high": float(arrays["high"][index]),
+                    "low": float(arrays["low"][index]), "close": float(arrays["close"][index]),
+                    "volume": float(arrays["volume"][index]) if index < len(arrays["volume"]) else 0,
+                }
+                candles.append(candle)
+            return candles
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            logger.warning("[%s] Dhan daily-candle response rejected", symbol)
+            return []
 
     def fetch_paper_candles(self, contract: dict, now=None) -> List[dict]:
         """Previous complete candles for the actual option, never its underlying."""

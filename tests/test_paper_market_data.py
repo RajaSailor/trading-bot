@@ -310,6 +310,38 @@ def test_complete_option_candles_cached_per_bucket_and_shared_with_scanner(feed,
     assert fetch.call_count == 2
 
 
+def test_daily_option_candles_use_historical_endpoint_and_cache(feed, monkeypatch):
+    manager, post, clock = feed
+    monkeypatch.setattr(market, "_apply_rate_limit", lambda: None)
+    post.return_value = Mock(
+        status_code=200,
+        json=Mock(return_value={
+            "open": [100, 102], "high": [105, 106], "low": [98, 101],
+            "close": [103, 104], "volume": [500, 600],
+            "timestamp": [1791000000, 1791086400],
+        }),
+    )
+    args = {
+        "security_id": 777, "exchange_segment": "NSE_FNO", "instrument_type": "OPTSTK",
+        "from_date": "2026-11-02", "to_date": "2026-11-03", "interval": 1440,
+        "symbol": "TATASTEEL-CE", "now": clock[0],
+    }
+    first = manager.fetch_contract_candles(**args)
+    assert first[0] == {
+        "timestamp": 1791000000, "open": 100.0, "high": 105.0,
+        "low": 98.0, "close": 103.0, "volume": 500.0,
+    }
+    manager.fetch_contract_candles(**args)
+    assert post.call_count == 1
+    assert post.call_args.args[0] == "https://api.dhan.co/v2/charts/historical"
+    assert post.call_args.kwargs["headers"]["access-token"] == "test-only"
+    assert post.call_args.kwargs["json"] == {
+        "securityId": "777", "exchangeSegment": "NSE_FNO", "instrument": "OPTSTK",
+        "fromDate": "2026-11-02", "toDate": "2026-11-03",
+        "expiryCode": -1, "oi": False,
+    }
+
+
 def test_candle_outage_can_recover_in_same_completed_bucket(feed, monkeypatch):
     manager, post, clock = feed
     limiter = Mock()

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import json
 import threading
 import weakref
+import zlib
 from collections import OrderedDict
 from datetime import date, datetime
 from typing import Iterable, List, Optional, Sequence
@@ -181,13 +183,15 @@ class ATMOptionsFetcher:
         exchange = _SEGMENT_EXCHANGE.get(str(contract.get("exchange_segment", "")).upper(), NSE)
         if not isinstance(lookback_sessions, int) or not 1 <= lookback_sessions <= 10:
             raise ValueError("lookback_sessions must be between 1 and 10")
+        daily = str(interval).lower() in {"1day", "1d", "day", "daily"}
+        minutes = 1440 if daily else _parse_interval_minutes(interval)
         previous = previous_trading_day(exchange, today)
         current = self.data_manager.fetch_contract_candles(
             security_id=contract["security_id"],
             exchange_segment=contract["exchange_segment"],
             instrument_type=contract["instrument_type"],
             from_date=previous.isoformat(), to_date=today.isoformat(),
-            interval=_parse_interval_minutes(interval), symbol=contract["option_symbol"], now=now,
+            interval=minutes, symbol=contract["option_symbol"], now=now,
         )
         if lookback_sessions == 1:
             return current
@@ -199,24 +203,26 @@ class ATMOptionsFetcher:
             start.isoformat(), previous.isoformat(), interval,
         )
         with self._premium_history_lock:
-            history = self._premium_history.get(key)
-            if history is None:
+            cached = self._premium_history.get(key)
+            if cached is None:
                 history = self.data_manager.fetch_contract_candles(
                     security_id=contract["security_id"],
                     exchange_segment=contract["exchange_segment"],
                     instrument_type=contract["instrument_type"],
                     from_date=start.isoformat(), to_date=previous.isoformat(),
-                    interval=_parse_interval_minutes(interval), symbol=contract["option_symbol"], now=now,
+                    interval=minutes, symbol=contract["option_symbol"], now=now,
                 )
                 if history:
-                    self._premium_history[key] = history
-                    while len(self._premium_history) > 24:
+                    self._premium_history[key] = zlib.compress(json.dumps(history).encode("utf-8"))
+                    while (len(self._premium_history) > 128
+                           or sum(map(len, self._premium_history.values())) > 32 * 1024 * 1024):
                         self._premium_history.popitem(last=False)
                 else:
                     logger.warning("[%s] Extended premium history unavailable; longer pattern timeframes "
                                    "may be skipped", contract["option_symbol"])
             else:
                 self._premium_history.move_to_end(key)
+                history = json.loads(zlib.decompress(cached))
         # Current data wins duplicate timestamps, including corrected prior-session bars.
         return [dict(candle) for candle in history] + current
 
