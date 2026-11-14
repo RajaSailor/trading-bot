@@ -16,7 +16,10 @@ from zoneinfo import ZoneInfo
 
 from option_chart import ChartRenderError, ChartUnavailable, render_premium_chart, select_chart_candles
 from alert_disclaimer import PUBLIC_DISCLAIMER, with_disclaimer
-from premium_patterns import PATTERN_TIMEFRAMES, aggregate_minutes
+from premium_patterns import (
+    ASSET_PATTERN_TIMEFRAMES, INDEX_PATTERN_TIMEFRAMES, PATTERN_TIMEFRAMES,
+    aggregate_minutes, completed_daily_candles,
+)
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -228,10 +231,13 @@ class LifecycleChartService:
         pattern = overlay.get("premium_pattern")
         if pattern:
             minutes = pattern["timeframe"]
-            if minutes not in PATTERN_TIMEFRAMES or overlay.get("interval_minutes") != minutes:
+            allowed = (INDEX_PATTERN_TIMEFRAMES if overlay.get("category") == "index_options"
+                       else ASSET_PATTERN_TIMEFRAMES)
+            if (minutes not in PATTERN_TIMEFRAMES or minutes not in allowed
+                    or overlay.get("interval_minutes") != minutes):
                 raise ChartRenderError("pattern_timeframe_mismatch")
             return minutes
-        return _clamp_int(overlay.get("interval_minutes"), self.interval_minutes, 1, 60)
+        return _clamp_int(overlay.get("interval_minutes"), self.interval_minutes, 1, 1440)
 
     def _fetch_snapshot(self, overlay):
         interval = self._chart_interval(overlay)
@@ -263,10 +269,14 @@ class LifecycleChartService:
                 self._fetch_times.append(now)
                 candles = self.candle_provider(
                     security_id, segment, instrument_type, from_date, to_date,
-                    1 if pattern else interval,
+                    interval if pattern and interval == 1440 else 1 if pattern else interval,
                 ) or []
                 if pattern:
-                    candles = aggregate_minutes(candles, interval, datetime.fromtimestamp(event_time, IST))
+                    event = datetime.fromtimestamp(event_time, IST)
+                    if interval == 1440:
+                        candles = completed_daily_candles(candles, event, self._exchange(segment))
+                    else:
+                        candles = aggregate_minutes(candles, interval, event, self._exchange(segment))
                 candles = [dict(candle) for candle in candles]
                 self._cache[key] = [dict(candle) for candle in candles]
                 while len(self._cache) > 128:
@@ -311,8 +321,9 @@ class LifecycleChartService:
             heading += f"\nPremium support: {overlay['premium_support']:.2f} | Premium-only entry"
         pattern = overlay.get("premium_pattern")
         if pattern:
+            timeframe = "1day" if pattern["timeframe"] == 1440 else f"{pattern['timeframe']}m"
             heading += (f"\nConfirmed premium {pattern['name'].replace('_', ' ')} "
-                        f"| {pattern['timeframe']}m")
+                        f"| {timeframe}")
         if overlay.get("previous_session_date"):
             heading += f"\nLevel reference: {overlay['previous_session_date']} (same contract)"
         patterns = overlay.get("spot_patterns") or []

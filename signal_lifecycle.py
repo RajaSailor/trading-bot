@@ -25,7 +25,7 @@ from premium_structure import CANDLE_STOP_POLICY, STRUCTURE_POLICY
 from exchange_calendar import is_exchange_open, previous_trading_day, session_windows
 from alert_disclaimer import PUBLIC_DISCLAIMER, with_disclaimer
 from index_swing_strategy import (
-    INDEX_SYMBOLS, aggregate_five_minutes, describe_setup, valid_entry as valid_index_entry,
+    aggregate_five_minutes, describe_setup, premium_exchange, valid_entry as valid_index_entry,
 )
 from premium_indicators import IndicatorDataError, completed_candles
 from premium_strategy_engine import TRIGGER_LIVE
@@ -268,6 +268,7 @@ class SignalLifecycle:
                 category not in CATEGORY_EXCHANGES
                 or exchange not in CATEGORY_EXCHANGES[category]
                 or instrument_type != CATEGORY_INSTRUMENT_TYPES[category]
+                or meta.get("category", category) != category
                 or (underlying == "SENSEX" and exchange != "BSE")
                 or not underlying or meta["underlying"] is None
                 or not key or payload["idempotency_key"] is None
@@ -275,7 +276,7 @@ class SignalLifecycle:
                 or side not in ("CE", "PE")
                 or meta["strike_band"] != ("ATM" if index_signal else "ITM+1")
                 or (index_signal and (not valid_index_entry(meta, now)
-                                      or underlying not in INDEX_SYMBOLS or category != "index_options"))
+                                      or premium_exchange(underlying, category) != exchange))
                 or (not index_signal and meta.get("trigger") != TRIGGER_LIVE)
                 or security != int(security) or lot != int(lot)
                 or expiry <= now.date()
@@ -315,6 +316,7 @@ class SignalLifecycle:
                 "initial_stop_loss": float(stop), "initial_target": float(target),
                 "trailing_step": 0, "advisory_trailing": None if index_signal else _trailing_settings(),
                 "index_swing": index_signal, "breakeven_applied": False,
+                "entry_strategy": self._entry_strategy(meta),
                 "stop_policy": stop_policy,
                 "last_candle_stop_end": meta.get("confirmation_end"),
                 "telegram_chat_id": self._resolve_chat_id(category),
@@ -362,7 +364,7 @@ class SignalLifecycle:
                 "observed_entry": position["observed_entry"],
             })
             return position
-        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        except (KeyError, TypeError, ValueError, OverflowError, OSError, IndicatorDataError):
             return None
 
     @staticmethod
@@ -379,6 +381,7 @@ class SignalLifecycle:
             f"Target: {position['target']:.2f}\n"
             f"Risk points: {max(0, position['entry'] - position['stop_loss']):.2f} | "
             f"Lot size: {_text(position.get('lot_size') or 'MISSING')}\n"
+            f"Strategy: {_text(SignalLifecycle._strategy_label(position.get('entry_strategy') or SignalLifecycle._entry_strategy(position.get('metadata', {}))))}\n"
         )
         if event == "OPEN":
             message += f"Observed breakout premium: {position['observed_entry']:.2f}"
@@ -686,6 +689,30 @@ class SignalLifecycle:
                                               stamp, json.dumps(position), position["id"]))
         return closed
 
+    @staticmethod
+    def _entry_strategy(metadata):
+        setup = (metadata.get("setups") or [None])[0]
+        if setup in {
+            "fvg_retest", "order_block_retest", "compression_breakout", "bos_retest",
+            "premium_chart_pattern",
+        }:
+            return setup
+        if setup in {
+            "support_5m_recovery", "premium_support_retest", "premium_average_reclaim",
+            "premium_previous_session_recovery",
+        }:
+            return "support_recovery"
+        return "legacy_premium"
+
+    @staticmethod
+    def _strategy_label(strategy):
+        return {
+            "fvg_retest": "FVG retest", "order_block_retest": "Order-block retest",
+            "support_recovery": "Support recovery", "compression_breakout": "Compression breakout",
+            "bos_retest": "BOS / rejection / reclaim",
+            "premium_chart_pattern": "Bullish chart pattern", "legacy_premium": "Legacy premium",
+        }.get(strategy, "Unclassified")
+
     def _schedule_reports(self, current):
         with self._transaction() as db:
             for category, exchanges in CATEGORY_EXCHANGES.items():
@@ -712,12 +739,41 @@ class SignalLifecycle:
                             for underlying in sorted({row["underlying"] for row in rows
                                                       if row["opened_at"] <= cutoff})
                         }
+                        strategies = {
+                            row["id"]: row.get("entry_strategy") or self._entry_strategy(row.get("metadata", {}))
+                            for row in rows
+                        }
+                        per_strategy = {
+                            strategy: self._outcomes(
+                                [row for row in rows if strategies[row["id"]] == strategy], start, cutoff)
+                            for strategy in sorted(set(strategies.values()))
+                            if any(strategies[row["id"]] == strategy and (
+                                start <= row["opened_at"] <= cutoff
+                                or start <= (row.get("closed_at") or -1) <= cutoff
+                            ) for row in rows)
+                        }
                         report = dict(category=category, day=day.isoformat(),
-                                      per_underlying=per_underlying, **totals)
+                                      per_underlying=per_underlying, per_strategy=per_strategy, **totals)
                         db.execute("INSERT INTO lifecycle_reports VALUES(?,?,?)",
                                    (category, day.isoformat(), json.dumps(report)))
                         event_id = f"REPORT:{category}:{day.isoformat()}"
                         details = [
+                            f"<b>{_text(self._strategy_label(strategy))}</b>: "
+                            f"Entries {outcomes['opened']} | Closed {outcomes['closed']} | "
+                            f"Open {outcomes['unresolved']} | Targets {outcomes['targets']} | "
+                            f"Stops {outcomes['stops']} (profitable {outcomes['profitable_stops']}) | "
+                            f"Session-close {outcomes['session_close']} | "
+                            f"Wins {outcomes['wins']} / Losses {outcomes['losses']} / "
+                            f"Flat {outcomes['breakeven']} | Win rate {outcomes['return_winrate']} | "
+                            f"Avg premium return {outcomes['avg_return_pct']} | "
+                            f"Avg win {outcomes['avg_win_return_pct']} / "
+                            f"loss {outcomes['avg_loss_return_pct']} | "
+                            f"Weighted premium return {outcomes['weighted_return_pct']} | "
+                            f"Gross profit ₹{outcomes['gross_profit']:,.2f} / "
+                            f"loss ₹{outcomes['gross_loss']:,.2f} | Net ₹{outcomes['net_pnl']:,.2f} | "
+                            f"Unpriced closes {outcomes['unpriced_closes']}"
+                            for strategy, outcomes in per_strategy.items()]
+                        details += [
                             f"{_text(underlying)}: Opened {outcomes['opened']} | "
                             f"Targets {outcomes['targets']} | Stops {outcomes['stops']} | "
                             f"Session-close {outcomes['session_close']} "
@@ -735,7 +791,9 @@ class SignalLifecycle:
                             f"Stop triggered: {totals['stops']}\n"
                             f"Session-close exits: {totals['session_close']} "
                             f"(profit {totals['session_profit']}, loss {totals['session_loss']})\n"
-                            f"Win rate: {totals['winrate']}\n"
+                            f"Win rate: {totals['return_winrate']}\n"
+                            f"Avg premium return: {totals['avg_return_pct']} | "
+                            f"Weighted premium return: {totals['weighted_return_pct']}\n"
                             f"Gross profit: ₹{totals['gross_profit']:,.2f} | "
                             f"Gross loss: ₹{totals['gross_loss']:,.2f}\n"
                             f"Net P&amp;L: ₹{totals['net_pnl']:,.2f}\n"
@@ -759,11 +817,20 @@ class SignalLifecycle:
         session = [row for row in closed if row["status"] == "SESSION_CLOSE"]
         values = []
         session_profit = session_loss = no_quote = missing_lot = 0
+        returns, invested, proceeds = [], [], []
+        profitable_stops = 0
         for row in closed:
             premium = row.get("exit_premium")
             if "exit_premium" not in row:
                 premium = row.get("target" if row["status"] == "TARGET" else "stop_loss")
             pnl = SignalLifecycle._pnl(row, premium)
+            if premium is not None and math.isfinite(float(premium)) and row["entry"] > 0:
+                change = 100 * (float(premium) - row["entry"]) / row["entry"]
+                returns.append(change)
+                profitable_stops += row["status"] == "STOP" and change > 0
+                if pnl is not None:
+                    invested.append(row["entry"] * row["lot_size"])
+                    proceeds.append(pnl)
             if premium is None:
                 no_quote += 1
             if SignalLifecycle._pnl(row, row["entry"]) is None:
@@ -778,13 +845,26 @@ class SignalLifecycle:
         unresolved = sum(row["opened_at"] <= cutoff and (
             row.get("closed_at") is None or row["closed_at"] > cutoff) for row in rows)
         return dict(opened=opened, targets=targets, stops=stops, unresolved=unresolved,
+                    closed=len(closed), wins=sum(value > 0 for value in returns),
+                    losses=sum(value < 0 for value in returns),
+                    breakeven=sum(value == 0 for value in returns),
+                    profitable_stops=profitable_stops, unpriced_closes=len(closed) - len(returns),
+                    return_winrate=f"{100 * sum(value > 0 for value in returns) / len(returns):.2f}%"
+                    if returns else "N/A",
+                    avg_return_pct=f"{sum(returns) / len(returns):+.2f}%" if returns else "N/A",
+                    avg_win_return_pct=f"{sum(v for v in returns if v > 0) / sum(v > 0 for v in returns):+.2f}%"
+                    if any(v > 0 for v in returns) else "N/A",
+                    avg_loss_return_pct=f"{sum(v for v in returns if v < 0) / sum(v < 0 for v in returns):+.2f}%"
+                    if any(v < 0 for v in returns) else "N/A",
+                    weighted_return_pct=f"{100 * sum(proceeds) / sum(invested):+.2f}%"
+                    if invested else "N/A",
                     session_close=len(session), session_profit=session_profit, session_loss=session_loss,
                     no_quote=no_quote, missing_lot=missing_lot, excluded_pnl=len(closed) - len(values),
                     gross_profit=profit, gross_loss=loss, net_pnl=round(profit - loss, 2),
                     avg_pnl=round(sum(values) / len(values), 2) if values else 0,
                     max_loss=min(values + [0]), max_win=max(values + [0]),
-                    winrate=f"{100 * sum(value > 0 for value in values) / len(closed):.2f}%"
-                    if closed else "N/A")
+                    winrate=f"{100 * sum(value > 0 for value in returns) / len(returns):.2f}%"
+                    if returns else "N/A")
 
     def _enqueue_report(self, db, event_id, category, header, details):
         disclaimer = "\nHypothetical signal results (1 lot per signal), not broker fills."

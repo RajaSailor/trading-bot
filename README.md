@@ -8,11 +8,13 @@
 
 ---
 
-## Index swing-recovery alerts (opt-in)
+## Premium-only option alerts (opt-in)
 
-Set `INDEX_SWING_STRATEGY_ENABLED=true` to replace the legacy 10-minute entry
-strategy **only for NIFTY, BANKNIFTY and SENSEX**. Stock and commodity strategies
-remain unchanged. Both CALL and PUT entries use **only their own premium**.
+Set `INDEX_SWING_STRATEGY_ENABLED=true` to enable the premium-only advisory
+routes for NIFTY, BANKNIFTY and SENSEX index options, configured NIFTY 50 stock
+options, and supported MCX commodity options. All categories use ATM contracts
+and retain their separate alert channels. Both CALL and PUT entries use
+**only their own premium**.
 Support recovery has priority: five-minute same-session structure or a level
 from the immediately previous trading session of the **same contract**, followed
 by a completed five-minute close above the previous five-minute candle high
@@ -30,7 +32,8 @@ level, then a fresh live crossing back above it. None requires spot confirmation
 
 An **independent** alternative is a completed bullish premium chart pattern:
 double/triple bottom, inverse head-and-shoulders, ascending triangle, falling
-wedge or bullish flag. Check **1/2/3/5/10/15/30/60/240-minute** charts; no support
+wedge or bullish flag. Check **2/3/5/10/15/30/60-minute** index charts and
+**5/10/15/30/60/120/240-minute plus 1-day** stock/commodity charts; no support
 recovery must also agree. Each alert identifies its pattern and timeframe and
 draws the structure and breakout boundary on that timeframe's premium chart.
 Forming patterns and bearish-premium patterns do not trigger buys.
@@ -41,7 +44,7 @@ Initial stops are the support/range low, pattern invalidation low, or the
 entry candle's **observed** low for FVG/OB/BOS. Targets stay fixed: known premium
 resistance for recovery, pre-decline swing high for compression, previous
 confirmed high plus one contract tick for FVG/OB/BOS, or the pattern measured move.
-**New index alerts trail upward to each fully post-entry completed five-minute
+**New premium-only alerts trail upward to each fully post-entry completed five-minute
 candle low**, replacing the 20%/5% ladder. Stops never move down; old open signals
 retain their frozen stop policy. Live touches/crossings are observed prices,
 not guaranteed fills or knowledge of the forming candle's eventual final low.
@@ -49,8 +52,9 @@ Duplicate zone touches do not reopen the same zone; BOS requires a distinct
 rejection and candle-triggered routes a distinct confirmation. There is no daily alert
 cap, so multiple independently confirmed signals may remain open per index.
 Up to ten prior trading sessions are requested for the exact contract; missing
-or insufficient history explicitly skips affected timeframes. Four-hour bars
-are full 09:15-13:15 IST bars, not partial afternoon or overnight candles.
+or insufficient history explicitly skips affected timeframes. Intraday bars
+follow the relevant exchange session and daily patterns use completed session
+candles.
 These are unproven trial rules, not a claim of a proven win rate or a complete
 catalogue of every market pattern.
 
@@ -59,7 +63,7 @@ screenshots. Trading-candle spacing removes empty overnight/weekend expanses;
 ordinary intraday charts focus on the event's session, show volume where
 available, mark actual intraday data holes and draw the premium zone. No candles
 are invented. Pattern charts retain their required multi-session structure.
-Health exposes each index's configuration, last scan, resolved option sides
+Health exposes each supported instrument's configuration, last scan, resolved option sides
 and route rejection results, including missing-contract/data cases.
 
 These are **alerts only**, not automated orders. This flag suppresses NIFTY
@@ -67,7 +71,9 @@ automatic entry activation, and the queue and live route independently reject
 execution of the new signals. Keep `NIFTY_LIVE_ENABLED=false`,
 `AUTO_TRADING_ENABLED=false`, and `PRACTICE_MODE=true` during evaluation.
 Existing databases, charts, category-channel notifications and daily reports
-remain in use. Do not remove broker safety/recovery code or reset state.
+remain in use. Daily reports include strategy-level combined results within
+each category channel as well as the existing per-underlying details. Do not
+remove broker safety/recovery code or reset state.
 Gap-up, gap-down and flat sessions use the same premium-only entry rules. All three
 categories' public signal/lifecycle messages and report parts include a shared
 educational/risk notice; a disclaimer is not a guarantee of SEBI compliance.

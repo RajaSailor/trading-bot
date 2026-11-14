@@ -1,5 +1,7 @@
 from copy import deepcopy
 from datetime import datetime, timedelta
+import json
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -51,10 +53,217 @@ def structure_history(route="compression_breakout"):
     return five, one, now, quote
 
 
-def signal_for(route, symbol="NIFTY", side="CE"):
+def signal_for(route, symbol="NIFTY", side="CE", category="index_options"):
     five, one, now, quote = structure_history(route)
-    signals, diagnostics, zones = evaluate_structure(symbol, side, five, one, quote, now, .05)
+    signals, diagnostics, zones = evaluate_structure(symbol, side, five, one, quote, now, .05, category)
     return next(s for s in signals if s["setups"] == [route]), now, (five, one, quote)
+
+
+ASSETS = [
+    ("NIFTY", "index_options", "NSE_FNO", "OPTIDX"),
+    ("BANKNIFTY", "index_options", "NSE_FNO", "OPTIDX"),
+    ("SENSEX", "index_options", "BSE_FNO", "OPTIDX"),
+    ("TATASTEEL", "nifty50_stock_options", "NSE_FNO", "OPTSTK"),
+    ("RELIANCE", "nifty50_stock_options", "NSE_FNO", "OPTSTK"),
+    ("GOLD", "commodity_options", "MCX_COMM", "OPTFUT"),
+    ("SILVER", "commodity_options", "MCX_COMM", "OPTFUT"),
+    ("CRUDE OIL", "commodity_options", "MCX_COMM", "OPTFUT"),
+    ("NATURALGAS", "commodity_options", "MCX_COMM", "OPTFUT"),
+]
+
+
+def asset_payload(signal, symbol, category, segment, instrument_type, security=101):
+    contract = {
+        "security_id": security, "exchange_segment": segment, "instrument_type": instrument_type,
+        "option_symbol": symbol + "-" + signal["option_type"], "option_type": signal["option_type"],
+        "strike": 100, "strike_band": "ATM", "expiry": "27NOV2026", "tick_size": .05, "lot_size": 50,
+    }
+    signal["idempotency_key"] = PremiumScreener._signal_key(category, {**signal, **contract})
+    return PremiumScreener._build_queue_payload(SimpleNamespace(symbol=symbol), signal, category,
+                                               "premium_screener", contract), contract
+
+
+@pytest.mark.parametrize("route", ["compression_breakout", "fvg_retest", "order_block_retest"])
+@pytest.mark.parametrize("asset", ASSETS)
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_all_assets_admit_independent_routes_and_route_notifications(tmp_path, route, asset, side):
+    symbol, category, segment, instrument_type = asset
+    signal, now, _ = signal_for(route, symbol, side, category)
+    payload, contract = asset_payload(signal, *asset)
+    sent = []
+    service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now,
+                              notify=lambda channel, message: sent.append((channel, message)) or True)
+    position = service.open_once(payload)
+    assert position is not None
+    assert position["category"] == category and position["strike_band"] == "ATM"
+    assert position["stop_policy"] == CANDLE_STOP_POLICY
+    assert position["entry_strategy"] == route
+    assert service.open_once(payload) is None
+    service.dispatch_notifications(now)
+    assert sent and {channel for channel, _ in sent} == {category}
+    service.observe_quotes({(segment, 101): {
+        "price": position["target"] + 1, "trade_timestamp": now.timestamp() + 1,
+    }}, now + timedelta(seconds=1))
+    service.dispatch_notifications(now + timedelta(seconds=1))
+    assert not service.open_positions()
+    assert {channel for channel, _ in sent} == {category}
+
+
+@pytest.mark.parametrize("asset", ASSETS)
+def test_support_and_bos_routes_apply_to_every_category(asset):
+    symbol, category, _, _ = asset
+    five = bars([(70, 72, 65, 68), (50, 55, 47, 50), (55, 60, 52, 58),
+                 (54, 55, 50, 53), (50, 52, 47.1, 50), (50, 56, 49, 55)])
+    now = OPEN + timedelta(minutes=30, seconds=5)
+    quote = {"price": 55, "bid": 54.95, "ask": 55.05, "trade_timestamp": now.timestamp()}
+    signals, _, _ = evaluate_structure(symbol, "CE", five, [], quote, now, .05, category)
+    support = next(s for s in signals if s["setups"] == ["support_5m_recovery"])
+    assert support["stop_loss"] == 47 and support["target"] == 60
+    assert valid_entry(support, now)
+    five, one, now = bos_history()
+    quote.update(price=130.2, bid=130.15, ask=130.25, trade_timestamp=now.timestamp())
+    signals, _, _ = evaluate_structure(symbol, "PE", five, one, quote, now, .05, category)
+    assert any(s["setups"] == ["bos_retest"] and valid_entry(s, now) for s in signals)
+
+
+def test_daily_strategy_reports_pool_symbols_only_within_their_category(tmp_path):
+    sent, clock = [], []
+    _, now, _ = signal_for("fvg_retest")
+    clock.append(now)
+    service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: clock[0],
+                              notify=lambda category, message: sent.append((category, message)) or True)
+    positions = {}
+    for security, asset in enumerate(ASSETS, 101):
+        symbol, category, segment, _ = asset
+        signal, _, _ = signal_for("fvg_retest", symbol, "CE", category)
+        payload, _ = asset_payload(signal, *asset, security=security)
+        positions[symbol] = service.open_once(payload)
+        assert positions[symbol] is not None
+    clock[0] += timedelta(seconds=1)
+    for symbol, position in positions.items():
+        if symbol in ("SENSEX", "NATURALGAS"):
+            continue
+        price = position["stop_loss"] - 1 if symbol in ("BANKNIFTY", "RELIANCE", "SILVER") else position["target"] + 1
+        service.observe_quotes({(position["exchange_segment"], position["security_id"]): {
+            "price": price, "trade_timestamp": clock[0].timestamp(),
+        }}, clock[0])
+    # SENSEX exits on a profitable trailing stop, not at target.
+    position = positions["SENSEX"]
+    start = now.replace(hour=9, minute=50, second=0, microsecond=0)
+    clock[0] = start + timedelta(minutes=5, seconds=5)
+    service.observe_quotes({("BSE_FNO", position["security_id"]): {
+        "price": 125, "trade_timestamp": clock[0].timestamp(),
+    }}, clock[0])
+    service.observe_index_candles(position["security_id"], "BSE_FNO",
+                                 bars([(123, 130, 120, 125)] * 5, 1, start), clock[0])
+    clock[0] += timedelta(seconds=1)
+    service.observe_quotes({("BSE_FNO", position["security_id"]): {
+        "price": 119, "trade_timestamp": clock[0].timestamp(),
+    }}, clock[0])
+    clock[0] = now.replace(hour=23, minute=56)
+    service.maintenance(MagicMock(fetch_quotes=MagicMock(return_value={})), clock[0])
+    with sqlite3.connect(service.db_path) as db:
+        reports = [json.loads(row[0]) for row in db.execute("SELECT data FROM lifecycle_reports")]
+    assert len(reports) == 3
+    by_category = {report["category"]: report for report in reports}
+    for category, entries in (("index_options", 3), ("nifty50_stock_options", 2), ("commodity_options", 4)):
+        report = by_category[category]
+        assert set(report["per_strategy"]) == {"fvg_retest"}
+        stats = report["per_strategy"]["fvg_retest"]
+        assert stats["opened"] == entries and stats["closed"] == entries
+        messages = "\n".join(message for channel, message in sent
+                             if channel == category and "DAILY SIGNAL REPORT" in message)
+        assert messages.count("<b>FVG retest</b>") == 1
+        assert all(symbol not in messages for symbol, other, _, _ in ASSETS if other != category)
+    stats = by_category["index_options"]["per_strategy"]["fvg_retest"]
+    assert (stats["targets"], stats["stops"], stats["profitable_stops"]) == (1, 2, 1)
+    assert (stats["wins"], stats["losses"], stats["winrate"]) == (2, 1, "66.67%")
+    stats = by_category["commodity_options"]["per_strategy"]["fvg_retest"]
+    assert stats["unpriced_closes"] == 0 and stats["winrate"] == "50.00%"
+    assert stats["breakeven"] == 1
+    assert stats["avg_return_pct"] != "N/A" and stats["weighted_return_pct"] != "N/A"
+    # Restart must not create another report or re-send delivered rows.
+    before = len(sent)
+    restarted = SignalLifecycle(service.db_path, clock=lambda: clock[0],
+                                notify=lambda c, m: sent.append((c, m)) or True)
+    restarted.maintenance(MagicMock(fetch_quotes=MagicMock(return_value={})), clock[0])
+    assert len(sent) == before
+
+
+def test_strategy_return_math_uses_observed_exits_and_excludes_unknown_and_open():
+    rows = [
+        {"opened_at": 1, "closed_at": 2, "status": status, "entry": 100,
+         "exit_premium": premium, "lot_size": lot}
+        for status, premium, lot in [
+            ("TARGET", 120, 50), ("STOP", 110, 50), ("STOP", 90, 100),
+            ("SESSION_CLOSE", 100, 50), ("SESSION_CLOSE", None, 50),
+        ]
+    ]
+    rows.append({"opened_at": 1, "closed_at": None, "status": "OPEN", "entry": 100, "lot_size": 50})
+    stats = SignalLifecycle._outcomes(rows, 0, 3)
+    assert (stats["opened"], stats["closed"], stats["unresolved"]) == (6, 5, 1)
+    assert (stats["wins"], stats["losses"], stats["breakeven"], stats["unpriced_closes"]) == (2, 1, 1, 1)
+    assert stats["winrate"] == "50.00%"
+    assert stats["avg_return_pct"] == "+5.00%"
+    assert stats["avg_win_return_pct"] == "+15.00%"
+    assert stats["avg_loss_return_pct"] == "-10.00%"
+    assert stats["weighted_return_pct"] == "+2.00%"
+    assert stats["net_pnl"] == 500
+
+
+@pytest.mark.parametrize("asset", ASSETS[3:])
+def test_stock_commodity_scanner_uses_atm_and_allows_concurrent_sides(tmp_path, monkeypatch, asset):
+    monkeypatch.setenv("INDEX_SWING_STRATEGY_ENABLED", "true")
+    symbol, category, segment, _ = asset
+    five, one, now, quote = structure_history()
+    minute_history = [
+        {**bar, "timestamp": bar["timestamp"] + offset * 60}
+        for bar in five for offset in range(5)
+    ] + one
+    instrument = SimpleNamespace(symbol=symbol, category=category)
+    dm = MagicMock()
+    dm.get_instruments.return_value = {category: [instrument]}
+    dm.fetch_quotes.return_value = {(segment, security): quote for security in (101, 102)}
+    service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now)
+    scanner = PremiumScreener(dm, MagicMock(), MagicMock(), signal_lifecycle=service,
+                             clock=lambda: now, alert_state_file=str(tmp_path / "alerts.json"))
+    scanner.fetcher = MagicMock()
+    contracts = {}
+    for security, side in ((101, "CE"), (102, "PE")):
+        signal, _, _ = signal_for("compression_breakout", symbol, side, category)
+        _, contracts[side] = asset_payload(signal, *asset, security=security)
+    scanner.fetcher.resolve_strike_band.side_effect = lambda i, p, side, **kw: [contracts[side]]
+    scanner.fetcher.fetch_option_candles.return_value = minute_history
+    assert scanner._uses_index_swing(instrument)
+    assert scanner._refresh_instrument(instrument, "10min", now, 100) == 2
+    assert len(service.open_positions()) == 2
+    assert not scanner._underlying_locked(symbol)
+    assert {position["option_type"] for position in service.open_positions()} == {"CE", "PE"}
+    assert all(call.kwargs["bands"] == ("ATM",)
+               for call in scanner.fetcher.resolve_strike_band.call_args_list)
+    intervals = [call.args[1] for call in scanner.fetcher.fetch_option_candles.call_args_list]
+    assert intervals.count("1min") == 2 and intervals.count("1day") == 2
+    assert scanner.status()["buying_at_low_strategy"]["categories"] == [
+        "commodity_options", "index_options", "nifty50_stock_options",
+    ]
+
+
+@pytest.mark.parametrize("asset", ASSETS[3:])
+def test_new_stock_commodity_rules_keep_existing_position_policy(tmp_path, asset):
+    symbol, category, _, _ = asset
+    signal, now, _ = signal_for("fvg_retest", symbol, "CE", category)
+    payload, _ = asset_payload(signal, *asset)
+    service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now)
+    position = service.open_once(payload)
+    assert position["stop_policy"] == CANDLE_STOP_POLICY
+    # Frozen legacy alerts must not be reinterpreted when the process restarts.
+    with sqlite3.connect(service.db_path) as db:
+        legacy = deepcopy(position)
+        legacy.update(index_swing=False, stop_policy=None, entry_strategy="legacy_premium")
+        db.execute("UPDATE lifecycle_signals SET data=? WHERE id=?", (json.dumps(legacy), position["id"]))
+    restarted = SignalLifecycle(service.db_path, clock=lambda: now)
+    stored = restarted.open_positions()[0]
+    assert not stored["index_swing"] and stored["stop_policy"] is None
 
 
 @pytest.mark.parametrize("route", ["compression_breakout", "fvg_retest", "order_block_retest"])

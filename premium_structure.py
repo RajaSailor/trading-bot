@@ -230,8 +230,9 @@ def zone_candidate(zone, five, one, price, stamp, now, tick):
     }
 
 
-def build_signal(symbol, side, candidate, five, one, quote, now, tick):
-    from index_swing_strategy import INDEX_TRIGGER, _quote_values
+def build_signal(symbol, side, candidate, five, one, quote, now, tick, category="index_options"):
+    from index_swing_strategy import INDEX_TRIGGER, _quote_values, premium_exchange
+    premium_exchange(symbol, category)
     price, stamp = _quote_values(quote, now)
     if not 0 < candidate["stop"] < price < candidate["target"]:
         raise IndicatorDataError("index_structure_stop_target_invalid")
@@ -249,7 +250,7 @@ def build_signal(symbol, side, candidate, five, one, quote, now, tick):
     route_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("ascii")).hexdigest()[:24]
     chart = _session(completed_candles(five, now, timeframe_seconds=300), now)
     # Keep only the sessions needed for these routes, not ten-session pattern history.
-    recent_five = five[-151:]
+    recent_five = five[-361:]
     current_one = _session(completed_candles(one, now + timedelta(seconds=60), timeframe_seconds=60), now)
     current_one = [bar for bar in current_one if bar["_timestamp_epoch"] <= stamp]
     normalized_five = completed_candles(recent_five, now + timedelta(seconds=300), timeframe_seconds=300)
@@ -257,7 +258,7 @@ def build_signal(symbol, side, candidate, five, one, quote, now, tick):
     evidence = {"five": _snapshot(normalized_five), "one": _snapshot(current_one), "tick": tick,
                 "candidate": candidate}
     return {
-        "symbol": symbol, "underlying": symbol, "category": "index_options",
+        "symbol": symbol, "underlying": symbol, "category": category,
         "signal": "CALL" if side == "CE" else "PUT", "option_type": side,
         "trigger": INDEX_TRIGGER, "index_swing": True, "alerts_only": True,
         "entry_policy": STRUCTURE_POLICY, "requested_stop_policy": CANDLE_STOP_POLICY,
@@ -299,13 +300,14 @@ def valid_structure_entry(metadata, now):
         evidence = metadata["structure_evidence"]
         five, one, tick = evidence["five"], evidence["one"], evidence["tick"]
         symbol = metadata.get("symbol", metadata.get("underlying"))
+        category = metadata.get("category", "index_options")
         if route == "compression_breakout":
             expected = compression_candidate(five, one, now)
         elif route == "bos_retest":
             expected = bos_candidate(five, one, now, tick, price, stamp, candidate["previous_observation"])
         elif route == "support_5m_recovery":
             from index_swing_strategy import IndexSwingStrategy
-            reference = IndexSwingStrategy().prepare(symbol, metadata["option_type"], [], five, now)
+            reference = IndexSwingStrategy().prepare(symbol, metadata["option_type"], [], five, now, category)
             expected = support_candidate(five, reference, now)
         else:
             zones = prepare_zones(five, now)
@@ -319,7 +321,7 @@ def valid_structure_entry(metadata, now):
             return False
         signal = build_signal(symbol, metadata["option_type"], candidate, five, one,
                               {"price": price, "bid": price, "ask": price, "trade_timestamp": stamp},
-                              now, tick)
+                              now, tick, category)
         return (
             metadata["structure_id"] == signal["structure_id"]
             and metadata["premium_zone"] == signal["premium_zone"]
@@ -331,9 +333,10 @@ def valid_structure_entry(metadata, now):
         return False
 
 
-def evaluate_structure(symbol, side, five, one, quote, now, tick):
-    from index_swing_strategy import INDEX_SYMBOLS, IndexSwingStrategy, _quote_values
-    if symbol not in INDEX_SYMBOLS or side not in ("CE", "PE"):
+def evaluate_structure(symbol, side, five, one, quote, now, tick, category="index_options"):
+    from index_swing_strategy import IndexSwingStrategy, _quote_values, premium_exchange
+    premium_exchange(symbol, category)
+    if side not in ("CE", "PE"):
         raise IndicatorDataError("index_unsupported")
     if tick is None or not math.isfinite(float(tick)) or float(tick) <= 0:
         raise IndicatorDataError("index_tick_missing")
@@ -347,7 +350,7 @@ def evaluate_structure(symbol, side, five, one, quote, now, tick):
         diagnostic = {"route": route, "result": "REJECTED"}
         try:
             if route == "support_5m_recovery":
-                reference = IndexSwingStrategy().prepare(symbol, side, [], five, now)
+                reference = IndexSwingStrategy().prepare(symbol, side, [], five, now, category)
                 candidate = support_candidate(five, reference, now)
             elif route == "compression_breakout":
                 candidate = compression_candidate(five, one, now)
@@ -367,7 +370,7 @@ def evaluate_structure(symbol, side, five, one, quote, now, tick):
                 if zone is None:
                     raise IndicatorDataError("index_zone_not_touched")
                 candidate = zone_candidate(zone, five, one, price, stamp, now, tick)
-            signal = build_signal(symbol, side, candidate, five, one, quote, now, tick)
+            signal = build_signal(symbol, side, candidate, five, one, quote, now, tick, category)
             if not valid_structure_entry(signal, now):
                 raise IndicatorDataError("index_structure_evidence_invalid")
             signals.append(signal)

@@ -1,12 +1,13 @@
 # Trading Logic Guide
 
-## Index premium-pullback trial
+## Premium-only options strategy
 
-`INDEX_SWING_STRATEGY_ENABLED=true` replaces the legacy entry strategy only for
-NIFTY, BANKNIFTY and SENSEX. The default remains `false`. Stocks, commodities
-and other indices retain their existing rules. These alerts never place broker
-or paper orders; keep `NIFTY_LIVE_ENABLED=false`, `AUTO_TRADING_ENABLED=false`,
-and `PRACTICE_MODE=true`.
+`INDEX_SWING_STRATEGY_ENABLED=true` enables the premium-only advisory routes for
+NIFTY, BANKNIFTY and SENSEX index options, configured NIFTY 50 stock options,
+and supported MCX commodity options. The default remains `false`. All use ATM
+contracts and retain their category's existing alert channel. These alerts
+never place broker or paper orders; keep `NIFTY_LIVE_ENABLED=false`,
+`AUTO_TRADING_ENABLED=false`, and `PRACTICE_MODE=true`.
 
 ### Independent premium-only entry routes
 
@@ -100,7 +101,9 @@ target/stop ordering and calendar/square-off admission.
 
 ### Completed bullish premium patterns
 
-Scan **1, 2, 3, 5, 10, 15, 30, 60 and 240 minutes** for each ATM CALL/PUT.
+Scan **2, 3, 5, 10, 15, 30 and 60 minutes** for index options, and **5, 10,
+15, 30, 60, 120, 240 minutes and 1 day** for stock and commodity options.
+Each timeframe is evaluated independently for each ATM CALL/PUT.
 A bullish PUT-premium pattern is a bought PUT candidate; bearish CALL-premium
 patterns are not converted into PUT signals, and no pattern places a sell order.
 The pattern route does **not** require a support retest, one-minute recovery,
@@ -130,12 +133,13 @@ end today and be no more than 75 seconds old. Current fresh premium must still
 be above the confirmed boundary and stop, and below target. Merely forming
 patterns, continuation above an old breakout, and bearish patterns do not alert.
 
-Build all timeframes from exact-contract one-minute OHLC, anchored at 09:15 IST.
-Require every constituent minute, reject partial buckets and never aggregate
-across the 15:30 close. Four-hour charts therefore contain one full
-09:15-13:15 candle per session; the remaining afternoon is not a second four-hour
-candle. Multi-session patterns are allowed only across consecutive trading
-sessions, with no missing full buckets; closures/holidays are not missing bars.
+Build intraday timeframes from exact-contract one-minute OHLC, anchored to each
+exchange session. Require every constituent minute, reject partial buckets and
+never aggregate across session boundaries or missing data. Daily stock and
+commodity patterns use completed exact-contract daily OHLC; during a live
+session, confirmation must be from the previous trading session. Multi-session
+intraday patterns are allowed only across consecutive trading sessions, with
+no missing full buckets; closures/holidays are not missing bars.
 At least seven full contiguous bars are needed even to evaluate a timeframe;
 some structures need more. Request up to ten prior trading sessions plus today,
 without synthesizing data predating a contract's listing. Long timeframes may
@@ -395,7 +399,10 @@ jump levels, and enabling filters can reduce signal count substantially.
   `SIGNAL_PNL_USE_OBSERVED_PREMIUM=true` to use observed exit premiums instead
   (default `false`). Each exit persists the choice so later env changes cannot
   change its report. Missing lot sizes are flagged and excluded from rupee totals.
-- Per-underlying rows and totals show opened, targets, stops, session-close exits
+- Per-strategy rows pool symbols only within their category/channel and show
+  entries, closed/open counts, targets, stops (including profitable trailing
+  stops), wins/losses/flat, win rate, average and weighted premium return, and
+  P&L. Per-underlying rows and totals show opened, targets, stops, session-close exits
   (profit/loss counts), win rate and net rupee P&L. Win rate is
   `(targets + profitable session exits) / all closed signals × 100`, or `N/A`
   with no closed signals; flat/no-quote session exits are not wins. Totals also

@@ -6,13 +6,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from atm_options_fetcher import ATMOptionsFetcher
+from exchange_calendar import is_trading_day, session_windows
 from index_swing_strategy import IST, IndexSwingStrategy, describe_setup, valid_entry
 from lifecycle_charts import LifecycleChartService
 from option_chart import ChartRenderError, render_premium_chart
 from premium_indicators import IndicatorDataError, completed_candles
 from premium_patterns import (
-    PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES, aggregate_minutes,
-    bullish_patterns, scan_patterns,
+    ASSET_PATTERN_TIMEFRAMES, INDEX_PATTERN_TIMEFRAMES, PATTERN_NAMES, PATTERN_POLICY,
+    PATTERN_TIMEFRAMES, aggregate_minutes, bullish_patterns, scan_patterns,
 )
 from screener_premium import PremiumScreener
 from signal_lifecycle import SignalLifecycle
@@ -28,13 +29,35 @@ SHAPES = {
 }
 
 
-def pattern_history(name="double_bottom", minutes=1):
+def pattern_history(name="double_bottom", minutes=1, exchange="NSE"):
     values = SHAPES[name]
-    per_day = 375 // minutes
+    if minutes == 1440:
+        days = []
+        day = datetime(2026, 11, 2, 9, 0 if exchange == "MCX" else 15, tzinfo=IST)
+        while len(days) < len(values):
+            if is_trading_day(exchange, day.date()):
+                days.append(day)
+            day -= timedelta(days=1)
+        days.reverse()
+        frames = []
+        for index, value in enumerate(values):
+            open_ = values[index - 1] if index == len(values) - 1 else value
+            frames.append({
+                "timestamp": days[index].timestamp(), "open": open_,
+                "high": max(open_, value) + .2, "low": min(open_, value) - .2, "close": value,
+            })
+        today = days[-1].date() + timedelta(days=1)
+        while not is_trading_day(exchange, today):
+            today += timedelta(days=1)
+        now = datetime.combine(today, datetime.strptime("10:00", "%H:%M").time(), tzinfo=IST)
+        quote = {"price": values[-1], "bid": values[-1] - .05, "ask": values[-1] + .05,
+                 "trade_timestamp": now.timestamp()}
+        return frames, frames, now, quote
+    per_day = (895 if exchange == "MCX" else 375) // minutes
     days = []
-    day = datetime(2026, 11, 3, 9, 15, tzinfo=IST)
+    day = datetime(2026, 11, 3, 9, 0 if exchange == "MCX" else 15, tzinfo=IST)
     while len(days) * per_day < len(values):
-        if day.weekday() < 5:
+        if is_trading_day(exchange, day.date()):
             days.append(day)
         day -= timedelta(days=1)
     days.reverse()
@@ -55,8 +78,56 @@ def pattern_history(name="double_bottom", minutes=1):
 
 
 @pytest.mark.parametrize("name", PATTERN_NAMES)
-@pytest.mark.parametrize("minutes", PATTERN_TIMEFRAMES)
-def test_six_confirmed_patterns_on_all_nine_timeframes(name, minutes):
+@pytest.mark.parametrize("minutes", ASSET_PATTERN_TIMEFRAMES)
+@pytest.mark.parametrize("symbol,category,exchange", [
+    ("TATASTEEL", "nifty50_stock_options", "NSE"),
+    ("GOLD", "commodity_options", "MCX"),
+])
+def test_patterns_apply_to_stock_and_commodity_premiums(name, minutes, symbol, category, exchange):
+    _, base, now, quote = pattern_history(name, minutes, exchange)
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        symbol, "PE", [] if minutes == 1440 else base, quote, now, category,
+        base if minutes == 1440 else None,
+    )
+    signal = next(s for s in signals if s["premium_pattern"]["name"] == name
+                  and s["premium_pattern"]["timeframe"] == minutes)
+    assert valid_entry(signal, now)
+    assert signal["category"] == category
+
+
+@pytest.mark.parametrize("day,opening,closing", [
+    ("2026-10-30", "09:00", "23:30"),
+    ("2026-11-02", "09:00", "23:55"),
+    ("2026-11-10", "17:00", "23:55"),
+    ("2026-01-01", "09:00", "17:00"),
+])
+def test_mcx_pattern_aggregation_respects_full_and_half_day_windows(day, opening, closing):
+    start = datetime.fromisoformat(day + "T" + opening).replace(tzinfo=IST)
+    end = datetime.fromisoformat(day + "T" + closing).replace(tzinfo=IST)
+    candles = [{"timestamp": (start + timedelta(minutes=i)).timestamp(),
+                "open": 100, "high": 101, "low": 99, "close": 100}
+               for i in range(-1, int((end - start).total_seconds() // 60) + 1)]
+    aggregated = aggregate_minutes(candles, 60, end + timedelta(minutes=2), "MCX")
+    assert len(aggregated) == int((end - start).total_seconds() // 3600)
+    assert aggregated[0]["timestamp"] == start.timestamp()
+    assert all(bar["timestamp"] + 3600 <= end.timestamp() for bar in aggregated)
+
+
+def test_mcx_patterns_include_evening_trading_not_just_equity_hours():
+    _, base, now, quote = pattern_history(minutes=5, exchange="MCX")
+    shift = timedelta(hours=10)
+    for candle in base:
+        candle["timestamp"] += shift.total_seconds()
+    now += shift
+    quote["trade_timestamp"] = now.timestamp()
+    signals, _ = IndexSwingStrategy().evaluate_patterns("GOLD", "CE", base, quote, now,
+                                                       "commodity_options")
+    assert signals and valid_entry(signals[0], now)
+
+
+@pytest.mark.parametrize("name", PATTERN_NAMES)
+@pytest.mark.parametrize("minutes", INDEX_PATTERN_TIMEFRAMES)
+def test_six_confirmed_patterns_on_all_index_timeframes(name, minutes):
     frames, base, now, _ = pattern_history(name, minutes)
     aggregated = aggregate_minutes(base, minutes, now)
     assert len(aggregated) == len(frames)
@@ -70,7 +141,7 @@ def test_six_confirmed_patterns_on_all_nine_timeframes(name, minutes):
 
 
 @pytest.mark.parametrize("side", ["CE", "PE"])
-@pytest.mark.parametrize("minutes", PATTERN_TIMEFRAMES)
+@pytest.mark.parametrize("minutes", INDEX_PATTERN_TIMEFRAMES)
 def test_pattern_entry_is_independent_of_support_recovery(side, minutes):
     _, base, now, quote = pattern_history(minutes=minutes)
     signals, diagnostics = IndexSwingStrategy().evaluate_patterns("NIFTY", side, base, quote, now)
@@ -86,28 +157,28 @@ def test_pattern_entry_is_independent_of_support_recovery(side, minutes):
 
 
 def test_only_completed_fresh_breakout_not_forming_or_continuation():
-    frames, _, now, _ = pattern_history()
-    completed = completed_candles(frames, now, timeframe_seconds=60)
-    assert bullish_patterns(completed, 1)
-    assert not bullish_patterns(completed[:-1], 1)
+    frames, _, now, _ = pattern_history(minutes=2)
+    completed = completed_candles(frames, now, timeframe_seconds=120)
+    assert bullish_patterns(completed, 2)
+    assert not bullish_patterns(completed[:-1], 2)
     forming = deepcopy(completed)
     forming[-1].update(close=59, high=61)
-    assert not bullish_patterns(forming, 1)
+    assert not bullish_patterns(forming, 2)
     continuing = completed + [{**completed[-1], "timestamp": now.timestamp(),
-                              "_timestamp_epoch": completed[-1]["_timestamp_epoch"] + 60}]
-    assert not bullish_patterns(continuing, 1)
+                              "_timestamp_epoch": completed[-1]["_timestamp_epoch"] + 120}]
+    assert not bullish_patterns(continuing, 2)
     stale, _ = scan_patterns(frames, now + timedelta(minutes=2))
     assert not stale
 
 
 @pytest.mark.parametrize("name", PATTERN_NAMES)
 def test_each_pattern_rejects_unconfirmed_and_bearish_closes(name):
-    frames, _, now, _ = pattern_history(name)
-    bars = completed_candles(frames, now, timeframe_seconds=60)
-    assert not any(item["name"] == name for item in bullish_patterns(bars[:-1], 1))
+    frames, _, now, _ = pattern_history(name, minutes=2)
+    bars = completed_candles(frames, now, timeframe_seconds=120)
+    assert not any(item["name"] == name for item in bullish_patterns(bars[:-1], 2))
     bars[-1]["open"] = bars[-1]["close"] + .1
     bars[-1]["high"] = max(bars[-1]["high"], bars[-1]["open"])
-    assert not bullish_patterns(bars, 1)
+    assert not bullish_patterns(bars, 2)
 
 
 def test_missing_full_bucket_cannot_manufacture_a_pattern():
@@ -130,7 +201,7 @@ def test_aggregation_never_uses_incomplete_tail_overnight_or_missing_minutes():
     assert len(aggregate_minutes(missing, 240, now)) == len(bars) - 1
     assert len(aggregate_minutes(base, 240, now - timedelta(seconds=6))) == len(bars) - 1
     _, short, short_now, _ = pattern_history()
-    _, diagnostics = scan_patterns(short, short_now)
+    _, diagnostics = scan_patterns(short, short_now, category="nifty50_stock_options")
     assert next(item for item in diagnostics if item["timeframe"] == 240)["status"] == "INSUFFICIENT_HISTORY"
 
 
@@ -146,7 +217,7 @@ def test_aggregation_never_uses_incomplete_tail_overnight_or_missing_minutes():
     lambda s: s.update(breakout_price=60),
 ])
 def test_pattern_durable_admission_rejects_tampered_evidence(mutation):
-    _, base, now, quote = pattern_history()
+    _, base, now, quote = pattern_history(minutes=2)
     signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "CE", base, quote, now)
     signal = signals[0]
     mutation(signal)
@@ -230,7 +301,7 @@ def test_extended_history_is_cached_separately_and_current_data_takes_precedence
     (lambda quote, now: quote.update(bid=40), "index_spread"),
 ])
 def test_pattern_route_retains_source_quote_safety(mutation, reason):
-    _, base, now, quote = pattern_history()
+    _, base, now, quote = pattern_history(minutes=2)
     mutation(quote, now)
     with pytest.raises(IndicatorDataError, match=reason):
         IndexSwingStrategy().evaluate_patterns("NIFTY", "CE", base, quote, now)
@@ -297,7 +368,7 @@ def test_support_alert_is_first_without_blocking_independent_pattern(tmp_path, m
     assert len(service.open_positions()) == len(policies)
 
 
-@pytest.mark.parametrize("minutes", PATTERN_TIMEFRAMES)
+@pytest.mark.parametrize("minutes", INDEX_PATTERN_TIMEFRAMES)
 def test_pattern_lifecycle_freezes_timeframe_and_keeps_execution_disabled(tmp_path, minutes):
     from runtime_services import QueueConsumerWorker
     _, base, now, quote = pattern_history(minutes=minutes)
@@ -332,7 +403,7 @@ def test_pattern_lifecycle_freezes_timeframe_and_keeps_execution_disabled(tmp_pa
 @pytest.mark.parametrize("name", PATTERN_NAMES)
 def test_all_pattern_geometry_is_drawn(name):
     from matplotlib.figure import Figure
-    frames, base, now, quote = pattern_history(name)
+    frames, base, now, quote = pattern_history(name, minutes=2)
     signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "CE", base, quote, now)
     signal = next(item for item in signals if item["premium_pattern"]["name"] == name)
     saved = []
@@ -344,7 +415,7 @@ def test_all_pattern_geometry_is_drawn(name):
 
     with patch.object(Figure, "savefig", capture):
         render_premium_chart(frames, {**signal, "event": "OPEN", "event_time": now.timestamp(),
-                                     "interval_minutes": 1, "stop": signal["stop_loss"]})
+                                     "interval_minutes": 2, "stop": signal["stop_loss"]})
     assert name.replace("_", " ") in saved[0].get_legend_handles_labels()[1]
     for line in signal["premium_pattern"]["lines"]:
         assert line["label"] in saved[0].get_legend_handles_labels()[1]
@@ -352,12 +423,12 @@ def test_all_pattern_geometry_is_drawn(name):
 
 def test_pattern_chart_draws_structure_boundaries_and_correct_timeframe(tmp_path):
     from matplotlib.figure import Figure
-    frames, base, now, quote = pattern_history(minutes=240)
+    frames, base, now, quote = pattern_history(minutes=60)
     signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "PE", base, quote, now)
-    signal = next(s for s in signals if s["timeframe"] == "240min")
+    signal = next(s for s in signals if s["timeframe"] == "60min")
     overlay = {
         **signal, "event": "OPEN", "event_time": now.timestamp(),
-        "stop": signal["stop_loss"], "interval_minutes": 240, "option_symbol": "NIFTY-PE",
+        "stop": signal["stop_loss"], "interval_minutes": 60, "option_symbol": "NIFTY-PE",
         "security_id": 101, "exchange_segment": "NSE_FNO", "instrument_type": "OPTIDX",
         "window": 80,
     }
@@ -373,14 +444,14 @@ def test_pattern_chart_draws_structure_boundaries_and_correct_timeframe(tmp_path
     assert png.startswith(b"\x89PNG")
     assert "double bottom" in saved[0].get_legend_handles_labels()[1]
     assert "Neckline / breakout" in saved[0].get_legend_handles_labels()[1]
-    assert "240min" in saved[0].get_title()
+    assert "60min" in saved[0].get_title()
     provider = MagicMock()
     service = LifecycleChartService(tmp_path / "charts.db", MagicMock(), provider)
     snapshot, error = service._fetch_snapshot(overlay)
     assert error is None and service._verify_snapshot(snapshot, overlay)
-    assert snapshot["request"]["interval_minutes"] == 240
+    assert snapshot["request"]["interval_minutes"] == 60
     provider.assert_not_called()
-    assert "240m" in service._caption(overlay)
+    assert "60m" in service._caption(overlay)
     overlay["interval_minutes"] = 5
     with pytest.raises(ChartRenderError, match="pattern_timeframe_mismatch"):
         service._fetch_snapshot(overlay)
@@ -428,3 +499,25 @@ def test_pattern_exit_chart_resamples_one_minute_contract_history(tmp_path):
     assert error is None and charts._verify_snapshot(snapshot, overlay)
     assert provider.call_args.args[-1] == 1
     assert [bar["close"] for bar in snapshot["candles"]] == [bar["close"] for bar in frames]
+
+
+def test_daily_pattern_exit_chart_uses_completed_daily_contract_candles(tmp_path):
+    daily, _, now, quote = pattern_history("double_bottom", 1440)
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        "TATASTEEL", "CE", [], quote, now, "nifty50_stock_options", daily,
+    )
+    signal = next(item for item in signals if item["timeframe"] == "1day")
+    overlay = {
+        **signal, "event": "STOP", "event_time": now.timestamp(), "interval_minutes": 1440,
+        "stop": signal["stop_loss"], "option_symbol": "TATASTEEL-CE",
+        "security_id": 101, "exchange_segment": "NSE_FNO", "instrument_type": "OPTSTK",
+    }
+    provider = MagicMock(return_value=daily)
+    charts = LifecycleChartService(tmp_path / "daily-charts.db", MagicMock(), provider,
+                                   clock=lambda: now.timestamp())
+    snapshot, error = charts._fetch_snapshot(overlay)
+    assert error is None and charts._verify_snapshot(snapshot, overlay)
+    assert provider.call_args.args[-1] == 1440
+    assert snapshot["request"]["interval_minutes"] == 1440
+    assert snapshot["candles"][-1]["end_timestamp"] < now.timestamp()
+    assert render_premium_chart(snapshot["candles"], overlay).startswith(b"\x89PNG")

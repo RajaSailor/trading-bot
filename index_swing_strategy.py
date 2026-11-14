@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 from exchange_calendar import previous_trading_day
 from premium_indicators import IndicatorDataError, completed_candles
 from premium_patterns import (
-    PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES, bullish_patterns, contiguous_pattern_bars, scan_patterns,
+    ASSET_PATTERN_TIMEFRAMES, INDEX_PATTERN_TIMEFRAMES, PATTERN_NAMES, PATTERN_POLICY,
+    bullish_patterns, completed_daily_candles, contiguous_daily_candles,
+    contiguous_pattern_bars, scan_patterns,
     swing_points as _swing_points,
 )
 from premium_structure import STRUCTURE_POLICY, valid_structure_entry
@@ -22,6 +24,22 @@ MAX_QUOTE_AGE = 10
 SUPPORT_TOLERANCE = .005
 RESISTANCE_TOLERANCE = .01
 PREMIUM_POLICY = "premium_support_recovery_v2"
+
+
+def premium_exchange(symbol, category="index_options"):
+    """Validate asset context without using spot direction as an entry filter."""
+    if category == "index_options" and symbol in INDEX_SYMBOLS:
+        return "BSE" if symbol == "SENSEX" else "NSE"
+    if category == "commodity_options" and isinstance(symbol, str) and symbol.strip():
+        return "MCX"
+    if category == "nifty50_stock_options" and isinstance(symbol, str) and symbol.strip():
+        return "NSE"
+    raise IndicatorDataError("premium_unsupported_asset")
+
+
+def metadata_exchange(metadata):
+    return premium_exchange(metadata.get("symbol", metadata.get("underlying")),
+                            metadata.get("category", "index_options"))
 
 
 def enabled():
@@ -271,7 +289,7 @@ def valid_entry(metadata, now):
             if metadata["setups"] == ["premium_average_reclaim"] and tested_low > support:
                 return False
             if previous_session:
-                exchange = "BSE" if metadata.get("symbol", metadata.get("underlying")) == "SENSEX" else "NSE"
+                exchange = metadata_exchange(metadata)
                 day = previous_trading_day(exchange, now.astimezone(IST).date())
                 if (metadata.get("previous_session_date") != day.isoformat()
                         or datetime.fromtimestamp(support_candle, IST).date() != day
@@ -310,24 +328,41 @@ def _valid_pattern_entry(metadata, now):
     try:
         pattern = metadata["premium_pattern"]
         minutes = pattern["timeframe"]
-        if minutes not in PATTERN_TIMEFRAMES or pattern["name"] not in PATTERN_NAMES:
+        category = metadata.get("category", "index_options")
+        symbol = metadata.get("symbol", metadata.get("underlying"))
+        exchange = metadata_exchange(metadata)
+        allowed = INDEX_PATTERN_TIMEFRAMES if category == "index_options" else ASSET_PATTERN_TIMEFRAMES
+        if minutes not in allowed or pattern["name"] not in PATTERN_NAMES:
             return False
-        bars = completed_candles(metadata["chart_candles"], now, timeframe_seconds=minutes * 60)
-        exchange = "BSE" if metadata.get("symbol", metadata.get("underlying")) == "SENSEX" else "NSE"
-        bars = contiguous_pattern_bars(bars, minutes, exchange)
+        if minutes == 1440:
+            bars = contiguous_daily_candles(
+                completed_daily_candles(metadata["chart_candles"], now, exchange), exchange,
+            )
+        else:
+            bars = completed_candles(metadata["chart_candles"], now, timeframe_seconds=minutes * 60)
+            bars = contiguous_pattern_bars(bars, minutes, exchange)
+        if not bars or bars[-1]["_timestamp_epoch"] != pattern["confirmed_start"]:
+            return False
         matches = bullish_patterns(bars, minutes)
         match = next((item for item in matches if item == pattern), None)
         price, stamp = float(metadata["breakout_price"]), float(metadata["breakout_timestamp"])
+        daily = minutes == 1440
+        confirmation_fresh = (
+            datetime.fromtimestamp(pattern["confirmed_start"], IST).date()
+            == previous_trading_day(exchange, now.date())
+            if daily else 0 <= now.timestamp() - pattern["confirmed_end"] <= 75
+        )
         return (
             match is not None
             and metadata.get("index_swing") is True and metadata.get("alerts_only") is True
             and metadata.get("trigger") == INDEX_TRIGGER
             and metadata.get("setups") == ["premium_chart_pattern"]
-            and metadata.get("timeframe") == f"{minutes}min"
+            and metadata.get("timeframe") == ("1day" if daily else f"{minutes}min")
             and math.isfinite(price) and math.isfinite(stamp)
             and 0 <= now.timestamp() - stamp <= MAX_QUOTE_AGE
-            and 0 <= now.timestamp() - pattern["confirmed_end"] <= 75
-            and datetime.fromtimestamp(pattern["confirmed_start"], IST).date() == now.date()
+            and confirmation_fresh
+            and (pattern["confirmed_end"] == bars[-1].get(
+                "_end_timestamp_epoch", bars[-1]["_timestamp_epoch"] + minutes * 60))
             and metadata["reference_high"] == pattern["boundary"]
             and metadata["reference_low"] == pattern["stop"]
             and metadata["target"] == pattern["target"]
@@ -339,9 +374,10 @@ def _valid_pattern_entry(metadata, now):
 
 
 class IndexSwingStrategy:
-    def prepare(self, symbol, side, spot_candles, premium_candles, now):
+    def prepare(self, symbol, side, spot_candles, premium_candles, now, category="index_options"):
+        exchange = premium_exchange(symbol, category)
         try:
-            reference = self._prepare_intraday(symbol, side, spot_candles, premium_candles, now)
+            reference = self._prepare_intraday(symbol, side, spot_candles, premium_candles, now, category)
         except IndicatorDataError as exc:
             if exc.reason not in {
                 "index_insufficient_history", "index_confirmation_stale",
@@ -351,7 +387,6 @@ class IndexSwingStrategy:
             reference = None
             intraday_error = exc
         bars = completed_candles(premium_candles, now, timeframe_seconds=300)
-        exchange = "BSE" if symbol == "SENSEX" else "NSE"
         day = previous_trading_day(exchange, now.astimezone(IST).date())
         prior = [bar for bar in bars
                  if datetime.fromtimestamp(bar["_timestamp_epoch"], IST).date() == day]
@@ -401,9 +436,10 @@ class IndexSwingStrategy:
             raise intraday_error
         return reference
 
-    def _prepare_intraday(self, symbol, side, spot_candles, premium_candles, now):
+    def _prepare_intraday(self, symbol, side, spot_candles, premium_candles, now, category="index_options"):
         # spot_candles is retained only for call-site compatibility, never evaluated.
-        if symbol not in INDEX_SYMBOLS or side not in ("CE", "PE"):
+        premium_exchange(symbol, category)
+        if side not in ("CE", "PE"):
             raise IndicatorDataError("index_unsupported")
         premium = completed_candles(premium_candles, now, timeframe_seconds=300)
         session = _session(premium, now)
@@ -551,10 +587,12 @@ class IndexSwingStrategy:
             raise IndicatorDataError("index_entry_risk_or_timing")
         return signal
 
-    def evaluate_patterns(self, symbol, side, candles, quote, now):
-        if symbol not in INDEX_SYMBOLS or side not in ("CE", "PE"):
+    def evaluate_patterns(self, symbol, side, candles, quote, now, category="index_options",
+                          daily_candles=None):
+        exchange = premium_exchange(symbol, category)
+        if side not in ("CE", "PE"):
             raise IndicatorDataError("index_unsupported")
-        hits, diagnostics = scan_patterns(candles, now, "BSE" if symbol == "SENSEX" else "NSE")
+        hits, diagnostics = scan_patterns(candles, now, exchange, category, daily_candles)
         if not hits:
             return [], diagnostics
         price, stamp = _quote_values(quote, now)
@@ -567,11 +605,12 @@ class IndexSwingStrategy:
                         item["entry_rejection"] = "index_pattern_price_outside_entry"
                 continue
             signal = {
-                "symbol": symbol, "underlying": symbol, "category": "index_options",
+                "symbol": symbol, "underlying": symbol, "category": category,
                 "signal": "CALL" if side == "CE" else "PUT", "option_type": side,
                 "trigger": INDEX_TRIGGER, "index_swing": True, "alerts_only": True,
                 "entry_policy": PATTERN_POLICY, "setups": ["premium_chart_pattern"],
-                "timeframe": f"{pattern['timeframe']}min",
+                "timeframe": ("1day" if pattern["timeframe"] == 1440
+                              else f"{pattern['timeframe']}min"),
                 "reference_timestamp": pattern["confirmed_start"],
                 "reference_high": pattern["boundary"], "reference_low": pattern["stop"],
                 "confirmation_end": pattern["confirmed_end"],
@@ -607,9 +646,10 @@ def describe_setup(metadata):
         )
     if metadata.get("entry_policy") == PATTERN_POLICY:
         pattern = metadata["premium_pattern"]
+        timeframe = "1day" if pattern["timeframe"] == 1440 else f"{pattern['timeframe']}m"
         return (
             f"Setup: Confirmed {pattern['name'].replace('_', ' ')} | "
-            f"{pattern['timeframe']}m premium chart\n"
+            f"{timeframe} premium chart\n"
             f"Completed close above breakout boundary {pattern['boundary']:.2f}.\n"
             "Independent pattern entry; support recovery is not required.\n"
             "Target: pattern measured move; stop: pattern invalidation low.\n"
