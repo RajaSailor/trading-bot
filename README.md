@@ -20,30 +20,30 @@ from the immediately previous trading session of the **same contract**, followed
 by a completed five-minute close above the previous five-minute candle high
 at support. Repeated-support/W recovery and average-pullback support are alternatives.
 One confirmed prior-session recovery is sufficient; a second retest is optional,
-not an extra entry gate.
+not an extra entry gate. The support test band is +/-10%.
 
 Independent alternatives also include **bullish five-minute FVG/OB retests**,
 which alert immediately on a fresh zone touch without waiting for a candle
 close, and **compression breakouts**: at least two completed five-minute candles
-inside a range no wider than 10% of its low, followed by a completed one-minute
+inside a range no wider than 15% of its low, followed by a completed one-minute
 close above the frozen range high. A **BOS/retest** route requires a completed
 five-minute break above a lower high, a completed rejection candle at that
-level, then a fresh live crossing back above it. None requires spot confirmation.
+level (within +/-10%), then a fresh live crossing back above it. None requires
+spot confirmation.
 
 An **independent** alternative is a completed bullish premium chart pattern:
 double/triple bottom, inverse head-and-shoulders, ascending triangle, falling
-wedge or bullish flag. Check **2/3/5/10/15/30/60-minute** index charts and
-**5/10/15/30/60/120/240-minute plus 1-day** stock/commodity charts; no support
-recovery must also agree. Each alert identifies its pattern and timeframe and
-draws the structure and breakout boundary on that timeframe's premium chart.
-Forming patterns and bearish-premium patterns do not trigger buys.
+wedge, bullish flag, morning star, bullish engulfing, hammer, piercing line or
+three white soldiers. Check **5/10/15/30-minute, 1-hour and 4-hour** premium
+charts for index, stock and commodity options; no support recovery must also
+agree. Each alert identifies its pattern and timeframe and draws the evidence
+on the premium chart. Forming patterns and bearish-premium patterns do not trigger buys.
 No spot direction, opening range, spot pattern or volume filter must agree.
 Spot is used only to select the listed ATM strike; same-day expiry is skipped.
 
-Initial stops are the support/range low, pattern invalidation low, or the
-entry candle's **observed** low for FVG/OB/BOS. Targets stay fixed: known premium
-resistance for recovery, pre-decline swing high for compression, previous
-confirmed high plus one contract tick for FVG/OB/BOS, or the pattern measured move.
+All new routes use the immediately preceding completed five-minute candle low
+as the initial stop. The target is the nearest confirmed premium swing high
+strictly more than 1R above entry; skip the signal if none qualifies.
 **New premium-only alerts trail upward to each fully post-entry completed five-minute
 candle low**, replacing the 20%/5% ladder. Stops never move down; old open signals
 retain their frozen stop policy. Live touches/crossings are observed prices,
@@ -70,10 +70,12 @@ These are **alerts only**, not automated orders. This flag suppresses NIFTY
 automatic entry activation, and the queue and live route independently reject
 execution of the new signals. Keep `NIFTY_LIVE_ENABLED=false`,
 `AUTO_TRADING_ENABLED=false`, and `PRACTICE_MODE=true` during evaluation.
-Existing databases, charts, category-channel notifications and daily reports
-remain in use. Daily reports include strategy-level combined results within
-each category channel as well as the existing per-underlying details. Do not
-remove broker safety/recovery code or reset state.
+Existing databases, charts and category-channel notifications remain in use.
+After each category's session square-off, daily reports show strategy totals
+and symbol-by-strategy results, including entry/exit counts, P&L and five-minute
+trailing-stop moves. A restart-safe monthly report is sent after the category's
+last trading session of each month with the same breakdown. Do not remove broker
+safety/recovery code or reset state.
 Gap-up, gap-down and flat sessions use the same premium-only entry rules. All three
 categories' public signal/lifecycle messages and report parts include a shared
 educational/risk notice; a disclaimer is not a guarantee of SEBI compliance.

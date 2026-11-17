@@ -11,11 +11,13 @@ from exchange_calendar import previous_trading_day
 from premium_indicators import IndicatorDataError, completed_candles
 from premium_patterns import (
     ASSET_PATTERN_TIMEFRAMES, INDEX_PATTERN_TIMEFRAMES, PATTERN_NAMES, PATTERN_POLICY,
-    bullish_patterns, completed_daily_candles, contiguous_daily_candles,
+    aggregate_minutes, bullish_patterns, completed_daily_candles, contiguous_daily_candles,
     contiguous_pattern_bars, scan_patterns,
     swing_points as _swing_points,
 )
-from premium_structure import STRUCTURE_POLICY, valid_structure_entry
+from premium_structure import (
+    STRUCTURE_POLICY, SUPPORT_RETEST_TOLERANCE, _entry_risk_levels, valid_structure_entry,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 INDEX_SYMBOLS = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
@@ -40,6 +42,10 @@ def premium_exchange(symbol, category="index_options"):
 def metadata_exchange(metadata):
     return premium_exchange(metadata.get("symbol", metadata.get("underlying")),
                             metadata.get("category", "index_options"))
+
+
+def _display_pattern_timeframe(minutes):
+    return {60: "1h", 240: "4h"}.get(minutes, f"{minutes}m")
 
 
 def enabled():
@@ -275,7 +281,7 @@ def valid_entry(metadata, now):
                 and stop == confirmation_low
                 and (previous_session or 0 <= now.timestamp() - five_end <= 375)
                 and previous_start + 60 == one_start
-                and tested_low <= support * (1 + SUPPORT_TOLERANCE)
+                and tested_low <= support * (1 + SUPPORT_RETEST_TOLERANCE)
                 and trigger_close > support
                 and metadata.get("setups") in (
                     ["premium_support_retest"], ["premium_average_reclaim"],
@@ -284,7 +290,7 @@ def valid_entry(metadata, now):
             ):
                 return False
             if (metadata["setups"] != ["premium_average_reclaim"]
-                    and tested_low < support * (1 - SUPPORT_TOLERANCE)):
+                    and tested_low < support * (1 - SUPPORT_RETEST_TOLERANCE)):
                 return False
             if metadata["setups"] == ["premium_average_reclaim"] and tested_low > support:
                 return False
@@ -343,6 +349,11 @@ def _valid_pattern_entry(metadata, now):
             bars = contiguous_pattern_bars(bars, minutes, exchange)
         if not bars or bars[-1]["_timestamp_epoch"] != pattern["confirmed_start"]:
             return False
+        five_bars = completed_candles(metadata["entry_candles"], now, timeframe_seconds=300)
+        stop, target = _entry_risk_levels(
+            five_bars, float(metadata["breakout_price"]),
+            float(metadata["breakout_timestamp"]), now, float(metadata["tick_size"]),
+        )
         matches = bullish_patterns(bars, minutes)
         match = next((item for item in matches if item == pattern), None)
         price, stamp = float(metadata["breakout_price"]), float(metadata["breakout_timestamp"])
@@ -364,9 +375,9 @@ def _valid_pattern_entry(metadata, now):
             and (pattern["confirmed_end"] == bars[-1].get(
                 "_end_timestamp_epoch", bars[-1]["_timestamp_epoch"] + minutes * 60))
             and metadata["reference_high"] == pattern["boundary"]
-            and metadata["reference_low"] == pattern["stop"]
-            and metadata["target"] == pattern["target"]
-            and 0 < pattern["stop"] < price < pattern["target"]
+            and metadata["reference_low"] == stop == metadata["initial_pattern_stop"]
+            and metadata["target"] == target == metadata["risk_target"]
+            and stop < price < target
             and price > pattern["boundary"]
         )
     except (KeyError, TypeError, ValueError, OverflowError, IndicatorDataError):
@@ -588,7 +599,7 @@ class IndexSwingStrategy:
         return signal
 
     def evaluate_patterns(self, symbol, side, candles, quote, now, category="index_options",
-                          daily_candles=None):
+                          daily_candles=None, five_candles=None, tick=.05):
         exchange = premium_exchange(symbol, category)
         if side not in ("CE", "PE"):
             raise IndicatorDataError("index_unsupported")
@@ -596,10 +607,20 @@ class IndexSwingStrategy:
         if not hits:
             return [], diagnostics
         price, stamp = _quote_values(quote, now)
+        five_bars = (completed_candles(five_candles, now, timeframe_seconds=300)
+                     if five_candles else aggregate_minutes(candles, 5, now, exchange))
+        risk_candles = five_bars[-80:]
         signals = []
         for hit in hits:
             pattern = hit["pattern"]
-            if not max(pattern["boundary"], pattern["stop"]) < price < pattern["target"]:
+            try:
+                stop, target = _entry_risk_levels(risk_candles, price, stamp, now, tick)
+            except IndicatorDataError as exc:
+                for item in diagnostics:
+                    if item["timeframe"] == pattern["timeframe"]:
+                        item["entry_rejection"] = exc.reason
+                continue
+            if not pattern["boundary"] < price < target:
                 for item in diagnostics:
                     if item["timeframe"] == pattern["timeframe"]:
                         item["entry_rejection"] = "index_pattern_price_outside_entry"
@@ -612,14 +633,18 @@ class IndexSwingStrategy:
                 "timeframe": ("1day" if pattern["timeframe"] == 1440
                               else f"{pattern['timeframe']}min"),
                 "reference_timestamp": pattern["confirmed_start"],
-                "reference_high": pattern["boundary"], "reference_low": pattern["stop"],
+                "reference_high": pattern["boundary"], "reference_low": stop,
                 "confirmation_end": pattern["confirmed_end"],
                 "breakout_timestamp": stamp, "first_crossing_timestamp": stamp,
                 "breakout_price": price, "entry": price, "entry_price": price,
-                "stop_loss": pattern["stop"], "target": pattern["target"],
-                "targets": [pattern["target"]], "risk_points": price - pattern["stop"],
+                "stop_loss": stop, "target": target,
+                "targets": [target], "risk_points": price - stop,
+                "initial_pattern_stop": stop, "risk_target": target, "tick_size": tick,
                 "strike_band": "ATM", "detected_at": now.isoformat(),
                 "premium_pattern": pattern, "chart_candles": hit["chart_candles"],
+                "entry_candles": [{key: bar[key] for key in
+                                   ("timestamp", "open", "high", "low", "close")}
+                                  for bar in risk_candles],
             }
             if not valid_entry(signal, now):
                 raise IndicatorDataError("index_pattern_evidence_invalid")
@@ -646,7 +671,17 @@ def describe_setup(metadata):
         )
     if metadata.get("entry_policy") == PATTERN_POLICY:
         pattern = metadata["premium_pattern"]
-        timeframe = "1day" if pattern["timeframe"] == 1440 else f"{pattern['timeframe']}m"
+        timeframe = _display_pattern_timeframe(pattern["timeframe"])
+        if pattern["name"] in {
+            "morning_star", "bullish_engulfing", "hammer", "piercing_line", "three_white_soldiers",
+        }:
+            return (
+                f"Setup: Bullish {pattern['name'].replace('_', ' ')} | "
+                f"{timeframe} premium chart\n"
+                "Completed bullish candle formation; entry quote remains above its close.\n"
+                "Initial stop: previous completed 5m low; target: nearest confirmed swing high "
+                "with reward/risk greater than 1:1."
+            )
         return (
             f"Setup: Confirmed {pattern['name'].replace('_', ' ')} | "
             f"{timeframe} premium chart\n"

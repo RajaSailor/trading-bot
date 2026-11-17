@@ -11,12 +11,16 @@ from exchange_calendar import previous_trading_day, session_windows
 from premium_indicators import completed_candles
 
 IST = ZoneInfo("Asia/Kolkata")
-INDEX_PATTERN_TIMEFRAMES = (2, 3, 5, 10, 15, 30, 60)
-ASSET_PATTERN_TIMEFRAMES = (5, 10, 15, 30, 60, 120, 240, 1440)
+INDEX_PATTERN_TIMEFRAMES = (5, 10, 15, 30, 60, 240)
+ASSET_PATTERN_TIMEFRAMES = INDEX_PATTERN_TIMEFRAMES
 PATTERN_TIMEFRAMES = tuple(sorted(set(INDEX_PATTERN_TIMEFRAMES + ASSET_PATTERN_TIMEFRAMES)))
 PATTERN_NAMES = (
     "double_bottom", "triple_bottom", "inverse_head_and_shoulders",
-    "ascending_triangle", "falling_wedge", "bullish_flag",
+    "ascending_triangle", "falling_wedge", "bullish_flag", "morning_star",
+    "bullish_engulfing", "hammer", "piercing_line", "three_white_soldiers",
+)
+CANDLESTICK_PATTERN_NAMES = (
+    "morning_star", "bullish_engulfing", "hammer", "piercing_line", "three_white_soldiers",
 )
 PATTERN_POLICY = "premium_pattern_breakout_v1"
 PATTERN_LOOKBACK_SESSIONS = 10
@@ -151,6 +155,91 @@ def _near(values, tolerance=.005):
     return max(values) - min(values) <= max(values) * tolerance
 
 
+def _bullish_candlesticks(bars, minutes):
+    if len(bars) < 3:
+        return []
+
+    def body(bar):
+        return abs(bar["close"] - bar["open"])
+
+    def candle(name, count):
+        group = bars[-count:]
+        last = group[-1]
+        boundary = last["close"]
+        stop = min(bar["low"] for bar in group)
+        if boundary <= stop:
+            return None
+        points = [
+            {"timestamp": bar["_timestamp_epoch"], "price": bar["close"],
+             "label": f"{name.replace('_', ' ').title()} candle {index + 1}"}
+            for index, bar in enumerate(group)
+        ]
+        identity = json.dumps([name, minutes, points], sort_keys=True)
+        return {
+            "name": name, "timeframe": minutes, "direction": "bullish_premium",
+            "boundary": boundary, "stop": stop, "target": boundary + (boundary - stop),
+            "points": points, "lines": [{
+                "label": "Pattern close",
+                "points": [{"timestamp": last["_timestamp_epoch"], "price": boundary},
+                           {"timestamp": last["_timestamp_epoch"] + minutes * 60,
+                            "price": boundary}],
+            }],
+            "confirmed_start": last["_timestamp_epoch"],
+            "confirmed_end": last.get("_end_timestamp_epoch",
+                                      last["_timestamp_epoch"] + minutes * 60),
+            "pattern_id": hashlib.sha256(identity.encode("ascii")).hexdigest()[:24],
+        }
+
+    found = []
+    first, middle, last = bars[-3:]
+    first_body = body(first)
+    middle_body = body(middle)
+    last_body = body(last)
+    first_range = max(first["high"] - first["low"], 1e-12)
+    middle_range = max(middle["high"] - middle["low"], 1e-12)
+    last_range = max(last["high"] - last["low"], 1e-12)
+    morning_star = (
+        first["close"] < first["open"] and first_body >= first_range * .5
+        and middle_body <= first_body * .35
+        and last["close"] > last["open"] and last_body >= last_range * .4
+        and last["close"] > (first["open"] + first["close"]) / 2
+    )
+    if morning_star and (signal := candle("morning_star", 3)):
+        found.append(signal)
+
+    previous, current = bars[-2:]
+    if (previous["close"] < previous["open"] and current["close"] > current["open"]
+            and current["open"] <= previous["close"]
+            and current["close"] >= previous["open"]):
+        if signal := candle("bullish_engulfing", 2):
+            found.append(signal)
+    lower_shadow = min(current["open"], current["close"]) - current["low"]
+    upper_shadow = current["high"] - max(current["open"], current["close"])
+    current_range = max(current["high"] - current["low"], 1e-12)
+    if (current["close"] > current["open"] and body(current) > 0
+            and lower_shadow >= 2 * body(current)
+            and upper_shadow <= body(current) * .4
+            and body(current) <= current_range * .35
+            and current["close"] > previous["close"]):
+        if signal := candle("hammer", 1):
+            found.append(signal)
+    midpoint = (previous["open"] + previous["close"]) / 2
+    if (previous["close"] < previous["open"] and current["close"] > current["open"]
+            and current["open"] < previous["close"]
+            and midpoint < current["close"] < previous["open"]):
+        if signal := candle("piercing_line", 2):
+            found.append(signal)
+    soldiers = bars[-3:]
+    if (all(bar["close"] > bar["open"] for bar in soldiers)
+            and soldiers[0]["close"] < soldiers[1]["close"] < soldiers[2]["close"]
+            and soldiers[1]["open"] <= soldiers[0]["close"]
+            and soldiers[2]["open"] <= soldiers[1]["close"]
+            and all(bar["high"] - bar["close"] <= body(bar) * .3 for bar in soldiers)):
+        if signal := candle("three_white_soldiers", 3):
+            found.append(signal)
+    return found
+
+
 def bullish_patterns(bars, minutes):
     """Confirm a first green close through a previously observable boundary."""
     bars = bars[-PATTERN_WINDOW:]
@@ -278,6 +367,7 @@ def bullish_patterns(bars, minutes):
                     and min(p[2] for p in lows) >= highs[0][2] - pole * .5):
                 add("bullish_flag", six, upper, lows[-1][2], pole, lines,
                     [(pole_index, "Pole", bars[pole_index]["low"])])
+    found.extend(_bullish_candlesticks(bars, minutes))
     return found
 
 

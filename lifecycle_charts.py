@@ -233,7 +233,9 @@ class LifecycleChartService:
             minutes = pattern["timeframe"]
             allowed = (INDEX_PATTERN_TIMEFRAMES if overlay.get("category") == "index_options"
                        else ASSET_PATTERN_TIMEFRAMES)
-            if (minutes not in PATTERN_TIMEFRAMES or minutes not in allowed
+            legacy_daily = minutes == 1440 and overlay.get("category") != "index_options"
+            if (minutes not in PATTERN_TIMEFRAMES and not legacy_daily or
+                    minutes not in allowed and not legacy_daily
                     or overlay.get("interval_minutes") != minutes):
                 raise ChartRenderError("pattern_timeframe_mismatch")
             return minutes

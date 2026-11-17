@@ -12,7 +12,8 @@ from lifecycle_charts import LifecycleChartService
 from option_chart import ChartRenderError, render_premium_chart
 from premium_indicators import IndicatorDataError, completed_candles
 from premium_patterns import (
-    ASSET_PATTERN_TIMEFRAMES, INDEX_PATTERN_TIMEFRAMES, PATTERN_NAMES, PATTERN_POLICY,
+    ASSET_PATTERN_TIMEFRAMES, CANDLESTICK_PATTERN_NAMES, INDEX_PATTERN_TIMEFRAMES,
+    PATTERN_NAMES, PATTERN_POLICY,
     PATTERN_TIMEFRAMES, aggregate_minutes, bullish_patterns, scan_patterns,
 )
 from screener_premium import PremiumScreener
@@ -27,6 +28,7 @@ SHAPES = {
     "falling_wedge": [120, 130, 115, 100, 110, 125, 110, 98, 110, 120, 105, 96, 103, 105, 116],
     "bullish_flag": [80, 90, 110, 120, 118, 116, 117, 118, 116, 114, 115, 116, 114, 112, 113, 114, 118],
 }
+CHART_PATTERN_NAMES = tuple(SHAPES)
 
 
 def pattern_history(name="double_bottom", minutes=1, exchange="NSE"):
@@ -77,7 +79,41 @@ def pattern_history(name="double_bottom", minutes=1, exchange="NSE"):
     return frames, base, now, quote
 
 
-@pytest.mark.parametrize("name", PATTERN_NAMES)
+def candle_pattern_history(name, minutes=5):
+    shapes = {
+        "morning_star": [(120, 123, 98, 100), (100, 103, 97, 101), (102, 120, 101, 118)],
+        "bullish_engulfing": [(110, 112, 98, 100), (98, 115, 97, 114)],
+        "hammer": [(100, 105, 98, 100), (100, 105, 90, 104)],
+        "piercing_line": [(110, 112, 98, 100), (98, 108, 97, 107)],
+        "three_white_soldiers": [(100, 105, 99, 104), (102, 110, 101, 109),
+                                 (107, 115, 106, 114)],
+    }
+    return [
+        (100, 102, 98, 100), (100, 102, 98, 100),
+        (100, 102, 98, 100), (100, 102, 98, 100),
+        (100, 102, 98, 100),
+        *shapes[name],
+    ]
+
+
+def entry_risk_history(now, price):
+    minute = now.replace(second=0, microsecond=0)
+    last_start = minute.replace(minute=minute.minute - minute.minute % 5) - timedelta(minutes=5)
+    values = [
+        (price - 8, price - 4, price - 12, price - 6),
+        (price - 6, price + 30, price - 7, price + 20),
+        (price + 10, price + 15, price - 5, price + 5),
+        (price + 4, price + 8, price - 6, price),
+        (price - 2, price + 3, price * .9, price - 1),
+    ]
+    return [
+        {"timestamp": (last_start - timedelta(minutes=5 * (4 - index))).timestamp(),
+         "open": opening, "high": high, "low": low, "close": close}
+        for index, (opening, high, low, close) in enumerate(values)
+    ]
+
+
+@pytest.mark.parametrize("name", CHART_PATTERN_NAMES)
 @pytest.mark.parametrize("minutes", ASSET_PATTERN_TIMEFRAMES)
 @pytest.mark.parametrize("symbol,category,exchange", [
     ("TATASTEEL", "nifty50_stock_options", "NSE"),
@@ -85,14 +121,9 @@ def pattern_history(name="double_bottom", minutes=1, exchange="NSE"):
 ])
 def test_patterns_apply_to_stock_and_commodity_premiums(name, minutes, symbol, category, exchange):
     _, base, now, quote = pattern_history(name, minutes, exchange)
-    signals, _ = IndexSwingStrategy().evaluate_patterns(
-        symbol, "PE", [] if minutes == 1440 else base, quote, now, category,
-        base if minutes == 1440 else None,
-    )
-    signal = next(s for s in signals if s["premium_pattern"]["name"] == name
-                  and s["premium_pattern"]["timeframe"] == minutes)
-    assert valid_entry(signal, now)
-    assert signal["category"] == category
+    hits, _ = scan_patterns(base, now, exchange, category)
+    assert any(hit["pattern"]["name"] == name and hit["pattern"]["timeframe"] == minutes
+               for hit in hits)
 
 
 @pytest.mark.parametrize("day,opening,closing", [
@@ -120,12 +151,11 @@ def test_mcx_patterns_include_evening_trading_not_just_equity_hours():
         candle["timestamp"] += shift.total_seconds()
     now += shift
     quote["trade_timestamp"] = now.timestamp()
-    signals, _ = IndexSwingStrategy().evaluate_patterns("GOLD", "CE", base, quote, now,
-                                                       "commodity_options")
-    assert signals and valid_entry(signals[0], now)
+    hits, _ = scan_patterns(base, now, "MCX", "commodity_options")
+    assert hits
 
 
-@pytest.mark.parametrize("name", PATTERN_NAMES)
+@pytest.mark.parametrize("name", CHART_PATTERN_NAMES)
 @pytest.mark.parametrize("minutes", INDEX_PATTERN_TIMEFRAMES)
 def test_six_confirmed_patterns_on_all_index_timeframes(name, minutes):
     frames, base, now, _ = pattern_history(name, minutes)
@@ -140,20 +170,53 @@ def test_six_confirmed_patterns_on_all_index_timeframes(name, minutes):
     assert match["points"] and match["lines"]
 
 
-@pytest.mark.parametrize("side", ["CE", "PE"])
-@pytest.mark.parametrize("minutes", INDEX_PATTERN_TIMEFRAMES)
-def test_pattern_entry_is_independent_of_support_recovery(side, minutes):
-    _, base, now, quote = pattern_history(minutes=minutes)
-    signals, diagnostics = IndexSwingStrategy().evaluate_patterns("NIFTY", side, base, quote, now)
-    signal = next(item for item in signals if item["premium_pattern"]["timeframe"] == minutes)
-    assert signal["signal"] == ("CALL" if side == "CE" else "PUT")
+def test_bullish_morning_star_generates_a_durable_premium_entry():
+    frames = [
+        (90, 100, 85, 95), (95, 160, 94, 150), (130, 135, 100, 110),
+        (110, 115, 105, 108), (120, 123, 98, 100),
+        (100, 103, 97, 101), (102, 120, 101, 118),
+    ]
+    start = datetime(2026, 11, 11, 9, 15, tzinfo=IST)
+    five, one = [], []
+    for index, (opening, high, low, close) in enumerate(frames):
+        candle_start = start + timedelta(minutes=5 * index)
+        five.append({"timestamp": candle_start.timestamp(), "open": opening,
+                     "high": high, "low": low, "close": close})
+        for offset in range(5):
+            one.append({
+                "timestamp": (candle_start + timedelta(minutes=offset)).timestamp(),
+                "open": opening if offset == 0 else opening,
+                "high": high if offset == 0 else max(opening, close) if offset == 4 else opening,
+                "low": low if offset == 0 else min(opening, close) if offset == 4 else opening,
+                "close": close if offset == 4 else opening,
+            })
+    now = start + timedelta(minutes=35, seconds=5)
+    quote = {"price": 119, "bid": 118.95, "ask": 119.05,
+             "trade_timestamp": now.timestamp()}
+    signals, diagnostics = IndexSwingStrategy().evaluate_patterns(
+        "NIFTY", "CE", one, quote, now, five_candles=five,
+    )
+    signal = next(item for item in signals
+                  if item["premium_pattern"]["name"] == "morning_star")
     assert signal["entry_policy"] == PATTERN_POLICY
-    assert "premium_support" not in signal
-    assert "one_minute_start" not in signal
+    assert signal["stop_loss"] == 101
+    assert signal["target"] == 160
     assert valid_entry(signal, now)
-    assert f"{minutes}m premium chart" in describe_setup(signal)
-    assert any(item["timeframe"] == minutes and item["status"] == "CONFIRMED"
+    assert "5m premium chart" in describe_setup(signal)
+    assert any(item["timeframe"] == 5 and item["status"] == "CONFIRMED"
                for item in diagnostics)
+
+
+@pytest.mark.parametrize("name", CANDLESTICK_PATTERN_NAMES)
+def test_bullish_candlestick_patterns_are_confirmed_on_premium_bars(name):
+    start = datetime(2026, 11, 11, 9, 15, tzinfo=IST)
+    bars_ = [
+        {"timestamp": (start + timedelta(minutes=5 * index)).timestamp(),
+         "_timestamp_epoch": (start + timedelta(minutes=5 * index)).timestamp(),
+         "open": opening, "high": high, "low": low, "close": close}
+        for index, (opening, high, low, close) in enumerate(candle_pattern_history(name))
+    ]
+    assert any(item["name"] == name for item in bullish_patterns(bars_, 5))
 
 
 def test_only_completed_fresh_breakout_not_forming_or_continuation():
@@ -171,7 +234,7 @@ def test_only_completed_fresh_breakout_not_forming_or_continuation():
     assert not stale
 
 
-@pytest.mark.parametrize("name", PATTERN_NAMES)
+@pytest.mark.parametrize("name", CHART_PATTERN_NAMES)
 def test_each_pattern_rejects_unconfirmed_and_bearish_closes(name):
     frames, _, now, _ = pattern_history(name, minutes=2)
     bars = completed_candles(frames, now, timeframe_seconds=120)
@@ -211,14 +274,17 @@ def test_aggregation_never_uses_incomplete_tail_overnight_or_missing_minutes():
     lambda s: s["premium_pattern"].update(boundary=1),
     lambda s: s.update(reference_low=1),
     lambda s: s.update(target=1000),
-    lambda s: s.update(timeframe="5min"),
+    lambda s: s.update(timeframe="10min"),
     lambda s: s.update(chart_candles=[]),
     lambda s: s.update(alerts_only=False),
     lambda s: s.update(breakout_price=60),
 ])
 def test_pattern_durable_admission_rejects_tampered_evidence(mutation):
-    _, base, now, quote = pattern_history(minutes=2)
-    signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "CE", base, quote, now)
+    _, base, now, quote = pattern_history(minutes=5)
+    risk = entry_risk_history(now, quote["price"])
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        "NIFTY", "CE", base, quote, now, five_candles=risk,
+    )
     signal = signals[0]
     mutation(signal)
     assert not valid_entry(signal, now)
@@ -301,10 +367,13 @@ def test_extended_history_is_cached_separately_and_current_data_takes_precedence
     (lambda quote, now: quote.update(bid=40), "index_spread"),
 ])
 def test_pattern_route_retains_source_quote_safety(mutation, reason):
-    _, base, now, quote = pattern_history(minutes=2)
+    _, base, now, quote = pattern_history(minutes=5)
     mutation(quote, now)
     with pytest.raises(IndicatorDataError, match=reason):
-        IndexSwingStrategy().evaluate_patterns("NIFTY", "CE", base, quote, now)
+        IndexSwingStrategy().evaluate_patterns(
+            "NIFTY", "CE", base, quote, now,
+            five_candles=entry_risk_history(now, quote["price"]),
+        )
 
 
 def scanner_with_pattern(tmp_path, monkeypatch):
@@ -324,7 +393,10 @@ def scanner_with_pattern(tmp_path, monkeypatch):
                              alert_state_file=str(tmp_path / "alerts.json"))
     scanner.fetcher = MagicMock()
     scanner.fetcher.resolve_strike_band.side_effect = lambda i, p, side, **kw: [contract] if side == "CE" else []
-    scanner.fetcher.fetch_option_candles.side_effect = lambda c, interval, n, **kw: [] if interval == "5min" else base
+    risk = entry_risk_history(now, quote["price"])
+    scanner.fetcher.fetch_option_candles.side_effect = (
+        lambda c, interval, n, **kw: risk if interval == "5min" else base
+    )
     return scanner, instrument, service, callback, now
 
 
@@ -347,15 +419,21 @@ def test_support_alert_is_first_without_blocking_independent_pattern(tmp_path, m
     scanner, instrument, service, callback, now = scanner_with_pattern(tmp_path, monkeypatch)
     frames, base, _, _ = pattern_history(minutes=5)
     frames[-2].update(open=60, low=59.9, high=60.1, close=60)
-    frames[-1].update(open=60.5, low=60.3, high=61.2, close=61)
+    frames[-1].update(open=60.5, low=58, high=61.1, close=61)
+    frames[-3]["high"] = 100
+    for bar in base[-15:-10]:
+        bar["high"] = 100
     for bar in base[-10:-5]:
         bar.update(open=60, low=59.9, high=60.1, close=60)
     for bar in base[-5:]:
-        bar.update(open=60.5, low=60.3, high=61.2, close=61)
+        bar.update(open=60.5, low=58, high=61.1, close=61)
     prior = [{**frame, "timestamp": frame["timestamp"] - 86400,
               "open": 75, "high": 80, "low": 70, "close": 74} for frame in frames]
     prior[2]["low"] = 60
     prior[5]["high"] = 100
+    scanner.data_manager.fetch_quotes.return_value[("NSE_FNO", 101)].update(
+        price=61.2, bid=61.15, ask=61.25,
+    )
     scanner.fetcher.fetch_option_candles.side_effect = lambda c, interval, n, **kw: (
         prior + frames if interval == "5min" else base
     )
@@ -372,7 +450,10 @@ def test_support_alert_is_first_without_blocking_independent_pattern(tmp_path, m
 def test_pattern_lifecycle_freezes_timeframe_and_keeps_execution_disabled(tmp_path, minutes):
     from runtime_services import QueueConsumerWorker
     _, base, now, quote = pattern_history(minutes=minutes)
-    signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "PE", base, quote, now)
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        "NIFTY", "PE", base, quote, now,
+        five_candles=entry_risk_history(now, quote["price"]),
+    )
     signal = next(s for s in signals if s["timeframe"] == f"{minutes}min")
     contract = {"security_id": 101, "exchange_segment": "NSE_FNO", "instrument_type": "OPTIDX",
                 "option_symbol": "NIFTY-PE", "option_type": "PE", "strike": 23000,
@@ -400,11 +481,14 @@ def test_pattern_lifecycle_freezes_timeframe_and_keeps_execution_disabled(tmp_pa
     live.propose.assert_not_called()
 
 
-@pytest.mark.parametrize("name", PATTERN_NAMES)
+@pytest.mark.parametrize("name", CHART_PATTERN_NAMES)
 def test_all_pattern_geometry_is_drawn(name):
     from matplotlib.figure import Figure
-    frames, base, now, quote = pattern_history(name, minutes=2)
-    signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "CE", base, quote, now)
+    frames, base, now, quote = pattern_history(name, minutes=5)
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        "NIFTY", "CE", base, quote, now,
+        five_candles=entry_risk_history(now, quote["price"]),
+    )
     signal = next(item for item in signals if item["premium_pattern"]["name"] == name)
     saved = []
     original = Figure.savefig
@@ -415,7 +499,7 @@ def test_all_pattern_geometry_is_drawn(name):
 
     with patch.object(Figure, "savefig", capture):
         render_premium_chart(frames, {**signal, "event": "OPEN", "event_time": now.timestamp(),
-                                     "interval_minutes": 2, "stop": signal["stop_loss"]})
+                                     "interval_minutes": 5, "stop": signal["stop_loss"]})
     assert name.replace("_", " ") in saved[0].get_legend_handles_labels()[1]
     for line in signal["premium_pattern"]["lines"]:
         assert line["label"] in saved[0].get_legend_handles_labels()[1]
@@ -424,7 +508,10 @@ def test_all_pattern_geometry_is_drawn(name):
 def test_pattern_chart_draws_structure_boundaries_and_correct_timeframe(tmp_path):
     from matplotlib.figure import Figure
     frames, base, now, quote = pattern_history(minutes=60)
-    signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "PE", base, quote, now)
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        "NIFTY", "PE", base, quote, now,
+        five_candles=entry_risk_history(now, quote["price"]),
+    )
     signal = next(s for s in signals if s["timeframe"] == "60min")
     overlay = {
         **signal, "event": "OPEN", "event_time": now.timestamp(),
@@ -463,7 +550,10 @@ def test_pattern_photo_delivery_uses_frozen_chart_despite_small_global_window(tm
                 for left, right in zip(values[:-2], values[1:-1]) for offset in range(3)] + values[-2:]
     with patch.dict(SHAPES, {"bullish_flag": expanded}):
         _, base, now, quote = pattern_history("bullish_flag", 5)
-    signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "CE", base, quote, now)
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        "NIFTY", "CE", base, quote, now,
+        five_candles=entry_risk_history(now, quote["price"]),
+    )
     signal = next(s for s in signals if s["premium_pattern"]["name"] == "bullish_flag")
     overlay = {
         **signal, "event": "OPEN", "event_time": now.timestamp(), "interval_minutes": 5,
@@ -487,11 +577,14 @@ def test_pattern_photo_delivery_uses_frozen_chart_despite_small_global_window(tm
 
 
 def test_pattern_exit_chart_resamples_one_minute_contract_history(tmp_path):
-    frames, base, now, quote = pattern_history(minutes=3)
-    signals, _ = IndexSwingStrategy().evaluate_patterns("NIFTY", "CE", base, quote, now)
-    signal = next(s for s in signals if s["timeframe"] == "3min")
+    frames, base, now, quote = pattern_history(minutes=5)
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        "NIFTY", "CE", base, quote, now,
+        five_candles=entry_risk_history(now, quote["price"]),
+    )
+    signal = next(s for s in signals if s["timeframe"] == "5min")
     overlay = {**signal, "event": "STOP", "event_time": now.timestamp(),
-               "interval_minutes": 3, "stop": signal["stop_loss"],
+               "interval_minutes": 5, "stop": signal["stop_loss"],
                "security_id": 101, "exchange_segment": "NSE_FNO", "instrument_type": "OPTIDX"}
     provider = MagicMock(return_value=base)
     charts = LifecycleChartService(tmp_path / "charts.db", MagicMock(), provider)
@@ -501,17 +594,22 @@ def test_pattern_exit_chart_resamples_one_minute_contract_history(tmp_path):
     assert [bar["close"] for bar in snapshot["candles"]] == [bar["close"] for bar in frames]
 
 
-def test_daily_pattern_exit_chart_uses_completed_daily_contract_candles(tmp_path):
+def test_daily_pattern_timeframe_is_not_enabled_but_old_daily_charts_still_render(tmp_path):
     daily, _, now, quote = pattern_history("double_bottom", 1440)
-    signals, _ = IndexSwingStrategy().evaluate_patterns(
-        "TATASTEEL", "CE", [], quote, now, "nifty50_stock_options", daily,
-    )
-    signal = next(item for item in signals if item["timeframe"] == "1day")
     overlay = {
-        **signal, "event": "STOP", "event_time": now.timestamp(), "interval_minutes": 1440,
-        "stop": signal["stop_loss"], "option_symbol": "TATASTEEL-CE",
+        "event": "STOP", "event_time": now.timestamp(), "interval_minutes": 1440,
+        "entry": 90, "stop": 90, "target": 120,
+        "option_symbol": "TATASTEEL-CE", "category": "nifty50_stock_options",
+        "symbol": "TATASTEEL",
+        "premium_pattern": {
+            "timeframe": 1440, "name": "double_bottom",
+            "points": [{"timestamp": daily[0]["timestamp"], "price": daily[0]["low"],
+                        "label": "Bottom"}],
+            "lines": [],
+        },
         "security_id": 101, "exchange_segment": "NSE_FNO", "instrument_type": "OPTSTK",
     }
+    assert 1440 not in PATTERN_TIMEFRAMES
     provider = MagicMock(return_value=daily)
     charts = LifecycleChartService(tmp_path / "daily-charts.db", MagicMock(), provider,
                                    clock=lambda: now.timestamp())

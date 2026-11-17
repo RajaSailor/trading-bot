@@ -350,10 +350,7 @@ class PremiumScreener:
             one_minute = self.fetcher.fetch_option_candles(
                 contract, "1min", now, lookback_sessions=PATTERN_LOOKBACK_SESSIONS,
             )
-            daily = (self.fetcher.fetch_option_candles(
-                contract, "1day", now, lookback_sessions=PATTERN_LOOKBACK_SESSIONS,
-            ) if instrument.category != "index_options" else [])
-            if candles is None:
+            if not candles:
                 # Reuse actual 1m observations; missing minutes never form a 5m bar.
                 candles = aggregate_five_minutes(one_minute, now)
             quotes = self.data_manager.fetch_quotes({
@@ -403,7 +400,8 @@ class PremiumScreener:
             try:
                 patterns, diagnostics = self.index_engine.evaluate_patterns(
                     instrument.symbol, contract["option_type"], one_minute, quote, observed_now,
-                    instrument.category, daily,
+                    instrument.category, five_candles=candles,
+                    tick=contract.get("tick_size", .05),
                 )
                 evaluation["pattern_timeframes"] = diagnostics
             except IndicatorDataError as exc:
@@ -1096,6 +1094,7 @@ class PremiumScreener:
                     "support_candle_timestamp",
                     "premium_confirmation_high", "premium_confirmation_low", "pullback_low",
                     "previous_session_date", "previous_level_kind", "premium_pattern", "chart_candles",
+                    "entry_candles", "initial_pattern_stop", "risk_target", "tick_size",
                     "premium_reference_levels",
                     "requested_stop_policy", "structure_id", "structure_evidence", "premium_zone",
                 )
@@ -1167,7 +1166,8 @@ class PremiumScreener:
                     "alerts_only": True, "spot_confirmation_required": False,
                     "routes": [*STRUCTURE_ROUTES, "premium_chart_pattern"],
                     "stop_policy": CANDLE_STOP_POLICY,
-                    "daily_report_grouping": "strategy_within_category",
+                    "daily_report_grouping": "strategy_and_underlying_by_strategy_within_category",
+                    "monthly_reports": True,
                 },
                 "index_swing_strategy": {
                     "enabled": self.index_swing_enabled, "alerts_only": True,
