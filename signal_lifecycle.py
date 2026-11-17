@@ -16,6 +16,7 @@ import os
 import sqlite3
 import time
 import uuid
+import calendar
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -136,6 +137,9 @@ class SignalLifecycle:
                 CREATE TABLE IF NOT EXISTS lifecycle_reports (
                     category TEXT NOT NULL, day TEXT NOT NULL, data TEXT NOT NULL,
                     PRIMARY KEY(category,day));
+                CREATE TABLE IF NOT EXISTS lifecycle_monthly_reports (
+                    category TEXT NOT NULL, month TEXT NOT NULL, data TEXT NOT NULL,
+                    PRIMARY KEY(category,month));
                 CREATE TABLE IF NOT EXISTS lifecycle_meta (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS lifecycle_event_messages (
@@ -162,6 +166,10 @@ class SignalLifecycle:
                 db.execute("INSERT OR IGNORE INTO lifecycle_meta VALUES(?,?)",
                            ("report_cursor:" + category,
                             (now.date() - timedelta(days=1)).isoformat()))
+                previous_month = date(now.year, now.month, 1) - timedelta(days=1)
+                db.execute("INSERT OR IGNORE INTO lifecycle_meta VALUES(?,?)",
+                           ("monthly_report_cursor:" + category,
+                            previous_month.strftime("%Y-%m")))
         self._square_off(now, stale_only=True)
 
     def _squareoff_at(self, exchange, day):
@@ -692,9 +700,10 @@ class SignalLifecycle:
     @staticmethod
     def _entry_strategy(metadata):
         setup = (metadata.get("setups") or [None])[0]
+        if setup == "premium_chart_pattern":
+            return (metadata.get("premium_pattern") or {}).get("name", setup)
         if setup in {
             "fvg_retest", "order_block_retest", "compression_breakout", "bos_retest",
-            "premium_chart_pattern",
         }:
             return setup
         if setup in {
@@ -706,12 +715,14 @@ class SignalLifecycle:
 
     @staticmethod
     def _strategy_label(strategy):
-        return {
+        labels = {
             "fvg_retest": "FVG retest", "order_block_retest": "Order-block retest",
             "support_recovery": "Support recovery", "compression_breakout": "Compression breakout",
             "bos_retest": "BOS / rejection / reclaim",
-            "premium_chart_pattern": "Bullish chart pattern", "legacy_premium": "Legacy premium",
-        }.get(strategy, "Unclassified")
+            "legacy_premium": "Legacy premium",
+            "premium_chart_pattern": "Bullish chart pattern",
+        }
+        return labels.get(strategy, strategy.replace("_", " ").title())
 
     def _schedule_reports(self, current):
         with self._transaction() as db:
@@ -752,8 +763,24 @@ class SignalLifecycle:
                                 or start <= (row.get("closed_at") or -1) <= cutoff
                             ) for row in rows)
                         }
+                        per_symbol_strategy = {
+                            (underlying, strategy): self._outcomes(
+                                [row for row in rows
+                                 if row["underlying"] == underlying
+                                 and strategies[row["id"]] == strategy],
+                                start, cutoff)
+                            for underlying, strategy in sorted({
+                                (row["underlying"], strategies[row["id"]]) for row in rows
+                                if start <= row["opened_at"] <= cutoff or
+                                start <= (row.get("closed_at") or -1) <= cutoff
+                            })
+                        }
                         report = dict(category=category, day=day.isoformat(),
-                                      per_underlying=per_underlying, per_strategy=per_strategy, **totals)
+                                      per_underlying=per_underlying, per_strategy=per_strategy,
+                                      per_symbol_strategy={
+                                          f"{symbol}:{strategy}": outcome
+                                          for (symbol, strategy), outcome in per_symbol_strategy.items()
+                                      }, **totals)
                         db.execute("INSERT INTO lifecycle_reports VALUES(?,?,?)",
                                    (category, day.isoformat(), json.dumps(report)))
                         event_id = f"REPORT:{category}:{day.isoformat()}"
@@ -771,17 +798,16 @@ class SignalLifecycle:
                             f"Weighted premium return {outcomes['weighted_return_pct']} | "
                             f"Gross profit ₹{outcomes['gross_profit']:,.2f} / "
                             f"loss ₹{outcomes['gross_loss']:,.2f} | Net ₹{outcomes['net_pnl']:,.2f} | "
-                            f"Unpriced closes {outcomes['unpriced_closes']}"
+                            f"Unpriced closes {outcomes['unpriced_closes']} | "
+                            f"5m trail moves {outcomes['trailing_modifications']}"
                             for strategy, outcomes in per_strategy.items()]
                         details += [
-                            f"{_text(underlying)}: Opened {outcomes['opened']} | "
+                            f"{_text(underlying)}: <b>{_text(self._strategy_label(strategy))}</b> | "
+                            f"Opened {outcomes['opened']} | Closed {outcomes['closed']} | "
                             f"Targets {outcomes['targets']} | Stops {outcomes['stops']} | "
-                            f"Session-close {outcomes['session_close']} "
-                            f"(profit {outcomes['session_profit']}, loss {outcomes['session_loss']}) | "
-                            f"Win rate {outcomes['winrate']} | Net P&amp;L ₹{outcomes['net_pnl']:,.2f} | "
-                            f"Excluded {outcomes['excluded_pnl']} "
-                            f"(NO QUOTE {outcomes['no_quote']}, missing lot {outcomes['missing_lot']})"
-                            for underlying, outcomes in per_underlying.items()]
+                            f"Win rate {outcomes['winrate']} | Net ₹{outcomes['net_pnl']:,.2f} | "
+                            f"5m trail moves {outcomes['trailing_modifications']}"
+                            for (underlying, strategy), outcomes in per_symbol_strategy.items()]
                         header = (
                             f"<b>DAILY SIGNAL REPORT</b>\n{_text(category)} | {day.isoformat()}\n"
                             f"Session square-off: closed at "
@@ -801,15 +827,130 @@ class SignalLifecycle:
                             f"Max single loss: ₹{totals['max_loss']:,.2f} | "
                             f"Max single win: ₹{totals['max_win']:,.2f}\n"
                             f"Excluded from ₹ totals: {totals['excluded_pnl']} "
-                            f"(NO QUOTE {totals['no_quote']}, missing lot {totals['missing_lot']})\n")
+                            f"(NO QUOTE {totals['no_quote']}, missing lot {totals['missing_lot']})\n"
+                            f"5m trailing-stop moves: {totals['trailing_modifications']}\n")
                         self._enqueue_report(db, event_id, category, header, details)
                     db.execute("UPDATE lifecycle_meta SET value=? WHERE key=?",
                                (day.isoformat(), cursor_key))
                     day += timedelta(days=1)
+                self._schedule_monthly_report(db, category, exchanges, current)
+
+    def _schedule_monthly_report(self, db, category, exchanges, current):
+        cursor_key = "monthly_report_cursor:" + category
+        cursor = date.fromisoformat(
+            db.execute("SELECT value FROM lifecycle_meta WHERE key=?", (cursor_key,)).fetchone()["value"] + "-01"
+        )
+        current_month = date(current.year, current.month, 1)
+        while True:
+            month_start = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+            if month_start > current_month:
+                return
+            month_end = calendar.monthrange(month_start.year, month_start.month)[1]
+            cutoffs = []
+            for exchange in exchanges:
+                for day_number in range(month_end, 0, -1):
+                    cutoff = self._squareoff_at(exchange, date(
+                        month_start.year, month_start.month, day_number,
+                    ))
+                    if cutoff:
+                        cutoffs.append(cutoff)
+                        break
+            cutoff = max(cutoffs) if cutoffs else None
+            if cutoff is not None and current < cutoff:
+                return
+            if cutoff is not None:
+                end = cutoff.timestamp()
+                start = datetime.combine(month_start, datetime.min.time(), tzinfo=IST).timestamp()
+                rows = [json.loads(row["data"]) for row in db.execute(
+                    "SELECT data FROM lifecycle_signals WHERE category=?", (category,))]
+                if any(row["status"] == "OPEN" and row["opened_at"] <= end for row in rows):
+                    return
+                totals = self._outcomes(rows, start, end)
+                strategies = {
+                    row["id"]: row.get("entry_strategy") or self._entry_strategy(row.get("metadata", {}))
+                    for row in rows
+                }
+                per_underlying = {
+                    underlying: self._outcomes(
+                        [row for row in rows if row["underlying"] == underlying], start, end)
+                    for underlying in sorted({row["underlying"] for row in rows
+                                              if start <= row["opened_at"] <= end or
+                                              start <= (row.get("closed_at") or -1) <= end})
+                }
+                per_strategy = {
+                    strategy: self._outcomes(
+                        [row for row in rows if strategies[row["id"]] == strategy], start, end)
+                    for strategy in sorted(set(strategies.values()))
+                    if any(strategies[row["id"]] == strategy and (
+                        start <= row["opened_at"] <= end
+                        or start <= (row.get("closed_at") or -1) <= end
+                    ) for row in rows)
+                }
+                per_symbol_strategy = {
+                    (underlying, strategy): self._outcomes(
+                        [row for row in rows if row["underlying"] == underlying
+                         and strategies[row["id"]] == strategy], start, end)
+                    for underlying, strategy in sorted({
+                        (row["underlying"], strategies[row["id"]]) for row in rows
+                        if start <= row["opened_at"] <= end or
+                        start <= (row.get("closed_at") or -1) <= end
+                    })
+                }
+                month = month_start.strftime("%Y-%m")
+                report = dict(
+                    category=category, month=month, per_underlying=per_underlying,
+                    per_strategy=per_strategy,
+                    per_symbol_strategy={
+                        f"{symbol}:{strategy}": outcome
+                        for (symbol, strategy), outcome in per_symbol_strategy.items()
+                    },
+                    **totals,
+                )
+                db.execute("INSERT INTO lifecycle_monthly_reports VALUES(?,?,?)",
+                           (category, month, json.dumps(report)))
+                details = [
+                    f"<b>{_text(self._strategy_label(strategy))}</b>: "
+                    f"Opened {outcomes['opened']} | Closed {outcomes['closed']} | "
+                    f"Targets {outcomes['targets']} | Stops {outcomes['stops']} | "
+                    f"Session-close {outcomes['session_close']} | Win rate {outcomes['winrate']} | "
+                    f"Net ₹{outcomes['net_pnl']:,.2f} | "
+                    f"5m trail moves {outcomes['trailing_modifications']}"
+                    for strategy, outcomes in per_strategy.items()
+                ]
+                details += [
+                    f"{_text(underlying)}: <b>{_text(self._strategy_label(strategy))}</b> | "
+                    f"Opened {outcomes['opened']} | Closed {outcomes['closed']} | "
+                    f"Targets {outcomes['targets']} | Stops {outcomes['stops']} | "
+                    f"Win rate {outcomes['winrate']} | Net ₹{outcomes['net_pnl']:,.2f} | "
+                    f"5m trail moves {outcomes['trailing_modifications']}"
+                    for (underlying, strategy), outcomes in per_symbol_strategy.items()
+                ]
+                header = (
+                    f"<b>MONTHLY SIGNAL REPORT</b>\n{_text(category)} | {month}\n"
+                    f"Last session square-off: {cutoff.strftime('%Y-%m-%d %I:%M %p').lstrip('0')}\n"
+                    f"Opened: {totals['opened']} | Closed: {totals['closed']} | "
+                    f"Unresolved: {totals['unresolved']}\n"
+                    f"Target achieved: {totals['targets']} | Stop triggered: {totals['stops']} | "
+                    f"Session-close exits: {totals['session_close']}\n"
+                    f"Win rate: {totals['return_winrate']} | Net P&amp;L: ₹{totals['net_pnl']:,.2f}\n"
+                    f"Gross profit: ₹{totals['gross_profit']:,.2f} | "
+                    f"Gross loss: ₹{totals['gross_loss']:,.2f}\n"
+                    f"5m trailing-stop moves: {totals['trailing_modifications']}\n"
+                )
+                self._enqueue_report(
+                    db, f"MONTHLY_REPORT:{category}:{month}", category, header, details,
+                )
+            db.execute("UPDATE lifecycle_meta SET value=? WHERE key=?",
+                       (month_start.strftime("%Y-%m"), cursor_key))
+            cursor = month_start
 
     @staticmethod
     def _outcomes(rows, start, cutoff):
         opened = sum(start <= row["opened_at"] <= cutoff for row in rows)
+        trailing_modifications = sum(
+            int(row.get("trailing_step", 0)) for row in rows
+            if start <= row["opened_at"] <= cutoff
+        )
         closed = [row for row in rows if row.get("closed_at") is not None
                   and start <= row["closed_at"] <= cutoff]
         targets = sum(row["status"] == "TARGET" for row in closed)
@@ -845,7 +986,8 @@ class SignalLifecycle:
         unresolved = sum(row["opened_at"] <= cutoff and (
             row.get("closed_at") is None or row["closed_at"] > cutoff) for row in rows)
         return dict(opened=opened, targets=targets, stops=stops, unresolved=unresolved,
-                    closed=len(closed), wins=sum(value > 0 for value in returns),
+                    closed=len(closed), trailing_modifications=trailing_modifications,
+                    wins=sum(value > 0 for value in returns),
                     losses=sum(value < 0 for value in returns),
                     breakeven=sum(value == 0 for value in returns),
                     profitable_stops=profitable_stops, unpriced_closes=len(closed) - len(returns),
@@ -1079,4 +1221,6 @@ class SignalLifecycle:
                         "index_swing_policy": CANDLE_STOP_POLICY,
                         "live_broker_modifications_supported": False,
                     },
-                    "reports": db.execute("SELECT COUNT(*) FROM lifecycle_reports").fetchone()[0]}
+                    "reports": db.execute("SELECT COUNT(*) FROM lifecycle_reports").fetchone()[0],
+                    "monthly_reports": db.execute(
+                        "SELECT COUNT(*) FROM lifecycle_monthly_reports").fetchone()[0]}

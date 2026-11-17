@@ -24,8 +24,8 @@ gap or a missing candle cannot manufacture a pivot across the gap.
 1. **Repeated support / W recovery:** a confirmed five-minute low defines
    support. There must also be a subsequently confirmed swing high (the
    intervening rebound) before the new five-minute retest begins. A completed
-   five-minute close more than 0.5% below support invalidates that candidate.
-   The latest pair of five-minute candles must test within +/-0.5% of support;
+   five-minute close more than 10% below support invalidates that candidate.
+   The latest pair of five-minute candles must test within +/-10% of support;
    the latest close must exceed both support and the preceding candle high.
    The target is the nearest already-confirmed intervening swing high.
    Example: 70 -> 47 -> 60 -> approximately 47 -> recovery. Entry can occur
@@ -42,7 +42,7 @@ gap or a missing candle cannot manufacture a pivot across the gap.
    the available session high/low from the immediately previous trading session
    of this exact security ID, strike, expiry and option side. Never splice in
    the previous ATM contract or an expired series. A prior support, or prior
-   resistance reclaimed as support, may qualify after a test within +/-0.5%
+   resistance reclaimed as support,    may qualify after a test within +/-10%
    and the same completed five-minute recovery. One recovery is enough; do not
    require a second retest or a same-day W. Select the next higher known prior
    resistance as target, and the source five-minute candle low as initial stop.
@@ -55,8 +55,8 @@ not cumulative requirements. Process support recovery and compression first,
 then independently qualifying zones/BOS and patterns, including when another
 signal is already open. Support/average levels retain their original definitions,
 but their new confirmation is five-minute, not the old one-minute recovery.
-There is no established universal count of market patterns; this implementation
-supports the following six explicitly defined bullish-premium structures.
+There is no established universal count of market patterns; the scanner supports
+the defined chart structures and bullish candle formations below.
 Tolerances are trial settings, not empirically optimized probabilities.
 
 ### Compression, FVG/OB and BOS
@@ -66,15 +66,17 @@ not proof that an institutional order or imbalance exists.
 
 | Route | Confirmation / entry | Initial stop | Fixed target |
 | --- | --- | --- | --- |
-| Compression | At least two consecutive completed 5m candles; combined high minus low <=10% of combined low. Extend backwards through consecutive candles while this remains true. After a confirmed prior decline, first completed 1m close above the frozen range high. No earlier post-range 1m close may already break the range. | Range low | Nearest confirmed pre-range swing high above the range |
-| Bullish FVG | Three consecutive completed 5m candles; third low > first high, middle candle green with body >=50% of its high-low range. Gap is [first high, third low], known only after the third closes above it. First fresh live premium in that range alerts; no close confirmation. | Entry 5m candle's low observed so far | Nearest confirmed 5m swing high above entry, plus one metadata tick |
-| Bullish order block | A completed bullish 5m candle first closes above the latest already-confirmed swing high; the last red candle within its preceding five candles defines the full [low, high] block. Breakout close must be above the block. First fresh live retest alerts. | Entry 5m candle's low observed so far | Nearest confirmed 5m swing high above entry, plus one metadata tick |
-| BOS/retest | Latest two confirmed 5m highs form a lower high. A completed 5m close breaks it from below, followed by a completed wick rejection within +/-0.5% of that level. No subsequent completed close may break below the band. Then a fresh live crossing from at/below the lower high to above it (within +0.5%) alerts, without another 5m close. | Entry 5m candle's low observed so far | The preceding higher swing high plus one metadata tick |
+| Compression | At least two consecutive completed 5m candles; combined high minus low <=15% of combined low. Extend backwards through consecutive candles while this remains true. After a confirmed prior decline, first completed 1m close above the frozen range high. No earlier post-range 1m close may already break the range. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk strictly >1:1 |
+| Bullish FVG | Three consecutive completed 5m candles; third low > first high, middle candle green with body >=50% of its high-low range. Gap is [first high, third low], known only after the third closes above it. First fresh live premium in that range alerts; no close confirmation. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk strictly >1:1 |
+| Bullish order block | A completed bullish 5m candle first closes above the latest already-confirmed swing high; the last red candle within its preceding five candles defines the full [low, high] block. Breakout close must be above the block. First fresh live retest alerts. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk strictly >1:1 |
+| BOS/retest | Latest two confirmed 5m highs form a lower high. A completed 5m close breaks it from below, followed by a completed wick rejection within +/-10% of that level. No subsequent completed close may break below the band. Then a fresh live crossing from at/below the lower high to above it (within +10%) alerts, without another 5m close. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk strictly >1:1 |
 
 Compression example: prior confirmed high 150, decline to a 75-82 range held
 for two or more completed 5m candles, then a completed 1m close above 82.
-Initial stop is 75; target is 150 if that is the nearest confirmed pre-range
-high. It does not require five or ten range candles or another 5m breakout.
+The range width may be up to 15% of its low. The initial stop is the preceding
+completed 5m low and the target is the nearest confirmed swing high that is
+strictly more than 1R above entry. It does not require five or ten range candles
+or another 5m breakout.
 The confirming candle need not be green; the required event is its close above
 the range. Support recovery similarly requires the close above the previous
 5m high, not a separate candle-colour gate.
@@ -90,19 +92,16 @@ not delayed until the next candle closes. BOS live crossing uses a fresh
 previous observed quote (<=10 seconds earlier) or an already-completed
 one-minute close (<=75 seconds earlier); both must follow the rejection close.
 
-At a live touch, the final entry-candle low is unknowable. Freeze only the
-low actually observed from current contract candles/live quotes at entry.
-If no current-candle evidence exists, or its low is not below the premium,
-skip with an explicit reason rather than invent a stop. A quote below the
-zone is not a touch; a quote far above the BOS band is not an at-level entry.
-No known target above entry means rejection, not a fabricated measured move.
+The initial stop for every new structure or pattern route is the low of the
+immediately preceding completed 5m candle at the observed entry time. Never use
+a forming or post-entry candle. A stop at/above entry rejects the signal.
 All routes retain positive bid/ask, <=2% spread, source quote age <=10 seconds,
 target/stop ordering and calendar/square-off admission.
 
 ### Completed bullish premium patterns
 
-Scan **2, 3, 5, 10, 15, 30 and 60 minutes** for index options, and **5, 10,
-15, 30, 60, 120, 240 minutes and 1 day** for stock and commodity options.
+Scan **5, 10, 15, 30, 60 and 240 minutes** for index, stock and commodity
+options.
 Each timeframe is evaluated independently for each ATM CALL/PUT.
 A bullish PUT-premium pattern is a bought PUT candidate; bearish CALL-premium
 patterns are not converted into PUT signals, and no pattern places a sell order.
@@ -115,29 +114,35 @@ Use alternating unambiguous pivots (an outside bar that is both a high and low
 is excluded); retain the more extreme of consecutive same-kind pivots.
 Examine the most recent appropriate pivot sequence in the last 80 full bars.
 
-| Pattern | Required structure | Initial stop | Fixed measured-move target |
-| --- | --- | --- | --- |
-| Double bottom | Low-high-low; lows within 0.5%; close above intervening high | Lower bottom | Boundary + boundary-to-bottom height |
-| Triple bottom | Low-high-low-high-low; all lows within 0.5%; close above both intervening highs | Lowest bottom | Boundary + boundary-to-bottom height |
-| Inverse head-and-shoulders | Low-high-low-high-low; shoulders within 1%; head at least 0.5% below both; close above both neckline highs | Right shoulder low | Boundary + boundary-to-head height |
-| Ascending triangle | Three highs within 0.5%; two or three intervening lows rising by more than 0.5% each; close above all three highs | Latest pivot low | Boundary + height above first low |
-| Falling wedge | Three falling highs and three falling lows; declining upper line is steeper than lower; positive narrowing channel; intermediate points within 1% of their lines | Latest pivot low | Breakout boundary + initial channel width |
-| Bullish flag | Three falling highs/lows in a channel; negative slopes differ by at most 25%; preceding up-pole within eight bars is at least three channel widths and 5% of pole-high premium; pullback is no more than half the pole | Latest pivot low | Breakout boundary + pole height |
+| Pattern | Required structure |
+| --- | --- |
+| Double bottom | Low-high-low; lows within 0.5%; close above intervening high |
+| Triple bottom | Low-high-low-high-low; all lows within 0.5%; close above both intervening highs |
+| Inverse head-and-shoulders | Low-high-low-high-low; shoulders within 1%; head at least 0.5% below both; close above both neckline highs |
+| Ascending triangle | Three highs within 0.5%; two or three intervening lows rising by more than 0.5% each; close above all three highs |
+| Falling wedge | Three falling highs and three falling lows; declining upper line is steeper than lower; positive narrowing channel; intermediate points within 1% of their lines |
+| Bullish flag | Three falling highs/lows in a channel; negative slopes differ by at most 25%; preceding up-pole within eight bars is at least three channel widths and 5% of pole-high premium; pullback is no more than half the pole |
+| Morning star | Large red candle, small real body, then a large green candle closing above the first candle's body midpoint |
+| Bullish engulfing | Green body fully engulfs the preceding red body |
+| Hammer | Small green body, lower shadow at least twice the body, and short upper shadow |
+| Piercing line | Green candle opens below the prior red close and closes above that candle's body midpoint |
+| Three white soldiers | Three rising green closes, opens within prior real bodies, and short upper shadows |
 
-The latest candle must be green and produce the **first completed close**
+Chart structures require a green latest candle and the **first completed close**
 strictly above the neckline/upper boundary after the structure, with the
-preceding close at/below its boundary. No intervening close may already have
-broken the boundary or invalidated the stop. For sloped boundaries, compare at
-each candle index, not against an invented flat line. The confirmation must
-end today and be no more than 75 seconds old. Current fresh premium must still
-be above the confirmed boundary and stop, and below target. Merely forming
-patterns, continuation above an old breakout, and bearish patterns do not alert.
+preceding close at/below its boundary. Bullish candle formations are confirmed
+on their final completed premium candle. No intervening close may already have
+broken the boundary or invalidated the chart structure. For sloped boundaries,
+compare at each candle index, not against an invented flat line. Confirmation
+must end today and be no more than 75 seconds old; the fresh quote must remain
+above the pattern close/boundary. For every route, initial stop is the previous
+completed 5m low and target is the nearest confirmed swing high strictly more
+than 1R above entry. Skip when no such target exists. Forming patterns,
+continuation above an old breakout, and bearish patterns do not alert.
 
 Build intraday timeframes from exact-contract one-minute OHLC, anchored to each
 exchange session. Require every constituent minute, reject partial buckets and
-never aggregate across session boundaries or missing data. Daily stock and
-commodity patterns use completed exact-contract daily OHLC; during a live
-session, confirmation must be from the previous trading session. Multi-session
+never aggregate across session boundaries or missing data. Multi-session
 intraday patterns are allowed only across consecutive trading sessions, with
 no missing full buckets; closures/holidays are not missing bars.
 At least seven full contiguous bars are needed even to evaluate a timeframe;
@@ -151,13 +156,13 @@ This avoids repeatedly downloading/caching ten-session histories every minute.
 History or API failures can still leave timeframes unavailable; they are not
 interpreted as “no pattern.”
 
-Each confirmed pattern has its own contract/timeframe/name/geometry/breakout
+Each confirmed pattern has its own contract/timeframe/name/geometry/confirmation
 identity. Repeated scans and restarts cannot reopen the same signal. Different
 confirmed patterns or timeframes may produce separate alerts; support acceptance
 does not suppress them. The chart freezes the completed detection candles,
 draws pattern vertices and neckline/trendlines, names the exact timeframe, and
-shows entry, initial stop and target. Pattern evidence is revalidated at durable
-lifecycle admission, not inferred from a label alone.
+shows entry, initial stop and target. Pattern evidence and the risk levels are
+revalidated at durable lifecycle admission, not inferred from a label alone.
 
 ### Support recovery entry, expiry and target
 
@@ -166,7 +171,7 @@ nearest listed expiry strictly after today. On expiry day, same-day contracts
 are skipped and the next available expiry is selected.
 
 After support and target are known, examine the latest two consecutive completed
-five-minute option candles. Their test must be within +/-0.5% of support.
+five-minute option candles. Their test must be within +/-10% of support.
 The latest closes above support and the previous 5m high, with confirmation
 ending no more than 75 seconds ago. Support and target must already be known
 before the preceding 5m candle starts. There is no additional 1m check.
@@ -175,9 +180,8 @@ bid/ask and spread <=2%. The current quote must remain above support, below
 target and above stop. The alert labels the actual confirming close separately
 from the fresh observed premium: it cannot guarantee a past candle-close fill.
 
-Recovery targets come only from the same-session or explicitly labelled
-previous-session premium structure described above.
-If there is no target above entry, skip the alert rather than invent a target.
+For all new routes, the target is the nearest confirmed five-minute swing high
+strictly more than 1R above entry. If no such target exists, skip the alert.
 The target remains fixed after entry. Stop/target alerts use observed premium;
 they are not broker orders or guaranteed execution prices.
 
@@ -188,10 +192,9 @@ they are not broker orders or guaranteed execution prices.
   Idempotency persists across scans/restarts, not just the current open position.
 - There is no daily entry-alert cap. Multiple index signals can be open at once;
   each has its own signal ID, contract, entry, stop, target and lifecycle.
-- Initial recovery stop is the five-minute option support candle low, rounded to
-  tick size. Do not delay the initial advisory stop until a profitable candle.
-  Pattern entries instead use the pattern invalidation low in the table above.
-- **New index signals freeze `completed_5m_low_v1`.** Each fully post-entry
+- All new structure and pattern entries use the immediately preceding completed
+  5m option candle low, rounded to tick size, as the initial stop.
+- **New index, stock and commodity signals freeze `completed_5m_low_v1`.** Each fully post-entry
   completed 5m candle can raise the advisory stop to its low, tick-rounded down.
   Never use a partial candle or lower the existing stop, and never move the
   target. No 20% profit threshold or 5%-below-quote ladder is applied to these
@@ -201,8 +204,7 @@ they are not broker orders or guaranteed execution prices.
 - Stops, targets, exits and re-entries are informational only. Repeated
   stop-outs can accumulate losses; there is no guaranteed fill, loss limit or
   profitable outcome.
-- Existing session calendar and square-off remain. Stocks and commodities keep
-  their prior lifecycle behavior. Already-open old-policy signals retain their
+- Existing session calendar and square-off remain. Already-open old-policy signals retain their
   frozen stop logic.
 
 Every threshold and support-structure rule is an experimental starting point, not
@@ -220,11 +222,11 @@ zone ranges, entry/stop/target and explicit rejection reasons.
 `ACCEPTED` means durable signal/outbox acceptance,
 not confirmed Telegram delivery. `QUALIFIED_NOT_ACCEPTED` distinguishes
 duplicate/admission rejection from a setup failure.
-Pattern diagnostics list all nine timeframes, available/contiguous bar counts,
+Pattern diagnostics list the six timeframes, available/contiguous bar counts,
 gap-excluded counts and `INSUFFICIENT_HISTORY`, `AWAITING_FRESH_CLOSE`,
 `AWAITING_TODAY_CLOSE`, `NO_CONFIRMED_PATTERN` or `CONFIRMED`; quote/data errors
 are recorded separately. Pattern entry rejections include price outside the
-boundary/stop/target range. Health exposes the six pattern names, timeframe list,
+boundary/stop/target range. Health exposes the chart and candlestick pattern names, timeframe list,
 history budget, previous-session route and support-first priority.
 `index_underlying_status` retains each NIFTY/BANKNIFTY/SENSEX configuration,
 scan timestamp, resolved CALL/PUT sides, and per-side route results beyond
@@ -237,10 +239,24 @@ Leave live execution disabled, review the first sessions, and change the flag
 to `false` to stop new revised index entries. Do not reset or delete lifecycle
 state during rollout.
 
+### Daily and monthly performance reports
+
+Each category receives its daily report after its session square-off once open
+signals for that session have closed. The persistent report cursor prevents
+duplicate reports after a restart. Reports retain category-wide totals and
+include strategy totals plus symbol-by-strategy rows, so index, stock and
+commodity results can be compared without mixing categories. Each breakdown
+includes opens/closes, target/stop/session-close outcomes, premium/P&L results,
+and five-minute trailing-stop modifications. The monthly report is sent after
+the last trading session's square-off for that category and uses the same
+breakdown. Reports describe hypothetical one-lot signal outcomes, not broker
+fills; missing exit quotes or lot sizes are separately identified rather than
+silently treated as realized rupee P&L.
+
 ### Public-channel disclaimer
 
 All three categories' signal alerts, lifecycle events (OPEN, MODIFY, TARGET,
-STOP and SESSION_CLOSE), chart captions and every daily-report part carry this
+STOP and SESSION_CLOSE), chart captions, and every daily/monthly report part carry this
 shared one-line notice:
 
 > Educational information only - not investment advice or a recommendation; I am not a SEBI-registered investment adviser or research analyst; trading involves risk, and decisions and losses are your responsibility.

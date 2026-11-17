@@ -88,6 +88,14 @@ def asset_payload(signal, symbol, category, segment, instrument_type, security=1
 @pytest.mark.parametrize("side", ["CE", "PE"])
 def test_all_assets_admit_independent_routes_and_route_notifications(tmp_path, route, asset, side):
     symbol, category, segment, instrument_type = asset
+    if route == "fvg_retest":
+        five, one, now, quote = structure_history(route)
+        signals, diagnostics, _ = evaluate_structure(symbol, side, five, one, quote, now, .05, category)
+        assert not any(signal["setups"] == [route] for signal in signals)
+        assert any(item["route"] == route
+                   and item.get("reason") == "index_previous_5m_low_not_below_entry"
+                   for item in diagnostics)
+        return
     signal, now, _ = signal_for(route, symbol, side, category)
     payload, contract = asset_payload(signal, *asset)
     sent = []
@@ -112,13 +120,13 @@ def test_all_assets_admit_independent_routes_and_route_notifications(tmp_path, r
 @pytest.mark.parametrize("asset", ASSETS)
 def test_support_and_bos_routes_apply_to_every_category(asset):
     symbol, category, _, _ = asset
-    five = bars([(70, 72, 65, 68), (50, 55, 47, 50), (55, 60, 52, 58),
+    five = bars([(70, 72, 65, 68), (50, 55, 47, 50), (55, 70, 52, 58),
                  (54, 55, 50, 53), (50, 52, 47.1, 50), (50, 56, 49, 55)])
     now = OPEN + timedelta(minutes=30, seconds=5)
     quote = {"price": 55, "bid": 54.95, "ask": 55.05, "trade_timestamp": now.timestamp()}
     signals, _, _ = evaluate_structure(symbol, "CE", five, [], quote, now, .05, category)
     support = next(s for s in signals if s["setups"] == ["support_5m_recovery"])
-    assert support["stop_loss"] == 47 and support["target"] == 60
+    assert support["stop_loss"] == 49 and support["target"] == 70
     assert valid_entry(support, now)
     five, one, now = bos_history()
     quote.update(price=130.2, bid=130.15, ask=130.25, trade_timestamp=now.timestamp())
@@ -128,14 +136,14 @@ def test_support_and_bos_routes_apply_to_every_category(asset):
 
 def test_daily_strategy_reports_pool_symbols_only_within_their_category(tmp_path):
     sent, clock = [], []
-    _, now, _ = signal_for("fvg_retest")
+    _, now, _ = signal_for("compression_breakout")
     clock.append(now)
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: clock[0],
                               notify=lambda category, message: sent.append((category, message)) or True)
     positions = {}
     for security, asset in enumerate(ASSETS, 101):
         symbol, category, segment, _ = asset
-        signal, _, _ = signal_for("fvg_retest", symbol, "CE", category)
+        signal, _, _ = signal_for("compression_breakout", symbol, "CE", category)
         payload, _ = asset_payload(signal, *asset, security=security)
         positions[symbol] = service.open_once(payload)
         assert positions[symbol] is not None
@@ -168,17 +176,17 @@ def test_daily_strategy_reports_pool_symbols_only_within_their_category(tmp_path
     by_category = {report["category"]: report for report in reports}
     for category, entries in (("index_options", 3), ("nifty50_stock_options", 2), ("commodity_options", 4)):
         report = by_category[category]
-        assert set(report["per_strategy"]) == {"fvg_retest"}
-        stats = report["per_strategy"]["fvg_retest"]
+        assert set(report["per_strategy"]) == {"compression_breakout"}
+        stats = report["per_strategy"]["compression_breakout"]
         assert stats["opened"] == entries and stats["closed"] == entries
         messages = "\n".join(message for channel, message in sent
                              if channel == category and "DAILY SIGNAL REPORT" in message)
-        assert messages.count("<b>FVG retest</b>") == 1
+        assert messages.count("<b>Compression breakout</b>") == 1 + entries
         assert all(symbol not in messages for symbol, other, _, _ in ASSETS if other != category)
-    stats = by_category["index_options"]["per_strategy"]["fvg_retest"]
+    stats = by_category["index_options"]["per_strategy"]["compression_breakout"]
     assert (stats["targets"], stats["stops"], stats["profitable_stops"]) == (1, 2, 1)
     assert (stats["wins"], stats["losses"], stats["winrate"]) == (2, 1, "66.67%")
-    stats = by_category["commodity_options"]["per_strategy"]["fvg_retest"]
+    stats = by_category["commodity_options"]["per_strategy"]["compression_breakout"]
     assert stats["unpriced_closes"] == 0 and stats["winrate"] == "50.00%"
     assert stats["breakeven"] == 1
     assert stats["avg_return_pct"] != "N/A" and stats["weighted_return_pct"] != "N/A"
@@ -242,7 +250,7 @@ def test_stock_commodity_scanner_uses_atm_and_allows_concurrent_sides(tmp_path, 
     assert all(call.kwargs["bands"] == ("ATM",)
                for call in scanner.fetcher.resolve_strike_band.call_args_list)
     intervals = [call.args[1] for call in scanner.fetcher.fetch_option_candles.call_args_list]
-    assert intervals.count("1min") == 2 and intervals.count("1day") == 2
+    assert intervals.count("1min") == 2 and "1day" not in intervals
     assert scanner.status()["buying_at_low_strategy"]["categories"] == [
         "commodity_options", "index_options", "nifty50_stock_options",
     ]
@@ -251,7 +259,7 @@ def test_stock_commodity_scanner_uses_atm_and_allows_concurrent_sides(tmp_path, 
 @pytest.mark.parametrize("asset", ASSETS[3:])
 def test_new_stock_commodity_rules_keep_existing_position_policy(tmp_path, asset):
     symbol, category, _, _ = asset
-    signal, now, _ = signal_for("fvg_retest", symbol, "CE", category)
+    signal, now, _ = signal_for("compression_breakout", symbol, "CE", category)
     payload, _ = asset_payload(signal, *asset)
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now)
     position = service.open_once(payload)
@@ -266,7 +274,7 @@ def test_new_stock_commodity_rules_keep_existing_position_policy(tmp_path, asset
     assert not stored["index_swing"] and stored["stop_policy"] is None
 
 
-@pytest.mark.parametrize("route", ["compression_breakout", "fvg_retest", "order_block_retest"])
+@pytest.mark.parametrize("route", ["compression_breakout", "order_block_retest"])
 @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX"])
 @pytest.mark.parametrize("side", ["CE", "PE"])
 def test_independent_premium_routes_all_indices_and_sides(route, symbol, side):
@@ -276,17 +284,17 @@ def test_independent_premium_routes_all_indices_and_sides(route, symbol, side):
     assert signal["requested_stop_policy"] == CANDLE_STOP_POLICY
     assert "spot_direction" not in signal
     if route == "compression_breakout":
-        assert signal["stop_loss"] == 75
+        assert signal["stop_loss"] == 76
         assert signal["target"] == 150
         assert signal["premium_zone"]["high"] == 82
     else:
         assert signal["premium_zone"]["low"] <= signal["entry"] <= signal["premium_zone"]["high"]
         assert signal["reference_high"] > signal["entry"]  # Touch is not a breakout.
-        assert signal["target"] == (150.05 if route == "fvg_retest" else 130.05)
-        assert signal["stop_loss"] == (110 if route == "fvg_retest" else 112)
+        assert signal["target"] == 130
+        assert signal["stop_loss"] == 111
 
 
-@pytest.mark.parametrize("route", ["fvg_retest", "order_block_retest"])
+@pytest.mark.parametrize("route", ["order_block_retest"])
 def test_zone_touch_is_live_without_waiting_for_close_and_old_touches_invalidate(route):
     five, one, now, quote = structure_history(route)
     signals, _, zones = evaluate_structure("NIFTY", "PE", five, one, quote, now, .05)
@@ -360,7 +368,7 @@ def test_bos_requires_lower_high_break_then_rejection_and_live_reclaim(side):
     signals, _, _ = evaluate_structure("BANKNIFTY", side, five, one, quote, now, .05)
     signal = next(s for s in signals if s["setups"] == ["bos_retest"])
     assert valid_entry(signal, now)
-    five[-2].update(low=132, close=133)
+    five[-2].update(open=146, high=150, low=145, close=149)
     with pytest.raises(IndicatorDataError, match="rejection_reclaim_missing"):
         bos_candidate(five, one, now, .05, 130.2, now.timestamp())
 
@@ -393,13 +401,13 @@ def enriched_payload(signal, symbol="NIFTY"):
     return payload, contract
 
 
-def test_lifecycle_admits_inside_zone_and_persists_initial_candle_stop(tmp_path):
-    signal, now, _ = signal_for("fvg_retest")
+def test_lifecycle_admits_order_block_retest_with_previous_candle_stop(tmp_path):
+    signal, now, _ = signal_for("order_block_retest")
     payload, _ = enriched_payload(signal)
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now)
     position = service.open_once(payload)
     assert position is not None
-    assert position["entry"] == 112 and position["stop_loss"] == 110
+    assert position["entry"] == 115 and position["stop_loss"] == 111
     assert position["stop_policy"] == CANDLE_STOP_POLICY
     assert service.open_once(payload) is None
     assert service._chart_overlay(position, "OPEN")["premium_zone"] == signal["premium_zone"]
@@ -415,7 +423,7 @@ def test_five_minute_trailing_never_lowers_stop_or_changes_target(tmp_path):
     # No gain-based modification, even when premium exceeds the old 20% threshold.
     clock[0] += timedelta(seconds=2)
     service.observe_quotes({("NSE_FNO", 101): {"price": 110, "trade_timestamp": clock[0].timestamp()}}, clock[0])
-    assert service.open_positions()[0]["stop_loss"] == 75
+    assert service.open_positions()[0]["stop_loss"] == 76
     start = now.replace(hour=9, minute=50, second=0, microsecond=0)
     candles = bars([(90, 110, 88, 105)] * 5, 1, start)
     clock[0] = start + timedelta(minutes=5, seconds=5)
@@ -445,10 +453,10 @@ def test_trailing_ignores_partial_and_entry_candles_and_closes_at_observed_quote
     clock[0] = start + timedelta(minutes=5, seconds=5)
     service.observe_quotes({("NSE_FNO", 101): {"price": 105, "trade_timestamp": clock[0].timestamp()}}, clock[0])
     service.observe_index_candles(101, "NSE_FNO", candles, clock[0])
-    assert service.open_positions()[0]["stop_loss"] == 75  # 09:45 bar began before entry.
+    assert service.open_positions()[0]["stop_loss"] == 76  # 09:45 bar began before entry.
     candles = bars([(90, 110, 88, 105)] * 5, 1, start + timedelta(minutes=5))
     service.observe_index_candles(101, "NSE_FNO", candles, clock[0])
-    assert service.open_positions()[0]["stop_loss"] == 75  # Future/partial bar.
+    assert service.open_positions()[0]["stop_loss"] == 76  # Future/partial bar.
     clock[0] = start + timedelta(minutes=10, seconds=5)
     service.observe_quotes({("NSE_FNO", 101): {"price": 87, "trade_timestamp": clock[0].timestamp()}}, clock[0])
     service.observe_index_candles(101, "NSE_FNO", candles, clock[0])
@@ -503,13 +511,13 @@ def make_live_scanner(tmp_path, monkeypatch, route):
     return scanner, service, dm, now, quote
 
 
-def test_fvg_live_poll_emits_without_waiting_for_next_scanner_minute(tmp_path, monkeypatch):
-    scanner, service, dm, now, quote = make_live_scanner(tmp_path, monkeypatch, "fvg_retest")
+def test_order_block_live_poll_emits_without_waiting_for_next_scanner_minute(tmp_path, monkeypatch):
+    scanner, service, dm, now, quote = make_live_scanner(tmp_path, monkeypatch, "order_block_retest")
     dm.fetch_quotes.return_value = {("NSE_FNO", 101): quote}
     assert scanner.live_check_once(now) == 1
     position = service.open_positions()[0]
-    assert position["metadata"]["setups"] == ["fvg_retest"]
-    assert position["entry"] == 112 and position["stop_loss"] == 110
+    assert position["metadata"]["setups"] == ["order_block_retest"]
+    assert position["entry"] == 115 and position["stop_loss"] == 111
     assert scanner.live_check_once(now) == 0
     quote.update(trade_timestamp=now.timestamp() + 1, price=112.1)
     assert scanner.live_check_once(now + timedelta(seconds=1)) == 0
@@ -530,13 +538,13 @@ def test_bos_live_poll_uses_real_preceding_quote_for_crossing(tmp_path, monkeypa
     position = service.open_positions()[0]
     assert position["metadata"]["setups"] == ["bos_retest"]
     assert position["entry"] == 130.2
-    assert position["target"] == 150.05
+    assert position["target"] == 138
 
 
 def test_stale_zone_watcher_cannot_emit_after_contract_refresh(tmp_path, monkeypatch):
-    scanner, _, _, now, _ = make_live_scanner(tmp_path, monkeypatch, "fvg_retest")
+    scanner, _, _, now, _ = make_live_scanner(tmp_path, monkeypatch, "order_block_retest")
     stale = scanner._index_zone_states.pop(("NSE_FNO", 101))
-    signal, _, (five, _, _) = signal_for("fvg_retest")
+    signal, _, (five, _, _) = signal_for("order_block_retest")
     assert scanner._accept_index_signal(
         stale["instrument"], stale["contract"], {"armed": True}, five, signal, now,
         zone_state=stale,
