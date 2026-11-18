@@ -720,6 +720,11 @@ def initialize_app(force: bool = False):
                         live_state.get("adapter_diagnostics", {}).get("probe_status", "unavailable"),
                         live_state["blockers"])
         logger.info("🗄️ Trading DB path: %s", runtime_config["db_path"])
+        if os.getenv("RENDER") and not os.path.isabs(runtime_config["signal_db_path"]):
+            logger.warning(
+                "⚠️ SIGNAL_DB_PATH=%s is on Render's temporary filesystem; restarts erase open "
+                "positions, P&L reports and duplicate protection. Attach a persistent disk and set "
+                "SIGNAL_DB_PATH=/var/data/signals.db", runtime_config["signal_db_path"])
         logger.info("=" * 70)
         initialized = True
         return True

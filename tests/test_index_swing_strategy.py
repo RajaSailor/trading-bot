@@ -321,7 +321,7 @@ def quote(price, now, security=101):
     return {("NSE_FNO", security): {"price": price, "trade_timestamp": now.timestamp()}}
 
 
-def test_unlimited_independent_signals_can_remain_open_and_persist(lifecycle):
+def test_one_open_signal_per_side_persists_and_blocks_same_side_repeats(lifecycle):
     service, clock, sent = lifecycle
     first = service.open_once(incoming(key="setup-1"))
     assert first is not None
@@ -331,10 +331,11 @@ def test_unlimited_independent_signals_can_remain_open_and_persist(lifecycle):
                    "ON lifecycle_signals(underlying) WHERE status='OPEN'")
     second_time = NOW + timedelta(seconds=2)
     restarted = SignalLifecycle(service.db_path, clock=lambda: second_time)
-    second = restarted.open_once(incoming(now=second_time, key="setup-2"))
+    assert restarted.open_once(incoming(now=second_time, key="setup-2")) is None
+    second = restarted.open_once(incoming(side="PE", now=second_time, key="setup-3"))
     assert second is not None
     assert len(restarted.open_positions()) == 2
-    assert service.open_once(incoming(now=second_time, key="setup-2")) is None
+    assert service.open_once(incoming(side="PE", now=second_time, key="setup-3")) is None
     service.dispatch_notifications()
     assert all(category == "index_options" for category, _ in sent)
 

@@ -413,6 +413,23 @@ def test_lifecycle_admits_order_block_retest_with_previous_candle_stop(tmp_path)
     assert service._chart_overlay(position, "OPEN")["premium_zone"] == signal["premium_zone"]
 
 
+def test_one_open_advisory_per_underlying_side_blocks_repeat_open_alerts(tmp_path):
+    first, first_now, _ = signal_for("order_block_retest")
+    second, second_now, _ = signal_for("compression_breakout")
+    clock = [first_now]
+    service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: clock[0])
+    assert service.open_once(enriched_payload(first)[0]) is not None
+    clock[0] = second_now
+    payload, _ = enriched_payload(second)
+    assert service.open_once(payload) is None
+    with sqlite3.connect(tmp_path / "signals.db") as db:
+        assert db.execute("SELECT COUNT(*) FROM lifecycle_outbox WHERE event_id LIKE '%:OPEN'"
+                          ).fetchone()[0] == 1
+    # The same setup is admissible once the first advisory is closed.
+    fresh = SignalLifecycle(tmp_path / "other.db", clock=lambda: second_now)
+    assert fresh.open_once(enriched_payload(signal_for("compression_breakout")[0])[0]) is not None
+
+
 def test_five_minute_trailing_never_lowers_stop_or_changes_target(tmp_path):
     signal, now, _ = signal_for("compression_breakout")
     payload, _ = enriched_payload(signal)
@@ -594,3 +611,20 @@ def test_chart_compresses_closed_sessions_marks_missing_bars_and_shows_volume_zo
     assert "Compression 75.00-82.00" in price_ax.get_legend_handles_labels()[1]
     assert len(volume_ax.patches) == len(five)
     assert any("Bot-rendered" in text.get_text() for text in saved[0].texts)
+
+
+
+def test_bos_alert_identity_is_stable_when_later_rejection_candles_arrive(monkeypatch):
+    import premium_structure
+    five, one, now = bos_history()
+    quote = {"price": 130.2, "bid": 130.15, "ask": 130.25, "trade_timestamp": now.timestamp()}
+
+    def bos_id():
+        signals, _, _ = evaluate_structure("BANKNIFTY", "CE", deepcopy(five), one, quote, now, .05)
+        return next(s for s in signals if s["setups"] == ["bos_retest"])["structure_id"]
+
+    first = bos_id()
+    original = premium_structure.bos_candidate
+    monkeypatch.setattr(premium_structure, "bos_candidate", lambda *a, **k: {
+        **original(*a, **k), "rejection_start": 1})
+    assert bos_id() == first
