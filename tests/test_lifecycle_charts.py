@@ -628,6 +628,16 @@ class TelegramPhotoTests(unittest.TestCase):
                 "index_options", "STOP", reply_to_message_id=77, expected_chat_id=-2001))
             handler._http_session.assert_not_called()
 
+    def test_text_read_timeout_is_not_resent_but_connect_failure_retries(self):
+        import requests
+        with patch.dict(os.environ, self.env(), clear=True):
+            handler = TelegramHandler()
+            session = MagicMock(post=MagicMock(side_effect=requests.ReadTimeout()))
+            handler._http_session = MagicMock(return_value=session)
+            self.assertIs(True, handler.send_to_channel("index_options", "OPEN"))
+            session.post.side_effect = requests.ConnectionError()
+            self.assertIs(False, handler.send_to_channel("index_options", "OPEN"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -415,7 +415,7 @@ def test_scanner_pattern_survives_failed_support_and_deduplicates(tmp_path, monk
     assert any(item.get("pattern_timeframes") for item in status["recent_index_evaluations"])
 
 
-def test_support_alert_is_first_without_blocking_independent_pattern(tmp_path, monkeypatch):
+def test_support_alert_is_first_and_same_side_pattern_does_not_repeat_open(tmp_path, monkeypatch):
     scanner, instrument, service, callback, now = scanner_with_pattern(tmp_path, monkeypatch)
     frames, base, _, _ = pattern_history(minutes=5)
     frames[-2].update(open=60, low=59.9, high=60.1, close=60)
@@ -437,13 +437,12 @@ def test_support_alert_is_first_without_blocking_independent_pattern(tmp_path, m
     scanner.fetcher.fetch_option_candles.side_effect = lambda c, interval, n, **kw: (
         prior + frames if interval == "5min" else base
     )
-    assert scanner._refresh_index_instrument(instrument, now, 23000) >= 2
-    policies = [call.args[0]["metadata"]["entry_policy"] for call in callback.call_args_list]
-    assert policies[0] == "premium_structure_v3"
-    assert PATTERN_POLICY in policies[1:]
-    assert len(service.open_positions()) == callback.call_count
     scanner._refresh_index_instrument(instrument, now, 23000)
-    assert len(service.open_positions()) == len(policies)
+    policies = [call.args[0]["metadata"]["entry_policy"] for call in callback.call_args_list]
+    assert policies == ["premium_structure_v3"]
+    assert len(service.open_positions()) == 1
+    scanner._refresh_index_instrument(instrument, now, 23000)
+    assert len(service.open_positions()) == 1 and callback.call_count == 1
 
 
 @pytest.mark.parametrize("minutes", INDEX_PATTERN_TIMEFRAMES)

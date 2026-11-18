@@ -339,10 +339,13 @@ class SignalLifecycle:
                "last_valid_quote_at": stamp,
             }
             with self._transaction() as db:
+                # One active advisory per underlying and side: overlapping setups on the
+                # same move must not repeat OPEN alerts while the first is still running.
                 if db.execute("SELECT 1 FROM lifecycle_signals WHERE signal_key=? OR "
                               "(underlying=? AND status='OPEN' AND "
-                              "(?=0 OR COALESCE(json_extract(data,'$.index_swing'),0) != 1))",
-                              (key, underlying, int(index_signal))).fetchone():
+                              "(?=0 OR COALESCE(json_extract(data,'$.index_swing'),0) != 1 "
+                              "OR json_extract(data,'$.option_type')=?))",
+                              (key, underlying, int(index_signal), side)).fetchone():
                     return None
                 last = db.execute("SELECT price FROM lifecycle_entries WHERE underlying=? AND side=?",
                                   (underlying, side)).fetchone()

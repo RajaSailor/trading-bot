@@ -281,11 +281,9 @@ def build_signal(symbol, side, candidate, five, one, quote, now, tick, category=
     identity = {key: candidate[key] for key in (
         "route", "source_start", "known_at", "low", "high",
     )}
-    # Zones alert once per zone; candle-triggered routes need a distinct trigger.
+    # Zones and BOS levels alert once; later rejection candles must not create new alerts.
     if candidate["route"] not in ("fvg_retest", "order_block_retest", "bos_retest"):
         identity["trigger_start"] = candidate["trigger_start"]
-    if candidate["route"] == "bos_retest":
-        identity["rejection_start"] = candidate["rejection_start"]
     route_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("ascii")).hexdigest()[:24]
     chart = _session(completed_candles(five, now, timeframe_seconds=300), now)
     # Keep only the sessions needed for these routes, not ten-session pattern history.

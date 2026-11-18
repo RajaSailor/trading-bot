@@ -121,11 +121,16 @@ TRADE_JOURNAL_EXPORT_TOKEN = <independently generated 32+ character secret>
 ```
 
 Use persistent disk storage for both the signal SQLite database and anti-chop
-state, and one scanner process. Signal/report outbox delivery retries with
-backoff; Telegram has no idempotent-send primitive, so an ambiguous accepted
-send followed by a crash may repeat the **same event ID**, never open a new
-signal. Monitor undelivered events in `/health`. Do not deploy multiple scanner
-workers via Gunicorn.
+state, and one scanner process. Without a disk (for example `trading.db` in the
+service directory), every restart or redeploy erases open positions, daily and
+monthly P&L history and duplicate protection, so reports show `Opened: 0`; the
+bot logs a startup warning on Render when `SIGNAL_DB_PATH` is relative. Only one
+index advisory per underlying and side (CE/PE) is open at a time. Signal/report
+outbox delivery retries with backoff, but a Telegram response timeout is treated
+as delivered to avoid repeated posts; an ambiguous accepted send followed by a
+crash may still repeat the **same event ID**, never open a new signal. Monitor
+undelivered events in `/health`. Do not deploy multiple scanner workers via
+Gunicorn.
 
 The Excel journal reads the existing signal and live SQLite databases and writes
 a background-generated `.xlsx` under `/var/data`. Protect the authenticated

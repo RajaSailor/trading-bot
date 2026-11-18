@@ -363,6 +363,10 @@ class TelegramHandler:
 
             logger.error("❌ Failed to send to %s: HTTP %s", channel_type, response.status_code)
             return False
+        except requests.ReadTimeout:
+            # The request reached Telegram; retrying would usually post a duplicate.
+            logger.warning("⚠️ Telegram response timed out for %s; not resending", channel_type)
+            return True
         except Exception as e:
             logger.error("Error sending to channel %s: %s", channel_type, e.__class__.__name__)
             return False
