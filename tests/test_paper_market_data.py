@@ -207,7 +207,7 @@ def test_expired_interests_are_union_batched_with_new_request(feed):
     assert post.call_args.kwargs["json"] == {"NSE_FNO": [42, 43]}
 
 
-@pytest.mark.parametrize("retry_after,expected", [("15", 15), ("999999", 60), ("nan", 2), ("bad", 2)])
+@pytest.mark.parametrize("retry_after,expected", [("15", 15), ("999999", 999999), ("nan", 2), ("bad", 2)])
 def test_429_backoff_is_shared_with_ltp_no_immediate_retry(feed, retry_after, expected):
     manager, post, clock = feed
     post.return_value = response({}, status=429, headers={"Retry-After": retry_after})
@@ -219,6 +219,36 @@ def test_429_backoff_is_shared_with_ltp_no_immediate_retry(feed, retry_after, ex
     manager.fetch_ltp({"NSE_FNO": [42]})
     assert post.call_count == 2
     assert market._quote_rate_limiter["retry_at"] >= clock[0] + 4
+
+
+def test_429_slower_pacing_survives_success_and_applies_to_ltp(feed, monkeypatch):
+    manager, post, clock = feed
+    monkeypatch.setitem(market._quote_rate_limiter, "min_interval", 1.1)
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(market.time, "sleep", sleep)
+    post.return_value = response({}, status=429)
+    manager.fetch_quotes({"NSE_FNO": [42]})
+    assert market._quote_rate_limiter["min_interval"] == 2.2
+    clock[0] += 2
+    post.return_value = response({"last_price": 100})
+    manager.fetch_ltp({"NSE_FNO": [42]})
+    assert sleeps == [pytest.approx(.2, abs=1e-6)]
+    assert market._quote_rate_limiter["failures"] == 0
+    assert market._quote_rate_limiter["min_interval"] == 2.2
+    assert market.market_quote_diagnostics()["min_interval_seconds"] == 2.2
+
+
+def test_repeated_429_pacing_is_bounded_but_retry_after_is_honored(feed):
+    _, _, clock = feed
+    for _ in range(10):
+        market._quote_backoff(response({}, status=429, headers={"Retry-After": "120"}))
+    assert market._quote_rate_limiter["min_interval"] == 5
+    assert market._quote_rate_limiter["retry_at"] == clock[0] + 120
 
 
 def test_exception_backoff_does_not_log_exception_body(feed, caplog):

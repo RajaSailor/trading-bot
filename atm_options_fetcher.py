@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import json
 import threading
+import time
 import weakref
 import zlib
 from collections import OrderedDict
@@ -20,6 +21,7 @@ BAND_ITM_PLUS_1 = "ITM+1"
 BAND_ATM = "ATM"
 BAND_OTM_PLUS_1 = "OTM+1"
 STRIKE_BAND = (BAND_ITM_PLUS_1, BAND_ATM, BAND_OTM_PLUS_1)
+EMPTY_HISTORY_RETRY_SECONDS = 300
 
 # Backward-compatible name for the ATM selection reason.
 REASON_ATM = BAND_ATM
@@ -48,6 +50,7 @@ class ATMOptionsFetcher:
         self._unlisted_day: Optional[date] = None
         self._unlisted_warned: set = set()
         self._premium_history = OrderedDict()
+        self._empty_history_retry = OrderedDict()
         self._premium_history_lock = threading.RLock()
 
     # ------------------------------------------------------------------ spot
@@ -203,8 +206,14 @@ class ATMOptionsFetcher:
             start.isoformat(), previous.isoformat(), interval,
         )
         with self._premium_history_lock:
+            clock = time.monotonic()
+            for failed_key, retry_at in list(self._empty_history_retry.items()):
+                if retry_at <= clock:
+                    del self._empty_history_retry[failed_key]
             cached = self._premium_history.get(key)
-            if cached is None:
+            if cached is None and key in self._empty_history_retry:
+                history = []
+            elif cached is None:
                 history = self.data_manager.fetch_contract_candles(
                     security_id=contract["security_id"],
                     exchange_segment=contract["exchange_segment"],
@@ -218,8 +227,12 @@ class ATMOptionsFetcher:
                            or sum(map(len, self._premium_history.values())) > 32 * 1024 * 1024):
                         self._premium_history.popitem(last=False)
                 else:
+                    self._empty_history_retry[key] = time.monotonic() + EMPTY_HISTORY_RETRY_SECONDS
+                    while len(self._empty_history_retry) > 128:
+                        self._empty_history_retry.popitem(last=False)
                     logger.warning("[%s] Extended premium history unavailable; longer pattern timeframes "
-                                   "may be skipped", contract["option_symbol"])
+                                   "may be skipped; retrying extended history in %s seconds",
+                                   contract["option_symbol"], EMPTY_HISTORY_RETRY_SECONDS)
             else:
                 self._premium_history.move_to_end(key)
                 history = json.loads(zlib.decompress(cached))

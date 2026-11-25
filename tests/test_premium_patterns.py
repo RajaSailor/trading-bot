@@ -370,6 +370,38 @@ def test_extended_history_is_cached_separately_and_current_data_takes_precedence
     assert dm.fetch_contract_candles.call_count == 5
 
 
+def test_empty_extended_history_retries_later_without_stopping_current_refresh(monkeypatch, caplog):
+    import atm_options_fetcher
+
+    clock = [1000.0]
+    monkeypatch.setattr(atm_options_fetcher.time, "monotonic", lambda: clock[0])
+    dm = MagicMock()
+    _, base, now, _ = pattern_history()
+    current, historical = base[-2:], []
+    dm.fetch_contract_candles.side_effect = lambda **kw: (
+        current if kw["to_date"] == now.date().isoformat() else historical
+    )
+    contract = {"security_id": 101, "exchange_segment": "MCX_COMM",
+                "instrument_type": "OPTFUT", "option_symbol": "GOLD-CE"}
+    fetcher = ATMOptionsFetcher(dm)
+    with caplog.at_level("WARNING", logger="atm_options_fetcher"):
+        assert fetcher.fetch_option_candles(contract, "1min", now, lookback_sessions=10) == current
+        clock[0] += 60
+        current[-1] = {**current[-1], "close": 55.1}
+        assert fetcher.fetch_option_candles(contract, "1min", now, lookback_sessions=10) == current
+    assert dm.fetch_contract_candles.call_count == 3
+    assert caplog.text.count("Extended premium history unavailable") == 1
+    other = {**contract, "security_id": 102, "option_symbol": "GOLD-PE"}
+    fetcher.fetch_option_candles(other, "1min", now, lookback_sessions=10)
+    assert dm.fetch_contract_candles.call_count == 5
+    clock[0] += 240
+    historical = base[:-2]
+    assert fetcher.fetch_option_candles(contract, "1min", now, lookback_sessions=10) == historical + current
+    assert dm.fetch_contract_candles.call_count == 7
+    fetcher.fetch_option_candles(contract, "1min", now, lookback_sessions=10)
+    assert dm.fetch_contract_candles.call_count == 8
+
+
 @pytest.mark.parametrize("mutation,reason", [
     (lambda quote, now: quote.update(trade_timestamp=now.timestamp() - 11), "index_quote_stale"),
     (lambda quote, now: quote.update(bid=40), "index_spread"),

@@ -72,5 +72,5 @@ def test_market_quote_diagnostics_are_safe_and_report_backoff(monkeypatch):
     assert data_manager.market_quote_diagnostics()["auth_rejected"]
     assert set(status) == {
         "last_http_status", "auth_rejected", "rate_limited", "retry_in_seconds",
-        "consecutive_failures", "last_valid_quote_at",
+        "consecutive_failures", "last_valid_quote_at", "min_interval_seconds",
     }
