@@ -240,7 +240,7 @@ _api_rate_limiter = {
 # separate processes require external coordination of the broker budget.
 _quote_rate_limiter = {
     'last_call': 0,
-    'min_interval': 1.0,
+    'min_interval': 1.1,
     'lock': threading.Lock(),
     'retry_at': 0.0,
     'failures': 0,
@@ -319,6 +319,9 @@ def _quote_backoff(response=None) -> None:
     limiter["failures"] = min(limiter.get("failures", 0) + 1, 6)
     delay = min(60.0, 2.0 ** limiter["failures"])
     if response is not None:
+        if response.status_code == 429:
+            # Retain slower pacing after recovery instead of repeating the same burst.
+            limiter["min_interval"] = min(5.0, max(1.1, limiter["min_interval"] * 2))
         try:
             value = response.headers.get("Retry-After", "")
             try:
@@ -326,7 +329,7 @@ def _quote_backoff(response=None) -> None:
             except ValueError:
                 retry_after = parsedate_to_datetime(value).timestamp() - time.time()
             if math.isfinite(retry_after) and retry_after > 0:
-                delay = min(60.0, max(delay, retry_after))
+                delay = max(delay, retry_after)
         except (TypeError, ValueError, OverflowError):
             pass
     limiter["retry_at"] = time.time() + delay
@@ -341,6 +344,7 @@ def market_quote_diagnostics() -> dict:
             "rate_limited": _quote_rate_limiter.get("last_http_status") == 429,
             "retry_in_seconds": max(0, _quote_rate_limiter.get("retry_at", 0) - time.time()),
             "consecutive_failures": _quote_rate_limiter.get("failures", 0),
+            "min_interval_seconds": _quote_rate_limiter["min_interval"],
             "last_valid_quote_at": _quote_rate_limiter.get("last_valid_quote_at"),
         }
 

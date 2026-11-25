@@ -192,7 +192,18 @@ evidence and falls back with adverse 1% slippage: BUY ×1.01 rounded up to a tic
 SELL ×0.99 rounded down. MARKET uses the same adverse fresh-quote model. Marks
 are valuation evidence, not executable prices. Requests share batching, a bounded
 cache, pacing and HTTP 429 backoff; pacing is a local policy, not a claimed API
-quota. There is no execution-speed guarantee.
+quota. Quote/LTP pacing starts at 1.1 seconds and slows after each HTTP 429
+(up to five seconds between requests), retaining the slower pace after recovery.
+Broker `Retry-After` delays are honored even above 60 seconds. This coordination
+is process-local: multiple deployed workers or other API clients can still
+exceed the account budget. There is no execution-speed guarantee.
+
+Empty extended premium-history requests are retried after five minutes per exact
+contract, date range and interval, rather than every scan. Current candles still
+refresh normally; successful extended history remains cached separately.
+Missing candles are never synthesized, and affected pattern timeframes may
+remain unavailable. This historical-data retry policy is separate from
+marketfeed quote throttling; it does not establish why Dhan returned no candles.
 
 Protection runs independently of signal arrival and approval state, including
 startup recovery: equity options square off at 15:25 IST, commodities at 23:00
