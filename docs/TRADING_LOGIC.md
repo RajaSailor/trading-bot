@@ -66,16 +66,16 @@ not proof that an institutional order or imbalance exists.
 
 | Route | Confirmation / entry | Initial stop | Fixed target |
 | --- | --- | --- | --- |
-| Compression | At least two consecutive completed 5m candles; combined high minus low <=15% of combined low. Extend backwards through consecutive candles while this remains true. After a confirmed prior decline, first completed 1m close above the frozen range high. No earlier post-range 1m close may already break the range. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk strictly >1:1 |
-| Bullish FVG | Three consecutive completed 5m candles; third low > first high, middle candle green with body >=50% of its high-low range. Gap is [first high, third low], known only after the third closes above it. First fresh live premium in that range alerts; no close confirmation. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk strictly >1:1 |
-| Bullish order block | A completed bullish 5m candle first closes above the latest already-confirmed swing high; the last red candle within its preceding five candles defines the full [low, high] block. Breakout close must be above the block. First fresh live retest alerts. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk strictly >1:1 |
-| BOS/retest | Latest two confirmed 5m highs form a lower high. A completed 5m close breaks it from below, followed by a completed wick rejection within +/-10% of that level. No subsequent completed close may break below the band. Then a fresh live crossing from at/below the lower high to above it (within +10%) alerts, without another 5m close. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk strictly >1:1 |
+| Compression | At least two consecutive completed 5m candles; combined high minus low <=15% of combined low. Extend backwards through consecutive candles while this remains true. After a confirmed prior decline, first completed 1m close above the frozen range high. No earlier post-range 1m close may already break the range. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
+| Bullish FVG | Three consecutive completed 5m candles; third low > first high, middle candle green with body >=50% of its high-low range. Gap is [first high, third low], known only after the third closes above it. First fresh live premium in that range alerts; no close confirmation. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
+| Bullish order block | A completed bullish 5m candle first closes above the latest already-confirmed swing high; the last red candle within its preceding five candles defines the full [low, high] block. Breakout close must be above the block. First fresh live retest alerts. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
+| BOS/retest | Latest two confirmed 5m highs form a lower high. A completed 5m close breaks it from below, followed by a completed wick rejection within +/-10% of that level. No subsequent completed close may break below the band. Then a fresh live crossing from at/below the lower high to above it (within +10%) alerts, without another 5m close. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
 
 Compression example: prior confirmed high 150, decline to a 75-82 range held
 for two or more completed 5m candles, then a completed 1m close above 82.
 The range width may be up to 15% of its low. The initial stop is the preceding
 completed 5m low and the target is the nearest confirmed swing high that is
-strictly more than 1R above entry. It does not require five or ten range candles
+at least 1R above entry. It does not require five or ten range candles
 or another 5m breakout.
 The confirming candle need not be green; the required event is its close above
 the range. Support recovery similarly requires the close above the previous
@@ -136,8 +136,8 @@ broken the boundary or invalidated the chart structure. For sloped boundaries,
 compare at each candle index, not against an invented flat line. Confirmation
 must end today and be no more than 75 seconds old; the fresh quote must remain
 above the pattern close/boundary. For every route, initial stop is the previous
-completed 5m low and target is the nearest confirmed swing high strictly more
-than 1R above entry. Skip when no such target exists. Forming patterns,
+completed 5m low and target is the nearest confirmed swing high at least
+1R above entry. Skip when no such target exists. Forming patterns,
 continuation above an old breakout, and bearish patterns do not alert.
 
 Build intraday timeframes from exact-contract one-minute OHLC, anchored to each
@@ -157,9 +157,9 @@ History or API failures can still leave timeframes unavailable; they are not
 interpreted as “no pattern.”
 
 Each confirmed pattern has its own contract/timeframe/name/geometry/confirmation
-identity. Repeated scans and restarts cannot reopen the same signal. Different
-confirmed patterns or timeframes may produce separate alerts; support acceptance
-does not suppress them. The chart freezes the completed detection candles,
+identity. Repeated scans and restarts cannot reopen the same signal. Only one
+open advisory per underlying and option side is admitted at a time, including
+overlapping support and pattern signals. The chart freezes the completed detection candles,
 draws pattern vertices and neckline/trendlines, names the exact timeframe, and
 shows entry, initial stop and target. Pattern evidence and the risk levels are
 revalidated at durable lifecycle admission, not inferred from a label alone.
@@ -181,17 +181,42 @@ target and above stop. The alert labels the actual confirming close separately
 from the fresh observed premium: it cannot guarantee a past candle-close fill.
 
 For all new routes, the target is the nearest confirmed five-minute swing high
-strictly more than 1R above entry. If no such target exists, skip the alert.
+at least 1R above entry. If no such target exists, skip the alert.
+For every new index, stock-option and commodity-option advisory, additionally
+require final entry minus stop >= 5% of entry, target minus entry >= 10% of
+entry, and target minus entry >= entry minus stop. Exact equality passes.
+These checks use the final tick-rounded lifecycle levels; they do not adjust
+the stop or search for a different target to satisfy the thresholds. If any
+check fails, skip opening and log the rejection reason. Existing open signals
+and their trailing/exit rules are unaffected.
 The target remains fixed after entry. Stop/target alerts use observed premium;
 they are not broker orders or guaranteed execution prices.
 
 ### Re-entry, protection and frequency
 
+- Every new ATM structure/pattern advisory is screened for sideways price
+  action using that exact contract's completed 5m candles. Start with a candle,
+  then compare the next close to [(high + low) / 2] * [0.94, 1.06] of the
+  preceding candle. Equality stays inside. Two or more consecutive candles
+  establish sideways action; the run can continue beyond five candles.
+  Recalculate the midpoint from each preceding candle, never a fixed third
+  candle, and never from the forming or breakout candle itself.
+- A sideways run blocks all routes, including FVG/OB touches. An upward escape
+  requires a completed 5m close strictly above 106% of the preceding midpoint.
+  Then a subsequent completed 1m candle must close strictly above the breakout
+  5m high, and the live premium must remain above that high. A fresh quote and
+  all original setup/risk checks are still required. The initial stop remains
+  the previous completed 5m low, and upward-only 5m trailing is unchanged.
+  A downward escape does not release the buy block; only a later upward
+  escape and its minute confirmation can do so. Missing or stale confirmation
+  is rejected explicitly. Candle gaps reset the run rather than linking
+  different sessions. Serialized candle evidence allows the gate to be checked
+  again at durable admission, including after a restart.
 - Repeated FVG/OB touches alert once per exact-contract zone; BOS once per
   lower-high break and rejection. Candle-based routes require a new confirmation.
   Idempotency persists across scans/restarts, not just the current open position.
-- There is no daily entry-alert cap. Multiple index signals can be open at once;
-  each has its own signal ID, contract, entry, stop, target and lifecycle.
+- There is no daily entry-alert cap. One advisory per underlying and option side
+  can be open at once; each accepted signal has its own lifecycle.
 - All new structure and pattern entries use the immediately preceding completed
   5m option candle low, rounded to tick size, as the initial stop.
 - **New index, stock and commodity signals freeze `completed_5m_low_v1`.** Each fully post-entry

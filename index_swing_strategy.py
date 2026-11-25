@@ -645,6 +645,9 @@ class IndexSwingStrategy:
                 "entry_candles": [{key: bar[key] for key in
                                    ("timestamp", "open", "high", "low", "close")}
                                   for bar in risk_candles],
+                "entry_one_minute_candles": [
+                    {key: bar[key] for key in ("timestamp", "open", "high", "low", "close")}
+                    for bar in completed_candles(candles, now, timeframe_seconds=60)],
             }
             if not valid_entry(signal, now):
                 raise IndicatorDataError("index_pattern_evidence_invalid")

@@ -47,7 +47,7 @@ def _target(bars, price, tick, *, above=True):
 
 
 def _entry_risk_levels(five, price, stamp, now, tick):
-    """Choose the prior completed 5m low and nearest confirmed >1R swing target."""
+    """Choose the prior completed 5m low and nearest confirmed >=1R swing target."""
     bars = [bar for bar in completed_candles(five, now, timeframe_seconds=300)
             if bar["_timestamp_epoch"] + 300 <= stamp]
     for index in range(len(bars) - 1, 0, -1):
@@ -60,13 +60,14 @@ def _entry_risk_levels(five, price, stamp, now, tick):
     stop = float(bars[-1]["low"])
     if not 0 < stop < price:
         raise IndicatorDataError("index_previous_5m_low_not_below_entry")
-    risk = price - stop
+    risk = Decimal(str(price)) - Decimal(str(stop))
     candidates = {float(level) for _, kind, level in swing_points(bars)
                   if kind == "H" and level > price}
     tick = Decimal(str(tick))
     targets = sorted(float((Decimal(str(level)) / tick).to_integral_value(
         rounding=ROUND_FLOOR) * tick) for level in candidates)
-    target = next((level for level in targets if level - price > risk), None)
+    target = next((level for level in targets
+                   if Decimal(str(level)) - Decimal(str(price)) >= risk), None)
     if target is None:
         raise IndicatorDataError("index_no_target_above_1r")
     return stop, target

@@ -21,6 +21,8 @@ from latency_tracker import now_mark
 from live_signal_detector import LiveSignalDetector
 from premium_strategy_engine import LOOKBACK_CANDLES, TRIGGER_LIVE, PremiumStrategyEngine
 from premium_indicators import IndicatorDataError, completed_candles
+from premium_risk_filter import rejection_reason as premium_risk_rejection
+from premium_sideways import signal_rejection as sideways_rejection
 from premium_patterns import (
     ASSET_PATTERN_TIMEFRAMES, INDEX_PATTERN_TIMEFRAMES, PATTERN_LOOKBACK_SESSIONS,
     PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES,
@@ -787,6 +789,24 @@ class PremiumScreener:
         ):
             self._count_indicator_reason("entry_gate_rejected")
             return 0
+        if signal.get("entry_policy") in (STRUCTURE_POLICY, PATTERN_POLICY):
+            reason = sideways_rejection(signal, now)
+            if reason:
+                self._count_indicator_reason(reason)
+                logger.info("Premium entry skipped: %s %s (%s)", instrument.symbol,
+                            contract["option_type"], reason)
+                return 0
+        if self.signal_lifecycle is None:
+            reason = premium_risk_rejection(
+                signal.get("breakout_price"), signal.get("stop_loss"), signal.get("target"))
+            if not reason:
+                reason = premium_risk_rejection(
+                    signal.get("entry"), signal.get("stop_loss"), signal.get("target"))
+            if reason:
+                self._count_indicator_reason(reason)
+                logger.info("Premium entry skipped: %s %s (%s)", instrument.symbol,
+                            contract["option_type"], reason)
+                return 0
         signal_key = self._signal_key(instrument.category, {**signal, "option_symbol": contract["option_symbol"]})
         with self._lock:
             if self._monitored.get(int(contract["security_id"])) is not state:

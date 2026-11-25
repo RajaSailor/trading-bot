@@ -146,6 +146,13 @@ class SessionGatingTests(_Base):
 
 
 class BreakoutFlowTests(_Base):
+    def setUp(self):
+        super().setUp()
+        # Isolate legacy routing and delivery from the independently tested risk gate.
+        patcher = patch("screener_premium.premium_risk_rejection", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_nifty_gate_rejection_counts_and_consumes_reference(self):
         self._assert_market_rejection("direction_filter_reject")
 
@@ -516,6 +523,12 @@ class BreakoutFlowTests(_Base):
 
 class ActualLiveEvidenceTests(_Base):
     _prime = BreakoutFlowTests._prime
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch("screener_premium.premium_risk_rejection", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     ARMED = [
         _candle(0, 98, 110, 95, 100),

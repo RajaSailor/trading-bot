@@ -125,6 +125,7 @@ def test_durable_admission_does_not_require_legacy_price_action_evidence(tmp_pat
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: NOW)
     candidate = incoming()
     candidate["metadata"].pop("price_action_confirmations", None)
+    candidate["metadata"]["target"] = 105
     assert service.open_once(candidate) is not None
 
 
