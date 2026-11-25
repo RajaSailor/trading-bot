@@ -29,6 +29,9 @@ from index_swing_strategy import (
     aggregate_five_minutes, describe_setup, premium_exchange, valid_entry as valid_index_entry,
 )
 from premium_indicators import IndicatorDataError, completed_candles
+from premium_risk_filter import rejection_reason as premium_risk_rejection
+from premium_patterns import PATTERN_POLICY
+from premium_sideways import signal_rejection as sideways_rejection
 from premium_strategy_engine import TRIGGER_LIVE
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -306,6 +309,16 @@ class SignalLifecycle:
                 ((entry + 2 * (entry - stop)) / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
             if index_signal and not stop < entry < target:
                 return None
+            risk_rejection = premium_risk_rejection(entry, stop, target)
+            if risk_rejection:
+                logger.info("Premium entry skipped: %s %s (%s; entry=%s stop=%s target=%s)",
+                            underlying, side, risk_rejection, entry, stop, target)
+                return None
+            if meta.get("entry_policy") in (STRUCTURE_POLICY, PATTERN_POLICY):
+                reason = sideways_rejection(meta, now)
+                if reason:
+                    logger.info("Premium entry skipped: %s %s (%s)", underlying, side, reason)
+                    return None
             signal_id = uuid.uuid4().hex
             stop_policy = (CANDLE_STOP_POLICY if index_signal
                            and meta.get("requested_stop_policy") == CANDLE_STOP_POLICY

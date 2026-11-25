@@ -43,14 +43,27 @@ Spot is used only to select the listed ATM strike; same-day expiry is skipped.
 
 All new routes use the immediately preceding completed five-minute candle low
 as the initial stop. The target is the nearest confirmed premium swing high
-strictly more than 1R above entry; skip the signal if none qualifies.
+at least 1R above entry; skip the signal if none qualifies.
+Before opening a premium advisory in any option category, the final entry,
+stop and target must also satisfy: entry minus stop at least 5% of entry,
+target minus entry at least 10% of entry, and reward at least equal to the risk.
+Equality passes. Setups failing any condition are skipped; the bot does not
+move the stop or target to force a pass. Existing open advisories are unchanged.
+All new ATM structure and pattern alerts also apply the sideways gate to the
+exact option contract. Two or more consecutive completed 5m candles are
+sideways when the next close stays within +/-6% of the preceding candle's
+high/low midpoint. There is no fixed five-candle limit. Buying remains blocked
+until a completed 5m close exceeds 106% of the preceding midpoint and a later
+completed 1m close exceeds that breakout candle's high, with the live premium
+still above it. A downward escape does not permit a buy. Existing setup, risk
+and trailing rules still apply; a breakout alone is not an entry signal.
 **New premium-only alerts trail upward to each fully post-entry completed five-minute
 candle low**, replacing the 20%/5% ladder. Stops never move down; old open signals
 retain their frozen stop policy. Live touches/crossings are observed prices,
 not guaranteed fills or knowledge of the forming candle's eventual final low.
-Duplicate zone touches do not reopen the same zone; BOS requires a distinct
-rejection and candle-triggered routes a distinct confirmation. There is no daily alert
-cap, so multiple independently confirmed signals may remain open per index.
+Duplicate zone touches do not reopen the same zone. Only one advisory per
+underlying and option side may remain open at a time; a new independent
+signal may open after that advisory closes.
 Up to ten prior trading sessions are requested for the exact contract; missing
 or insufficient history explicitly skips affected timeframes. Intraday bars
 follow the relevant exchange session and daily patterns use completed session

@@ -323,7 +323,9 @@ def quote(price, now, security=101):
 
 def test_one_open_signal_per_side_persists_and_blocks_same_side_repeats(lifecycle):
     service, clock, sent = lifecycle
-    first = service.open_once(incoming(key="setup-1"))
+    first_payload = incoming(key="setup-1")
+    first_payload["metadata"]["target"] = 105
+    first = service.open_once(first_payload)
     assert first is not None
     with service._connection() as db:
         db.execute("DROP INDEX lifecycle_open_underlying")
@@ -332,7 +334,9 @@ def test_one_open_signal_per_side_persists_and_blocks_same_side_repeats(lifecycl
     second_time = NOW + timedelta(seconds=2)
     restarted = SignalLifecycle(service.db_path, clock=lambda: second_time)
     assert restarted.open_once(incoming(now=second_time, key="setup-2")) is None
-    second = restarted.open_once(incoming(side="PE", now=second_time, key="setup-3"))
+    second_payload = incoming(side="PE", now=second_time, key="setup-3")
+    second_payload["metadata"]["target"] = 105
+    second = restarted.open_once(second_payload)
     assert second is not None
     assert len(restarted.open_positions()) == 2
     assert service.open_once(incoming(side="PE", now=second_time, key="setup-3")) is None
@@ -368,21 +372,20 @@ def test_lifecycle_rejects_non_atm_index_contracts(lifecycle):
     assert service.open_once(signal) is None
 
 
-def test_lifecycle_accepts_a_support_reclaim_after_previous_minute_was_below_stop(lifecycle):
+def test_lifecycle_rejects_support_reclaim_with_narrow_stop(lifecycle):
     service, _, _ = lifecycle
     signal = incoming()
     signal["metadata"].update(
         reference_high=59.9, breakout_price=61.5,
         one_minute_open=59.8, one_minute_close=61, retest_low=59.8,
     )
-    position = service.open_once(signal)
-    assert position is not None
-    assert position["stop_loss"] == 60
-    assert position["entry"] == 61.5
+    assert service.open_once(signal) is None
 
 
 def test_scanner_routes_indices_and_stocks_to_atm_premium_strategy(tmp_path, monkeypatch):
     monkeypatch.setenv("INDEX_SWING_STRATEGY_ENABLED", "true")
+    monkeypatch.setattr("screener_premium.sideways_rejection", lambda *args: None)
+    monkeypatch.setattr("signal_lifecycle.sideways_rejection", lambda *args: None)
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: NOW)
     instrument = SimpleNamespace(symbol="NIFTY", category="index_options", exchange="NSE")
     stock = SimpleNamespace(symbol="RELIANCE", category="nifty50_stock_options", exchange="NSE")

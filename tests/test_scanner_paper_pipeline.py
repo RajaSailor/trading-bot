@@ -52,6 +52,9 @@ def passing_breakout_candles(today=RISING_DAY):
 @pytest.fixture
 def pipeline(tmp_path, monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
+    # These legacy routing tests exercise downstream delivery independently of
+    # the risk filter; separate tests exercise the real filter and outbox.
+    monkeypatch.setattr("screener_premium.premium_risk_rejection", lambda *args: None)
     import main
 
     clock = SimpleNamespace(now=datetime(2026, 10, 5, 10, 45, 5, tzinfo=IST).timestamp())
@@ -133,6 +136,14 @@ def callback(order_id, action="approve_limit", update_id=1, callback_id="cb1"):
         "id": callback_id, "from": {"id": 42}, "data": f"paper:{order_id}:{action}",
         "message": {"chat": {"id": -100}, "from": {"id": 999, "is_bot": True}},
     }}
+
+
+def test_standalone_scanner_accepts_reward_between_1r_and_2r(pipeline, monkeypatch):
+    from premium_risk_filter import rejection_reason
+
+    monkeypatch.setattr("screener_premium.premium_risk_rejection", rejection_reason)
+    assert scan(pipeline) == 2
+    assert len(list(pipeline.queue._queue)) == 2
 
 
 def test_actual_ce_pe_scanner_to_main_queue_remains_signal_only(pipeline):

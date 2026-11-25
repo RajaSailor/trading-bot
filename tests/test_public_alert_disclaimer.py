@@ -56,7 +56,9 @@ def test_each_report_part_has_disclaimer_without_exceeding_message_budget(tmp_pa
 
 def test_index_chart_caption_and_serialized_outbox_preserve_notice_and_evidence(tmp_path):
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: NOW)
-    position = service.open_once(incoming())
+    candidate = incoming()
+    candidate["metadata"]["target"] = 105
+    position = service.open_once(candidate)
     with service._connection() as db:
         row = db.execute("SELECT message,position FROM lifecycle_outbox").fetchone()
     stored = json.loads(row["position"])
@@ -79,7 +81,9 @@ def test_index_chart_caption_and_serialized_outbox_preserve_notice_and_evidence(
 
 def test_missing_pnl_terminal_message_still_has_notice(tmp_path):
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: NOW)
-    position = service.open_once(incoming())
+    candidate = incoming()
+    candidate["metadata"]["target"] = 105
+    position = service.open_once(candidate)
     position.update(closed_at=NOW.timestamp(), exit_premium=None)
     position.pop("lot_size")
     message = service._signal_message(position, "SESSION_CLOSE")

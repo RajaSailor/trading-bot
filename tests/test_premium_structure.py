@@ -20,6 +20,14 @@ from signal_lifecycle import SignalLifecycle
 OPEN = datetime(2026, 11, 11, 9, 15, tzinfo=IST)
 
 
+@pytest.fixture(autouse=True)
+def isolate_structure_lifecycle_tests_from_sideways_gate(monkeypatch):
+    # Preserve coverage of route evidence, delivery and trailing independently;
+    # test_premium_sideways exercises the real gate including durable admission.
+    monkeypatch.setattr("screener_premium.sideways_rejection", lambda *args: None)
+    monkeypatch.setattr("signal_lifecycle.sideways_rejection", lambda *args: None)
+
+
 def bars(values, minutes=5, start=OPEN):
     return [{"timestamp": (start + timedelta(minutes=minutes * index)).timestamp(),
              "open": o, "high": h, "low": l, "close": c, "volume": 100 + index}
@@ -43,7 +51,7 @@ def structure_history(route="compression_breakout"):
         price = 112
     else:
         five = bars([(110, 120, 108, 115), (120, 130, 118, 125), (116, 121, 105, 118),
-                     (118, 122, 110, 111), (112, 140, 111, 138)])
+                     (118, 122, 110, 111), (112, 140, 108, 138)])
         now = OPEN + timedelta(minutes=25, seconds=20)
         five += bars([(138, 139, 112, 115)], start=OPEN + timedelta(minutes=25))
         one = bars([(138, 139, 112, 115)], 1, OPEN + timedelta(minutes=25))
@@ -57,6 +65,15 @@ def signal_for(route, symbol="NIFTY", side="CE", category="index_options"):
     five, one, now, quote = structure_history(route)
     signals, diagnostics, zones = evaluate_structure(symbol, side, five, one, quote, now, .05, category)
     return next(s for s in signals if s["setups"] == [route]), now, (five, one, quote)
+
+
+def test_entry_risk_levels_accept_exact_one_to_one_swing(monkeypatch):
+    import premium_structure
+
+    five, _, now, quote = structure_history("order_block_retest")
+    monkeypatch.setattr(premium_structure, "swing_points", lambda bars: [(0, "H", 122)])
+    assert premium_structure._entry_risk_levels(
+        five, quote["price"], quote["trade_timestamp"], now, .05) == (108, 122)
 
 
 ASSETS = [
@@ -291,7 +308,7 @@ def test_independent_premium_routes_all_indices_and_sides(route, symbol, side):
         assert signal["premium_zone"]["low"] <= signal["entry"] <= signal["premium_zone"]["high"]
         assert signal["reference_high"] > signal["entry"]  # Touch is not a breakout.
         assert signal["target"] == 130
-        assert signal["stop_loss"] == 111
+        assert signal["stop_loss"] == 108
 
 
 @pytest.mark.parametrize("route", ["order_block_retest"])
@@ -407,7 +424,7 @@ def test_lifecycle_admits_order_block_retest_with_previous_candle_stop(tmp_path)
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now)
     position = service.open_once(payload)
     assert position is not None
-    assert position["entry"] == 115 and position["stop_loss"] == 111
+    assert position["entry"] == 115 and position["stop_loss"] == 108
     assert position["stop_policy"] == CANDLE_STOP_POLICY
     assert service.open_once(payload) is None
     assert service._chart_overlay(position, "OPEN")["premium_zone"] == signal["premium_zone"]
@@ -534,14 +551,14 @@ def test_order_block_live_poll_emits_without_waiting_for_next_scanner_minute(tmp
     assert scanner.live_check_once(now) == 1
     position = service.open_positions()[0]
     assert position["metadata"]["setups"] == ["order_block_retest"]
-    assert position["entry"] == 115 and position["stop_loss"] == 111
+    assert position["entry"] == 115 and position["stop_loss"] == 108
     assert scanner.live_check_once(now) == 0
     quote.update(trade_timestamp=now.timestamp() + 1, price=112.1)
     assert scanner.live_check_once(now + timedelta(seconds=1)) == 0
     assert len(service.open_positions()) == 1
 
 
-def test_bos_live_poll_uses_real_preceding_quote_for_crossing(tmp_path, monkeypatch):
+def test_bos_live_poll_rejects_crossing_with_narrow_risk(tmp_path, monkeypatch):
     scanner, service, dm, _, _ = make_live_scanner(tmp_path, monkeypatch, "compression_breakout")
     five, one, now = bos_history()
     state = scanner._index_zone_states[("NSE_FNO", 101)]
@@ -551,11 +568,8 @@ def test_bos_live_poll_uses_real_preceding_quote_for_crossing(tmp_path, monkeypa
     # Keep lifecycle's admission clock aligned with the actual live observation.
     service.clock = lambda: now
     dm.fetch_quotes.return_value = {("NSE_FNO", 101): quote}
-    assert scanner.live_check_once(now) == 1
-    position = service.open_positions()[0]
-    assert position["metadata"]["setups"] == ["bos_retest"]
-    assert position["entry"] == 130.2
-    assert position["target"] == 138
+    assert scanner.live_check_once(now) == 0
+    assert not service.open_positions()
 
 
 def test_stale_zone_watcher_cannot_emit_after_contract_refresh(tmp_path, monkeypatch):

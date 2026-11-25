@@ -20,6 +20,14 @@ from screener_premium import PremiumScreener
 from signal_lifecycle import SignalLifecycle
 
 
+@pytest.fixture(autouse=True)
+def isolate_pattern_lifecycle_tests_from_sideways_gate(monkeypatch):
+    # Pattern geometry and lifecycle coverage remain independent of the gate;
+    # its real behavior is tested in test_premium_sideways.
+    monkeypatch.setattr("screener_premium.sideways_rejection", lambda *args: None)
+    monkeypatch.setattr("signal_lifecycle.sideways_rejection", lambda *args: None)
+
+
 SHAPES = {
     "double_bottom": [55, 47, 54, 60, 54, 47, 54, 55, 61],
     "triple_bottom": [55, 47, 54, 60, 54, 47, 54, 60, 54, 47, 54, 55, 61],
