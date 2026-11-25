@@ -15,21 +15,29 @@ routes for NIFTY, BANKNIFTY and SENSEX index options, configured NIFTY 50 stock
 options, and supported MCX commodity options. All categories use ATM contracts
 and retain their separate alert channels. Both CALL and PUT entries use
 **only their own premium**.
-Support recovery has priority: five-minute same-session structure or a level
-from the immediately previous trading session of the **same contract**, followed
-by a completed five-minute close above the previous five-minute candle high
-at support. Repeated-support/W recovery and average-pullback support are alternatives.
-One confirmed prior-session recovery is sufficient; a second retest is optional,
-not an extra entry gate. The support test band is +/-10%.
+Support recovery has priority: a confirmed same-session support low, a confirmed
+intervening rebound high, then a separated second support test within +/-10%.
+The first completed five-minute recovery close at least **3% above support**
+qualifies; it need not break the previous candle high or the neckline.
+T1 is the intervening rebound high. T2, when available, is the next higher
+already-confirmed historical swing high of this exact contract. T1 sends a
+notification without closing or booking an exit; tracking continues toward T2
+with the upward-only five-minute stop trail. With only T1 available, it is the exit target.
 
 Independent alternatives also include **bullish five-minute FVG/OB retests**,
-which alert immediately on a fresh zone touch without waiting for a candle
-close, and **compression breakouts**: at least two completed five-minute candles
-inside a range no wider than 15% of its low, followed by a completed one-minute
-close above the frozen range high. A **BOS/retest** route requires a completed
-five-minute break above a lower high, a completed rejection candle at that
-level (within +/-10%), then a fresh live crossing back above it. None requires
-spot confirmation.
+and **compression breakouts**. FVGs require rising confirmed premium swing highs
+and lows, a gap retest, then a later bullish completed one-minute close above
+the gap. Order-block tuning is unchanged: a fresh live block touch still needs
+its existing range gate. Compression freezes the mean of the first two
+five-minute high/low midpoints; at least two consecutive candles must touch it.
+The confirming five-minute candle's **low must be strictly above** that midpoint.
+Entry uses a fresh quote in the first ten seconds of the next minute, not a
+completed one-minute candle or a guaranteed opening fill.
+BOS/retest uses confirmed swings from up to ten prior five-minute candles,
+a completed swing break and wick retest closing at/above the level, then a
+later one-minute close above the retest high. Continuation is labelled bullish
+BOS; a lower-high break in falling structure is labelled bullish CHoCH.
+None requires spot confirmation.
 
 An **independent** alternative is a completed bullish premium chart pattern:
 double/triple bottom, inverse head-and-shoulders, ascending triangle, falling
@@ -42,21 +50,20 @@ No spot direction, opening range, spot pattern or volume filter must agree.
 Spot is used only to select the listed ATM strike; same-day expiry is skipped.
 
 All new routes use the immediately preceding completed five-minute candle low
-as the initial stop. The target is the nearest confirmed premium swing high
-at least 1R above entry; skip the signal if none qualifies.
+as the initial stop, widened to **at least 5% below entry** if necessary;
+already-wider stops are retained. Other routes target the nearest confirmed
+premium swing high at least 1R above entry; skip if none qualifies.
 Before opening a premium advisory in any option category, the final entry,
 stop and target must also satisfy: entry minus stop at least 5% of entry,
 target minus entry at least 10% of entry, and reward at least equal to the risk.
-Equality passes. Setups failing any condition are skipped; the bot does not
-move the stop or target to force a pass. Existing open advisories are unchanged.
-All new ATM structure and pattern alerts also apply the sideways gate to the
-exact option contract. Two or more consecutive completed 5m candles are
-sideways when the next close stays within +/-6% of the preceding candle's
-high/low midpoint. There is no fixed five-candle limit. Buying remains blocked
-until a completed 5m close exceeds 106% of the preceding midpoint and a later
-completed 1m close exceeds that breakout candle's high, with the live premium
-still above it. A downward escape does not permit a buy. Existing setup, risk
-and trailing rules still apply; a breakout alone is not an entry signal.
+Equality passes. With two targets, **T1** must pass the reward checks; T2 cannot
+rescue insufficient room to T1. Failed reward checks skip the entry rather
+than fabricate a target. Existing open advisories are unchanged.
+Strategy-specific confirmations replace the universal +/-6% breakout gate.
+Confirmed double/triple-bottom neckline breaks no longer need that additional
+breakout. Standalone bullish candlesticks must also clear the prior two completed
+five-minute highs; order-block touches retain their previous range protection.
+Pattern one-minute evidence is preserved through final lifecycle admission.
 **New premium-only alerts trail upward to each fully post-entry completed five-minute
 candle low**, replacing the 20%/5% ladder. Stops never move down; old open signals
 retain their frozen stop policy. Live touches/crossings are observed prices,

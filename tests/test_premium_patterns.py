@@ -426,28 +426,21 @@ def test_scanner_pattern_survives_failed_support_and_deduplicates(tmp_path, monk
 def test_support_alert_is_first_and_same_side_pattern_does_not_repeat_open(tmp_path, monkeypatch):
     scanner, instrument, service, callback, now = scanner_with_pattern(tmp_path, monkeypatch)
     frames, base, _, _ = pattern_history(minutes=5)
-    frames[-2].update(open=60, low=59.9, high=60.1, close=60)
-    frames[-1].update(open=60.5, low=58, high=61.1, close=61)
-    frames[-3]["high"] = 100
-    for bar in base[-15:-10]:
-        bar["high"] = 100
-    for bar in base[-10:-5]:
-        bar.update(open=60, low=59.9, high=60.1, close=60)
-    for bar in base[-5:]:
-        bar.update(open=60.5, low=58, high=61.1, close=61)
-    prior = [{**frame, "timestamp": frame["timestamp"] - 86400,
-              "open": 75, "high": 80, "low": 70, "close": 74} for frame in frames]
-    prior[2]["low"] = 60
-    prior[5]["high"] = 100
+    values = [(90, 95, 85, 90), (95, 110, 90, 100), (80, 90, 75, 80),
+              (65, 70, 58, 65), (70, 100, 65, 90), (65, 70, 62, 65),
+              (60, 65, 60, 62), (60, 63, 58, 59), (59, 64, 58.5, 61)]
+    for frame, (opening, high, low, close) in zip(frames, values):
+        frame.update(open=opening, high=high, low=low, close=close)
     scanner.data_manager.fetch_quotes.return_value[("NSE_FNO", 101)].update(
         price=61.2, bid=61.15, ask=61.25,
     )
     scanner.fetcher.fetch_option_candles.side_effect = lambda c, interval, n, **kw: (
-        prior + frames if interval == "5min" else base
+        frames if interval == "5min" else base
     )
     scanner._refresh_index_instrument(instrument, now, 23000)
     policies = [call.args[0]["metadata"]["entry_policy"] for call in callback.call_args_list]
-    assert policies == ["premium_structure_v3"]
+    from premium_structure import STRUCTURE_POLICY
+    assert policies == [STRUCTURE_POLICY]
     assert len(service.open_positions()) == 1
     scanner._refresh_index_instrument(instrument, now, 23000)
     assert len(service.open_positions()) == 1 and callback.call_count == 1

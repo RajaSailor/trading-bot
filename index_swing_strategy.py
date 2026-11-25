@@ -371,6 +371,7 @@ def _valid_pattern_entry(metadata, now):
             and metadata.get("timeframe") == ("1day" if daily else f"{minutes}min")
             and math.isfinite(price) and math.isfinite(stamp)
             and 0 <= now.timestamp() - stamp <= MAX_QUOTE_AGE
+            and pattern["confirmed_end"] <= stamp
             and confirmation_fresh
             and (pattern["confirmed_end"] == bars[-1].get(
                 "_end_timestamp_epoch", bars[-1]["_timestamp_epoch"] + minutes * 60))
@@ -647,7 +648,7 @@ class IndexSwingStrategy:
                                   for bar in risk_candles],
                 "entry_one_minute_candles": [
                     {key: bar[key] for key in ("timestamp", "open", "high", "low", "close")}
-                    for bar in completed_candles(candles, now, timeframe_seconds=60)],
+                    for bar in completed_candles(candles, now, timeframe_seconds=60)[-10:]],
             }
             if not valid_entry(signal, now):
                 raise IndicatorDataError("index_pattern_evidence_invalid")
@@ -660,15 +661,19 @@ def describe_setup(metadata):
         candidate = metadata["structure_evidence"]["candidate"]
         zone = metadata["premium_zone"]
         timing = ("Live zone touch; no candle-close confirmation"
-                  if candidate["route"] in ("fvg_retest", "order_block_retest")
-                  else "Live lower-high reclaim after completed 5m BOS / rejection"
+                  if candidate["route"] == "order_block_retest"
+                  else "Bullish premium structure; gap retest then later bullish 1m close above FVG"
+                  if candidate["route"] == "fvg_retest"
+                  else f"{candidate['structure_break']}: 5m swing break / retest, then 1m close above retest high"
                   if candidate["route"] == "bos_retest"
-                  else "Completed 1m range breakout" if candidate["route"] == "compression_breakout"
-                  else "Completed 5m recovery / reclaim")
+                  else "5m low strictly above fixed midpoint; first fresh quote at next minute open"
+                  if candidate["route"] == "compression_breakout"
+                  else "Separated second support test; completed 5m close at least 3% above support")
         return (
             f"Setup: {zone['label']} | Premium zone {zone['low']:.2f}-{zone['high']:.2f}\n"
             f"{timing}\n"
             f"Trigger premium / close: {candidate['trigger_close']:.2f}\n"
+            "Initial stop: previous completed 5m low, widened to at least 5% below entry.\n"
             "Trail: completed 5m candle low, upward only.\n"
             "Premium only; spot selects ATM. Alerts only; not broker fills."
         )
@@ -682,15 +687,16 @@ def describe_setup(metadata):
                 f"Setup: Bullish {pattern['name'].replace('_', ' ')} | "
                 f"{timeframe} premium chart\n"
                 "Completed bullish candle formation; entry quote remains above its close.\n"
-                "Initial stop: previous completed 5m low; target: nearest confirmed swing high "
-                "with reward/risk greater than 1:1."
+                "Initial stop: previous completed 5m low, at least 5% below entry; "
+                "target: nearest qualifying confirmed swing high."
             )
         return (
             f"Setup: Confirmed {pattern['name'].replace('_', ' ')} | "
             f"{timeframe} premium chart\n"
             f"Completed close above breakout boundary {pattern['boundary']:.2f}.\n"
             "Independent pattern entry; support recovery is not required.\n"
-            "Target: pattern measured move; stop: pattern invalidation low.\n"
+            "Target: nearest qualifying confirmed 5m swing high; initial stop: previous "
+            "completed 5m low, at least 5% below entry.\n"
             "Spot selects ATM only. Alerts only; no broker orders."
         )
     if metadata.get("entry_policy") == PREMIUM_POLICY:

@@ -21,40 +21,26 @@ Five-minute pivots need one completed neighbour on either side. Use the
 latest contiguous block of today's completed five-minute candles; an overnight
 gap or a missing candle cannot manufacture a pivot across the gap.
 
-1. **Repeated support / W recovery:** a confirmed five-minute low defines
-   support. There must also be a subsequently confirmed swing high (the
-   intervening rebound) before the new five-minute retest begins. A completed
-   five-minute close more than 10% below support invalidates that candidate.
-   The latest pair of five-minute candles must test within +/-10% of support;
-   the latest close must exceed both support and the preceding candle high.
-   The target is the nearest already-confirmed intervening swing high.
-   Example: 70 -> 47 -> 60 -> approximately 47 -> recovery. Entry can occur
-   near support after confirmation, without waiting to break the 60 neckline.
-2. **Average support reclaim:** at least two confirmed five-minute swing highs
-   within 1% define repeated resistance. At least two confirmed pullback lows
-   after the first rejection and before the latest matching rejection define
-   an arithmetic mean support level. Only already-confirmed lows participate:
-   today's current retest is not included in its own average. The initial stop
-   is the lowest contributing five-minute support candle's low; the fixed
-   target is the lowest matching resistance high. Example: pullbacks of 90 and
-   100 between repeated rejections at 120 give mean support 95.
-3. **Previous-session level recovery:** use confirmed five-minute pivots and
-   the available session high/low from the immediately previous trading session
-   of this exact security ID, strike, expiry and option side. Never splice in
-   the previous ATM contract or an expired series. A prior support, or prior
-   resistance reclaimed as support,    may qualify after a test within +/-10%
-   and the same completed five-minute recovery. One recovery is enough; do not
-   require a second retest or a same-day W. Select the next higher known prior
-   resistance as target, and the source five-minute candle low as initial stop.
-   Skip if that target is already passed. This requires two completed same-day
-   five-minute candles. Missing prior-session data disables only this
-   route. Gaps cannot manufacture prior-session pivot points.
+**Repeated support / W recovery:** a confirmed five-minute low defines support.
+A subsequently confirmed swing high separates it from the second support test.
+That test must be a local low (or the latest candle making the test), within
+the existing +/-10% support band. The first completed recovery close at least
+**3% above support** qualifies, including equality. A completed close below
+support invalidates that support. Replaying a recovery after it already
+confirmed does not create another entry. The previous candle high and neckline
+need not break. Example: support 90, rebound 120, second test near 90, close
+92.70 or higher. T1 is that intervening high (120). T2 is the next higher
+confirmed historical five-minute high of the exact contract, such as 180.
+Historical pivots require contiguous neighbours and must be known before entry.
+If T2 is absent, only T1 is supplied. The older average/prior-session preparation
+helpers remain available to legacy policy validation, not as shortcuts around
+the new second-touch entry.
 
 Support, compression, FVG, OB, BOS and pattern routes are **OR** alternatives,
 not cumulative requirements. Process support recovery and compression first,
 then independently qualifying zones/BOS and patterns, including when another
-signal is already open. Support/average levels retain their original definitions,
-but their new confirmation is five-minute, not the old one-minute recovery.
+signal is already open. Support confirmation is five-minute, not the old
+one-minute recovery.
 There is no established universal count of market patterns; the scanner supports
 the defined chart structures and bullish candle formations below.
 Tolerances are trial settings, not empirically optimized probabilities.
@@ -66,35 +52,35 @@ not proof that an institutional order or imbalance exists.
 
 | Route | Confirmation / entry | Initial stop | Fixed target |
 | --- | --- | --- | --- |
-| Compression | At least two consecutive completed 5m candles; combined high minus low <=15% of combined low. Extend backwards through consecutive candles while this remains true. After a confirmed prior decline, first completed 1m close above the frozen range high. No earlier post-range 1m close may already break the range. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
-| Bullish FVG | Three consecutive completed 5m candles; third low > first high, middle candle green with body >=50% of its high-low range. Gap is [first high, third low], known only after the third closes above it. First fresh live premium in that range alerts; no close confirmation. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
+| Compression | Mean of the first two completed 5m high/low midpoints is frozen. At least two consecutive candles touch it; the next completed 5m candle has low strictly above it. Fresh entry quote in the next minute's first ten seconds, without waiting for a 1m close. Prior direction may be rising or falling. | Previous completed 5m candle low, widened to minimum 5% distance | Nearest confirmed swing high above entry with reward/risk >=1:1 |
+| Bullish FVG | Three completed 5m candles; third low > first high; middle candle green with body >=50% of range. Require rising latest two confirmed highs and lows. After a completed 1m gap touch, a later green 1m candle closes above the gap's upper edge, with fresh premium still above it. A post-touch 1m close below the gap invalidates it. | Previous completed 5m candle low, widened to minimum 5% distance | Nearest confirmed swing high above entry with reward/risk >=1:1 |
 | Bullish order block | A completed bullish 5m candle first closes above the latest already-confirmed swing high; the last red candle within its preceding five candles defines the full [low, high] block. Breakout close must be above the block. First fresh live retest alerts. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
-| BOS/retest | Latest two confirmed 5m highs form a lower high. A completed 5m close breaks it from below, followed by a completed wick rejection within +/-10% of that level. No subsequent completed close may break below the band. Then a fresh live crossing from at/below the lower high to above it (within +10%) alerts, without another 5m close. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
+| BOS/retest | Latest two highs/lows in up to ten prior 5m bars establish rising structure (BOS) or falling structure (CHoCH). A 5m close breaks the latest confirmed high. A completed wick retest tests within +/-10% and closes at/above that high. Then a later completed 1m close exceeds the retest candle high; fresh premium must remain above it and within +10% of the broken level. | Previous completed 5m candle low, widened to minimum 5% distance | Nearest confirmed swing high above entry with reward/risk >=1:1 |
 
-Compression example: prior confirmed high 150, decline to a 75-82 range held
-for two or more completed 5m candles, then a completed 1m close above 82.
-The range width may be up to 15% of its low. The initial stop is the preceding
-completed 5m low and the target is the nearest confirmed swing high that is
-at least 1R above entry. It does not require five or ten range candles
-or another 5m breakout.
-The confirming candle need not be green; the required event is its close above
-the range. Support recovery similarly requires the close above the previous
-5m high, not a separate candle-colour gate.
+Compression example: the first two range candles have midpoints 114 and 116,
+so the fixed midpoint is 115. Any number of consecutive candles can touch it.
+A completed 5m candle with low 116 and close 126 confirms an upward escape;
+a low of exactly 115 does not. Its colour is not an additional gate.
+The next-minute entry is the first available fresh observed quote, not a
+guaranteed historical opening price. Missing the ten-second window rejects
+the entry explicitly instead of chasing a later price.
 
 Use only today's latest contiguous 5m block for zones, BOS and compression;
 range/structure cannot bridge missing candles. Latest zone/BOS history must
-end within 375 seconds; completed support/1m compression triggers within
-75 seconds. FVG/OB zones already touched by a subsequent completed candle
-are not replayed as untouched zones. When multiple zones overlap, scan-time
+end within 375 seconds; support and completed 1m FVG/BOS confirmations within
+75 seconds. An FVG may survive a closed retest while waiting for recovery,
+but a later completed 5m close below its lower edge invalidates it.
+Order blocks already touched by a subsequent completed candle are not replayed.
+When multiple zones overlap, scan-time
 entry uses the most recently formed eligible zone for that route.
 Zone entries are polled on the existing live-quote loop between minute scans,
-not delayed until the next candle closes. BOS live crossing uses a fresh
-previous observed quote (<=10 seconds earlier) or an already-completed
-one-minute close (<=75 seconds earlier); both must follow the rejection close.
+and still require their route's completed confirmation evidence. An
+order-block touch is unchanged pending a separately agreed tuning rule.
 
 The initial stop for every new structure or pattern route is the low of the
 immediately preceding completed 5m candle at the observed entry time. Never use
-a forming or post-entry candle. A stop at/above entry rejects the signal.
+a forming or post-entry candle. A candle low at/above entry rejects the signal.
+Otherwise take the lower of that low and 95% of entry, rounded down to tick.
 All routes retain positive bid/ask, <=2% spread, source quote age <=10 seconds,
 target/stop ordering and calendar/square-off admission.
 
@@ -136,7 +122,7 @@ broken the boundary or invalidated the chart structure. For sloped boundaries,
 compare at each candle index, not against an invented flat line. Confirmation
 must end today and be no more than 75 seconds old; the fresh quote must remain
 above the pattern close/boundary. For every route, initial stop is the previous
-completed 5m low and target is the nearest confirmed swing high at least
+completed 5m low, widened to at least 5% below entry, and target is the nearest confirmed swing high at least
 1R above entry. Skip when no such target exists. Forming patterns,
 continuation above an old breakout, and bearish patterns do not alert.
 
@@ -170,23 +156,25 @@ For each side, select the listed **ATM** contract nearest to spot, using the
 nearest listed expiry strictly after today. On expiry day, same-day contracts
 are skipped and the next available expiry is selected.
 
-After support and target are known, examine the latest two consecutive completed
-five-minute option candles. Their test must be within +/-10% of support.
-The latest closes above support and the previous 5m high, with confirmation
-ending no more than 75 seconds ago. Support and target must already be known
-before the preceding 5m candle starts. There is no additional 1m check.
+After a confirmed support and intervening rebound, require the separated
+second test and first completed 5m close at least 3% above support, with
+confirmation ending no more than 75 seconds ago. There is no additional 1m check.
 Source last-trade evidence must be no more than 10 seconds old, with positive
 bid/ask and spread <=2%. The current quote must remain above support, below
 target and above stop. The alert labels the actual confirming close separately
 from the fresh observed premium: it cannot guarantee a past candle-close fill.
 
-For all new routes, the target is the nearest confirmed five-minute swing high
-at least 1R above entry. If no such target exists, skip the alert.
+For support, T1 is the intervening high; T2 is the next higher confirmed
+historical high when available. T1 produces one durable notification, not an
+exit or realized P&L. Continue tracking T2 and the upward-only stop. Without
+T2, T1 is the exit target. Other routes use the nearest confirmed five-minute
+swing high at least 1R above entry; skip if none exists.
 For every new index, stock-option and commodity-option advisory, additionally
 require final entry minus stop >= 5% of entry, target minus entry >= 10% of
 entry, and target minus entry >= entry minus stop. Exact equality passes.
-These checks use the final tick-rounded lifecycle levels; they do not adjust
-the stop or search for a different target to satisfy the thresholds. If any
+These checks use final tick-rounded lifecycle levels and the primary target
+(T1), not a farther T2. Stops closer than 5% are widened before the reward
+checks; wider candle stops are preserved. Do not invent targets. If any
 check fails, skip opening and log the rejection reason. Existing open signals
 and their trailing/exit rules are unaffected.
 The target remains fixed after entry. Stop/target alerts use observed premium;
@@ -194,31 +182,22 @@ they are not broker orders or guaranteed execution prices.
 
 ### Re-entry, protection and frequency
 
-- Every new ATM structure/pattern advisory is screened for sideways price
-  action using that exact contract's completed 5m candles. Start with a candle,
-  then compare the next close to [(high + low) / 2] * [0.94, 1.06] of the
-  preceding candle. Equality stays inside. Two or more consecutive candles
-  establish sideways action; the run can continue beyond five candles.
-  Recalculate the midpoint from each preceding candle, never a fixed third
-  candle, and never from the forming or breakout candle itself.
-- A sideways run blocks all routes, including FVG/OB touches. An upward escape
-  requires a completed 5m close strictly above 106% of the preceding midpoint.
-  Then a subsequent completed 1m candle must close strictly above the breakout
-  5m high, and the live premium must remain above that high. A fresh quote and
-  all original setup/risk checks are still required. The initial stop remains
-  the previous completed 5m low, and upward-only 5m trailing is unchanged.
-  A downward escape does not release the buy block; only a later upward
-  escape and its minute confirmation can do so. Missing or stale confirmation
-  is rejected explicitly. Candle gaps reset the run rather than linking
-  different sessions. Serialized candle evidence allows the gate to be checked
-  again at durable admission, including after a restart.
+- The universal +/-6% breakout gate is replaced by each strategy's confirmation:
+  second-touch support recovery, fixed-midpoint compression escape, confirmed
+  FVG recovery, BOS retest recovery, or a chart-pattern neckline break.
+  A visible double/triple bottom without a completed neckline break is not an
+  entry. Pattern 1m evidence survives queue serialization and durable admission.
+- Standalone bullish candlestick formations must additionally clear the
+  prior two completed 5m highs. The unchanged order-block touch route retains
+  its earlier rolling +/-6% range gate until its own confirmation is tuned.
+  Neither an unconfirmed range touch nor a pattern name alone permits entry.
 - Repeated FVG/OB touches alert once per exact-contract zone; BOS once per
   lower-high break and rejection. Candle-based routes require a new confirmation.
   Idempotency persists across scans/restarts, not just the current open position.
 - There is no daily entry-alert cap. One advisory per underlying and option side
   can be open at once; each accepted signal has its own lifecycle.
-- All new structure and pattern entries use the immediately preceding completed
-  5m option candle low, rounded to tick size, as the initial stop.
+- All new structure and pattern entries use the lower of the immediately
+  preceding completed 5m low and 95% of entry, rounded down to tick.
 - **New index, stock and commodity signals freeze `completed_5m_low_v1`.** Each fully post-entry
   completed 5m candle can raise the advisory stop to its low, tick-rounded down.
   Never use a partial candle or lower the existing stop, and never move the
@@ -252,7 +231,7 @@ gap-excluded counts and `INSUFFICIENT_HISTORY`, `AWAITING_FRESH_CLOSE`,
 `AWAITING_TODAY_CLOSE`, `NO_CONFIRMED_PATTERN` or `CONFIRMED`; quote/data errors
 are recorded separately. Pattern entry rejections include price outside the
 boundary/stop/target range. Health exposes the chart and candlestick pattern names, timeframe list,
-history budget, previous-session route and support-first priority.
+history budget, previous-session level availability and support-first priority.
 `index_underlying_status` retains each NIFTY/BANKNIFTY/SENSEX configuration,
 scan timestamp, resolved CALL/PUT sides, and per-side route results beyond
 the rolling list. Missing ATM prices, missing listed sides, scan exceptions

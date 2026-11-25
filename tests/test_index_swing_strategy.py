@@ -395,9 +395,13 @@ def test_scanner_routes_indices_and_stocks_to_atm_premium_strategy(tmp_path, mon
                                       "commodity_options": []}
     dm.resolve_underlying.return_value = SimpleNamespace(
         security_id=13, exchange_segment="IDX_I", instrument_type="INDEX")
-    spot, premium, one, current_quote = history()
-    premium[-2].update(open=72, high=73, low=60.2, close=69)
-    premium[-1].update(open=69, high=75, low=68.5, close=74)
+    from tests.test_premium_strategy_revisions import support_history
+    spot, _, one, _ = history()
+    premium, support_now, current_quote = support_history()
+    shift = NOW.timestamp() - support_now.timestamp() - 60
+    for bar in premium:
+        bar["timestamp"] += shift
+    current_quote["trade_timestamp"] = NOW.timestamp()
     dm.fetch_contract_candles.return_value = spot
     dm.fetch_quotes.return_value = {("NSE_FNO", 101): current_quote}
     callback = MagicMock(return_value=True)
@@ -423,7 +427,8 @@ def test_scanner_routes_indices_and_stocks_to_atm_premium_strategy(tmp_path, mon
     assert "spot_setup" not in evaluation
     scanner_policy = scanner.status()["index_swing_strategy"]
     assert scanner_policy["spot_confirmation_required"] is False
-    assert scanner_policy["entry_policy"] == "premium_structure_v3"
+    from premium_structure import STRUCTURE_POLICY
+    assert scanner_policy["entry_policy"] == STRUCTURE_POLICY
     assert scanner._refresh_instrument(instrument, "10min", NOW, spot=130) == 0
     assert any(item.get("route") == "support_5m_recovery"
                and item["result"] == "QUALIFIED_NOT_ACCEPTED"
