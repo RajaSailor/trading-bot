@@ -28,8 +28,8 @@ from premium_patterns import (
     PATTERN_NAMES, PATTERN_POLICY, PATTERN_TIMEFRAMES,
 )
 from premium_structure import (
-    CANDLE_STOP_POLICY, STRUCTURE_POLICY, STRUCTURE_ROUTES, bos_candidate, build_signal, evaluate_structure,
-    zone_candidate,
+    CANDLE_STOP_POLICY, STRUCTURE_POLICY, STRUCTURE_ROUTES, bos_candidate, build_signal,
+    compression_candidate, evaluate_structure, zone_candidate,
 )
 from nifty_market_filters import NiftyMarketFilter
 from state_manager import StateManager
@@ -595,13 +595,18 @@ class PremiumScreener:
                 five = [*state["five"], dict(bar)]
                 candidates = []
                 for zone in state["zones"]:
-                    if not zone["low"] <= price <= zone["high"]:
+                    if not (zone["low"] <= price <= zone["high"]
+                            or zone["route"] == "fvg_retest" and price > zone["high"]):
                         continue
                     try:
                         candidates.append(zone_candidate(zone, five, state["one"], price, stamp, now,
                                                          contract["tick_size"]))
                     except IndicatorDataError as exc:
                         self._count_indicator_reason(exc.reason)
+                try:
+                    candidates.append(compression_candidate(five, state["one"], now))
+                except IndicatorDataError as exc:
+                    self._count_indicator_reason(exc.reason)
                 try:
                     candidates.append(bos_candidate(five, state["one"], now, contract["tick_size"],
                                                     price, stamp, previous))
@@ -798,10 +803,12 @@ class PremiumScreener:
                 return 0
         if self.signal_lifecycle is None:
             reason = premium_risk_rejection(
-                signal.get("breakout_price"), signal.get("stop_loss"), signal.get("target"))
+                signal.get("breakout_price"), signal.get("stop_loss"),
+                (signal.get("targets") or [signal.get("target")])[0])
             if not reason:
                 reason = premium_risk_rejection(
-                    signal.get("entry"), signal.get("stop_loss"), signal.get("target"))
+                    signal.get("entry"), signal.get("stop_loss"),
+                    (signal.get("targets") or [signal.get("target")])[0])
             if reason:
                 self._count_indicator_reason(reason)
                 logger.info("Premium entry skipped: %s %s (%s)", instrument.symbol,
@@ -1114,7 +1121,8 @@ class PremiumScreener:
                     "support_candle_timestamp",
                     "premium_confirmation_high", "premium_confirmation_low", "pullback_low",
                     "previous_session_date", "previous_level_kind", "premium_pattern", "chart_candles",
-                    "entry_candles", "initial_pattern_stop", "risk_target", "tick_size",
+                    "entry_candles", "entry_one_minute_candles",
+                    "initial_pattern_stop", "risk_target", "tick_size",
                     "premium_reference_levels",
                     "requested_stop_policy", "structure_id", "structure_evidence", "premium_zone",
                 )

@@ -174,6 +174,10 @@ def _render_once(candles, overlay, width_px, height_px, dpi, max_bytes):
         ax.axhline(stop, color="#2ca02c" if stop >= entry else "#d62728", linestyle="-",
                    linewidth=1.2, label=f"{stop_label} {stop:.2f}")
         ax.axhline(target, color="#2ca02c", linestyle="-", linewidth=1.2, label=f"Target {target:.2f}")
+        if len(overlay.get("targets") or []) == 2:
+            first = _finite_positive(overlay["targets"][0], "target_1")
+            ax.axhline(first, color="#2ca02c", linestyle="--", linewidth=1,
+                       label=f"T1 {first:.2f} (T2 {target:.2f})")
         if overlay.get("premium_support") is not None:
             support = _finite_positive(overlay["premium_support"], "premium_support")
             source = overlay.get("previous_session_date")

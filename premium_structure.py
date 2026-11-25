@@ -11,13 +11,14 @@ from zoneinfo import ZoneInfo
 
 from premium_indicators import IndicatorDataError, completed_candles
 from premium_patterns import swing_points
+from premium_risk_filter import minimum_distance_stop
 
 IST = ZoneInfo("Asia/Kolkata")
-STRUCTURE_POLICY = "premium_structure_v3"
+STRUCTURE_POLICY = "premium_structure_v4"
 CANDLE_STOP_POLICY = "completed_5m_low_v1"
 SUPPORT_RETEST_TOLERANCE = .10
-COMPRESSION_RANGE_TOLERANCE = .15
 BOS_RETEST_TOLERANCE = .10
+SUPPORT_RECOVERY_PERCENT = Decimal(".03")
 STRUCTURE_ROUTES = ("support_5m_recovery", "compression_breakout", "fvg_retest",
                     "order_block_retest", "bos_retest")
 
@@ -46,8 +47,20 @@ def _target(bars, price, tick, *, above=True):
     return float(Decimal(str(min(highs))) + (Decimal(str(tick)) if above else Decimal("0")))
 
 
-def _entry_risk_levels(five, price, stamp, now, tick):
-    """Choose the prior completed 5m low and nearest confirmed >=1R swing target."""
+def _confirmed_highs(bars):
+    return sorted({float(level) for index, kind, level in swing_points(bars)
+                   if kind == "H"
+                   and bars[index]["_timestamp_epoch"] - bars[index - 1]["_timestamp_epoch"] == 300
+                   and bars[index + 1]["_timestamp_epoch"] - bars[index]["_timestamp_epoch"] == 300})
+
+
+def _tick_down(level, tick):
+    tick = Decimal(str(tick))
+    return float((Decimal(str(level)) / tick).to_integral_value(rounding=ROUND_FLOOR) * tick)
+
+
+def _entry_risk_levels(five, price, stamp, now, tick, *, primary=None):
+    """Widen the prior 5m low to 5% and select observable swing targets."""
     bars = [bar for bar in completed_candles(five, now, timeframe_seconds=300)
             if bar["_timestamp_epoch"] + 300 <= stamp]
     for index in range(len(bars) - 1, 0, -1):
@@ -60,21 +73,38 @@ def _entry_risk_levels(five, price, stamp, now, tick):
     stop = float(bars[-1]["low"])
     if not 0 < stop < price:
         raise IndicatorDataError("index_previous_5m_low_not_below_entry")
+    stop = minimum_distance_stop(price, stop, tick)
     risk = Decimal(str(price)) - Decimal(str(stop))
     candidates = {float(level) for _, kind, level in swing_points(bars)
                   if kind == "H" and level > price}
-    tick = Decimal(str(tick))
-    targets = sorted(float((Decimal(str(level)) / tick).to_integral_value(
-        rounding=ROUND_FLOOR) * tick) for level in candidates)
-    target = next((level for level in targets
+    targets = sorted({_tick_down(level, tick) for level in candidates})
+    target = _tick_down(primary, tick) if primary is not None else next((level for level in targets
                    if Decimal(str(level)) - Decimal(str(price)) >= risk), None)
-    if target is None:
+    if target is None or target <= price:
         raise IndicatorDataError("index_no_target_above_1r")
     return stop, target
 
 
+def _finalize_candidate(candidate, five, price, stamp, now, tick):
+    result = dict(candidate)
+    support = result["route"] == "support_5m_recovery"
+    result["stop"], first = _entry_risk_levels(
+        five, price, stamp, now, tick, primary=result["primary_target"] if support else None,
+    )
+    targets = [first]
+    if support:
+        bars = [bar for bar in completed_candles(five, now, timeframe_seconds=300)
+                if bar["_timestamp_epoch"] + 300 <= stamp]
+        highs = sorted({_tick_down(level, tick) for level in _confirmed_highs(bars)})
+        higher = next((level for level in highs if level > first), None)
+        if higher is not None:
+            targets.append(higher)
+    result.update(target=targets[-1], targets=targets)
+    return result
+
+
 def prepare_zones(five, now):
-    """Unmitigated bullish 5m gaps and last-red-candle blocks before a BOS."""
+    """Recoverable bullish 5m gaps and untouched last-red-candle blocks."""
     bars = _contiguous(_session(completed_candles(five, now, timeframe_seconds=300), now), 300)
     if bars and not 0 <= now.timestamp() - (bars[-1]["_timestamp_epoch"] + 300) <= 375:
         raise IndicatorDataError("index_zone_history_stale")
@@ -94,7 +124,8 @@ def prepare_zones(five, now):
                 candidates.append(("order_block_retest", red["low"], red["high"],
                                    red["_timestamp_epoch"]))
         for route, low, high, source in candidates:
-            if any(bar["low"] <= high for bar in bars[index + 1:]):
+            if any((bar["close"] < low if route == "fvg_retest" else bar["low"] <= high)
+                   for bar in bars[index + 1:]):
                 continue
             if right["close"] <= high:
                 continue
@@ -107,43 +138,34 @@ def prepare_zones(five, now):
 
 
 def compression_candidate(five, one, now):
-    minutes = _session(completed_candles(one, now, timeframe_seconds=60), now)
-    if not minutes:
-        raise IndicatorDataError("index_compression_one_minute_missing")
-    trigger = minutes[-1]
-    if not 0 <= now.timestamp() - (trigger["_timestamp_epoch"] + 60) <= 75:
-        raise IndicatorDataError("index_compression_close_stale")
-    # Freeze the range before the breakout minute, including at a 5m boundary.
-    before = datetime.fromtimestamp(trigger["_timestamp_epoch"], IST)
-    bars = _contiguous(_session(completed_candles(five, before, timeframe_seconds=300), now), 300)
+    bars = _contiguous(_session(completed_candles(five, now, timeframe_seconds=300), now), 300)
     if len(bars) < 3:
         raise IndicatorDataError("index_compression_history_missing")
-    zone = []
-    for bar in reversed(bars):
-        trial = [bar, *zone]
-        low, high = min(item["low"] for item in trial), max(item["high"] for item in trial)
-        if high - low > low * COMPRESSION_RANGE_TOLERANCE:
+    trigger = bars[-1]
+    end = trigger["_timestamp_epoch"] + 300
+    if not 0 <= now.timestamp() - end <= 10:
+        raise IndicatorDataError("index_compression_open_window_missed")
+    zone, midpoint = [], None
+    for start in range(len(bars) - 2):
+        trial = bars[start:-1]
+        anchor = sum((Decimal(str(bar["high"])) + Decimal(str(bar["low"]))) / 2
+                     for bar in trial[:2]) / 2
+        if (all(Decimal(str(bar["low"])) <= anchor <= Decimal(str(bar["high"]))
+                for bar in trial) and Decimal(str(trigger["low"])) > anchor):
+            zone, midpoint = trial, float(anchor)
             break
-        zone = trial
-    if len(zone) < 2:
+    if not zone:
         raise IndicatorDataError("index_compression_range_missing")
     low, high = min(bar["low"] for bar in zone), max(bar["high"] for bar in zone)
     start = zone[0]["_timestamp_epoch"]
-    prior = [bar for bar in bars if bar["_timestamp_epoch"] < start]
-    target = _target([*prior, zone[0]], high, .05, above=False)
+    target = _target(bars, trigger["close"], .05, above=False)
     if target is None:
-        raise IndicatorDataError("index_compression_decline_or_target_missing")
-    after_range = [bar for bar in minutes
-                   if zone[-1]["_timestamp_epoch"] + 300 <= bar["_timestamp_epoch"]
-                   < trigger["_timestamp_epoch"]]
-    if any(bar["close"] > high or bar["close"] < low for bar in after_range):
-        raise IndicatorDataError("index_compression_already_broken")
-    if trigger["close"] <= high or trigger["low"] < low:
-        raise IndicatorDataError("index_compression_breakout_missing")
+        raise IndicatorDataError("index_compression_target_missing")
     return {
-        "route": "compression_breakout", "low": low, "high": high, "stop": low, "target": target,
+        "route": "compression_breakout", "low": low, "high": high,
+        "boundary": midpoint, "midpoint": midpoint, "stop": trigger["low"], "target": target,
         "source_start": start, "known_at": zone[-1]["_timestamp_epoch"] + 300,
-        "trigger_start": trigger["_timestamp_epoch"], "trigger_end": trigger["_timestamp_epoch"] + 60,
+        "trigger_start": trigger["_timestamp_epoch"], "trigger_end": end,
         "trigger_close": trigger["close"], "range_candles": len(zone),
     }
 
@@ -160,24 +182,31 @@ def _entry_low(five, one, stamp, now):
 
 
 def bos_candidate(five, one, now, tick, price, stamp, previous_observation=None):
-    bars = _contiguous(_session(completed_candles(five, now, timeframe_seconds=300), now), 300)
+    bars = _contiguous(_session([
+        bar for bar in completed_candles(five, now, timeframe_seconds=300)
+        if bar["_timestamp_epoch"] + 300 <= stamp
+    ], now), 300)
     if len(bars) < 7 or not 0 <= now.timestamp() - (bars[-1]["_timestamp_epoch"] + 300) <= 375:
         raise IndicatorDataError("index_bos_history_or_close_stale")
     for index in range(len(bars) - 2, 3, -1):
-        prior = bars[:index]
+        prior = bars[max(0, index - 10):index]
+        breakout = bars[index]
         highs = [p for p in swing_points(prior) if p[1] == "H"]
-        if len(highs) < 2 or highs[-1][2] >= highs[-2][2]:
+        lows = [p for p in swing_points([*prior, breakout]) if p[1] == "L"]
+        if len(highs) < 2 or len(lows) < 2:
+            continue
+        continuation = highs[-1][2] > highs[-2][2] and lows[-1][2] > lows[-2][2]
+        reversal = highs[-1][2] < highs[-2][2] and lows[-1][2] < lows[-2][2]
+        if not (continuation or reversal):
             continue
         level = highs[-1][2]
-        breakout = bars[index]
         if not breakout["close"] > level >= bars[index - 1]["close"]:
             continue
         following = bars[index + 1:]
         rejection = next((bar for bar in reversed(following)
                           if level * (1 - BOS_RETEST_TOLERANCE) <= bar["low"]
                           <= level * (1 + BOS_RETEST_TOLERANCE)
-                          and level * (1 - BOS_RETEST_TOLERANCE) <= bar["close"]
-                          <= level * (1 + BOS_RETEST_TOLERANCE)
+                          and level <= bar["close"] <= level * (1 + BOS_RETEST_TOLERANCE)
                           and bar["low"] < min(bar["open"], bar["close"])), None)
         if (rejection is None or any(
                 bar["close"] < level * (1 - BOS_RETEST_TOLERANCE) for bar in following)
@@ -186,69 +215,79 @@ def bos_candidate(five, one, now, tick, price, stamp, previous_observation=None)
         rejection_end = rejection["_timestamp_epoch"] + 300
         if stamp < rejection_end:
             continue
-        if previous_observation is None:
-            minutes = completed_candles(one, now, timeframe_seconds=60)
-            minutes = [bar for bar in minutes if rejection_end <= bar["_timestamp_epoch"] + 60 < stamp]
-            if not minutes:
-                continue
-            previous_price, previous_stamp = minutes[-1]["close"], minutes[-1]["_timestamp_epoch"] + 60
-            if not 0 <= stamp - previous_stamp <= 75:
-                continue
-        else:
-            previous_price, previous_stamp = previous_observation
-            if (not all(math.isfinite(v) and v > 0 for v in (previous_price, previous_stamp))
-                    or not 0 < stamp - previous_stamp <= 10 or previous_stamp < rejection_end):
-                continue
-        if previous_price > level:
+        minutes = [bar for bar in completed_candles(one, now, timeframe_seconds=60)
+                   if rejection_end <= bar["_timestamp_epoch"]
+                   and bar["_timestamp_epoch"] + 60 <= stamp]
+        confirmation = next((bar for bar in minutes if bar["close"] > rejection["high"]), None)
+        if (confirmation is None or price <= rejection["high"]
+                or not 0 <= stamp - (confirmation["_timestamp_epoch"] + 60) <= 75):
             continue
-        start, stop = _entry_low(five, one, stamp, now)
         return {
             "route": "bos_retest",
             "low": level * (1 - BOS_RETEST_TOLERANCE),
             "high": level * (1 + BOS_RETEST_TOLERANCE),
-            "boundary": level, "stop": stop,
+            "boundary": rejection["high"], "stop": rejection["low"],
+            "structure_level": level,
+            "structure_break": "bullish_bos" if continuation else "bullish_choch",
             "target": float(Decimal(str(highs[-2][2])) + Decimal(str(tick))),
             "source_start": prior[highs[-1][0]]["_timestamp_epoch"],
             "known_at": breakout["_timestamp_epoch"] + 300,
             "rejection_start": rejection["_timestamp_epoch"],
-            "trigger_start": start, "trigger_end": stamp, "trigger_close": price,
+            "trigger_start": confirmation["_timestamp_epoch"],
+            "trigger_end": confirmation["_timestamp_epoch"] + 60,
+            "trigger_close": confirmation["close"],
             "previous_observation": previous_observation,
         }
     raise IndicatorDataError("index_bos_rejection_reclaim_missing")
 
 
 def support_candidate(five, reference, now):
+    """The legacy reference argument is retained for call-site compatibility."""
     bars = _contiguous(_session(completed_candles(five, now, timeframe_seconds=300), now), 300)
     if len(bars) < 2 or not 0 <= now.timestamp() - (bars[-1]["_timestamp_epoch"] + 300) <= 75:
         raise IndicatorDataError("index_support_5m_close_stale")
-    previous, trigger = bars[-2:]
-    if trigger["close"] <= previous["high"]:
-        raise IndicatorDataError("index_support_5m_recovery_missing")
-    for item in reference["candidates"]:
-        low = min(previous["low"], trigger["low"])
-        support = item["support"]
-        if item["known_at"] > previous["_timestamp_epoch"]:
+    trigger = bars[-1]
+    points = swing_points(bars[:-1])
+    for index, kind, support in reversed(points):
+        if kind != "L":
             continue
-        if not support * (1 - SUPPORT_RETEST_TOLERANCE) <= low <= support * (
-                1 + SUPPORT_RETEST_TOLERANCE):
+        rebounds = [point for point in points if point[1] == "H" and point[0] > index]
+        if not rebounds:
             continue
-        if trigger["close"] <= support or item["target"] <= trigger["close"]:
+        peak_index, _, target = rebounds[0]
+        recovery = Decimal(str(support)) * (1 + SUPPORT_RECOVERY_PERCENT)
+        if Decimal(str(trigger["close"])) < recovery or target <= trigger["close"]:
+            continue
+        later = bars[peak_index + 1:]
+        # A second test must be separated by a confirmed bounce, not adjacent lows.
+        retest = next((bar for offset, bar in enumerate(later, peak_index + 1)
+                       if support * (1 - SUPPORT_RETEST_TOLERANCE) <= bar["low"]
+                       <= support * (1 + SUPPORT_RETEST_TOLERANCE)
+                       and bar["low"] <= bars[offset - 1]["low"]
+                       and (offset == len(bars) - 1 or bar["low"] <= bars[offset + 1]["low"])), None)
+        if retest is None or any(bar["close"] < support for bar in bars[index + 1:]):
+            continue
+        if any(Decimal(str(bar["close"])) >= recovery
+               for bar in later if retest["_timestamp_epoch"] <= bar["_timestamp_epoch"]
+               < trigger["_timestamp_epoch"]):
             continue
         return {
             "route": "support_5m_recovery", "low": support, "high": support,
-            "boundary": previous["high"],
-            "stop": item["stop"], "target": item["target"],
-            "source_start": item["support_candle"]["_timestamp_epoch"],
-            "known_at": item["known_at"], "support_setup": item["setup"],
+            "boundary": float(recovery), "stop": trigger["low"],
+            "target": target, "primary_target": target,
+            "source_start": bars[index]["_timestamp_epoch"],
+            "known_at": bars[peak_index + 1]["_timestamp_epoch"] + 300,
+            "support_setup": "premium_second_touch_recovery",
+            "retest_start": retest["_timestamp_epoch"],
             "trigger_start": trigger["_timestamp_epoch"], "trigger_end": trigger["_timestamp_epoch"] + 300,
             "trigger_close": trigger["close"],
-            **{key: item[key] for key in ("previous_session_date", "premium_reference_levels")
-               if key in item},
         }
     raise IndicatorDataError("index_support_5m_retest_missing")
 
 
 def zone_candidate(zone, five, one, price, stamp, now, tick):
+    if zone["route"] == "fvg_retest":
+        return _fvg_candidate(zone, five, one, price, stamp, now, tick)
     if not zone["known_at"] <= stamp or not zone["low"] <= price <= zone["high"]:
         raise IndicatorDataError("index_zone_not_touched")
     # Use observed current 5m lows; never manufacture a candle low from entry.
@@ -266,19 +305,58 @@ def zone_candidate(zone, five, one, price, stamp, now, tick):
     }
 
 
+def _fvg_candidate(zone, five, one, price, stamp, now, tick):
+    bars = _contiguous(_session([
+        bar for bar in completed_candles(five, now, timeframe_seconds=300)
+        if bar["_timestamp_epoch"] + 300 <= stamp
+    ], now), 300)
+    highs = [level for _, kind, level in swing_points(bars) if kind == "H"]
+    lows = [level for _, kind, level in swing_points(bars) if kind == "L"]
+    if len(highs) < 2 or len(lows) < 2 or highs[-1] <= highs[-2] or lows[-1] <= lows[-2]:
+        raise IndicatorDataError("index_fvg_bullish_structure_missing")
+    minutes = [bar for bar in completed_candles(one, now, timeframe_seconds=60)
+               if zone["known_at"] <= bar["_timestamp_epoch"]
+               and bar["_timestamp_epoch"] + 60 <= stamp]
+    touch = next((i for i, bar in enumerate(minutes)
+                  if bar["low"] <= zone["high"] and bar["high"] >= zone["low"]), None)
+    if touch is None:
+        raise IndicatorDataError("index_fvg_retest_missing")
+    after = minutes[touch:]
+    if any(bar["close"] < zone["low"] for bar in after):
+        raise IndicatorDataError("index_fvg_support_failed")
+    trigger = next((bar for bar in after[1:]
+                    if bar["close"] > zone["high"] and bar["close"] > bar["open"]), None)
+    if trigger is None or price <= zone["high"]:
+        raise IndicatorDataError("index_fvg_confirmation_missing")
+    end = trigger["_timestamp_epoch"] + 60
+    if not 0 <= stamp - end <= 75:
+        raise IndicatorDataError("index_fvg_confirmation_stale")
+    target = _target(bars, price, tick, above=False)
+    if target is None:
+        raise IndicatorDataError("index_fvg_target_missing")
+    return {
+        **zone, "boundary": zone["high"], "stop": bars[-1]["low"],
+        "target": target, "retest_start": minutes[touch]["_timestamp_epoch"],
+        "trigger_start": trigger["_timestamp_epoch"], "trigger_end": end,
+        "trigger_close": trigger["close"],
+    }
+
+
 def build_signal(symbol, side, candidate, five, one, quote, now, tick, category="index_options"):
     from index_swing_strategy import INDEX_TRIGGER, _quote_values, premium_exchange
     premium_exchange(symbol, category)
     price, stamp = _quote_values(quote, now)
-    candidate = dict(candidate)
-    candidate["stop"], candidate["target"] = _entry_risk_levels(
-        five, price, stamp, now, tick,
-    )
+    candidate = _finalize_candidate(candidate, five, price, stamp, now, tick)
+    if candidate["trigger_end"] > stamp:
+        raise IndicatorDataError("index_confirmation_after_quote")
     if not 0 < candidate["stop"] < price < candidate["target"]:
         raise IndicatorDataError("index_structure_stop_target_invalid")
     if (candidate["route"] not in ("fvg_retest", "order_block_retest")
-            and price <= candidate.get("boundary", candidate["high"])):
+            and price < candidate.get("boundary", candidate["high"])):
         raise IndicatorDataError("index_structure_recovery_lost")
+    if candidate["route"] == "compression_breakout" and not (
+            candidate["trigger_end"] <= stamp <= candidate["trigger_end"] + 10):
+        raise IndicatorDataError("index_compression_open_window_missed")
     identity = {key: candidate[key] for key in (
         "route", "source_start", "known_at", "low", "high",
     )}
@@ -288,7 +366,7 @@ def build_signal(symbol, side, candidate, five, one, quote, now, tick, category=
     route_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("ascii")).hexdigest()[:24]
     chart = _session(completed_candles(five, now, timeframe_seconds=300), now)
     # Keep only the sessions needed for these routes, not ten-session pattern history.
-    recent_five = five[-361:]
+    recent_five = five
     current_one = _session(completed_candles(one, now + timedelta(seconds=60), timeframe_seconds=60), now)
     current_one = [bar for bar in current_one if bar["_timestamp_epoch"] <= stamp]
     normalized_five = completed_candles(recent_five, now + timedelta(seconds=300), timeframe_seconds=300)
@@ -305,7 +383,7 @@ def build_signal(symbol, side, candidate, five, one, quote, now, tick, category=
         "breakout_price": price, "entry": price, "entry_price": price,
         "reference_timestamp": candidate["trigger_start"], "reference_high": candidate["high"],
         "reference_low": candidate["stop"], "confirmation_end": candidate["trigger_end"],
-        "stop_loss": candidate["stop"], "target": candidate["target"], "targets": [candidate["target"]],
+        "stop_loss": candidate["stop"], "target": candidate["target"], "targets": candidate["targets"],
         "risk_points": price - candidate["stop"], "strike_band": "ATM", "detected_at": now.isoformat(),
         "structure_id": route_id, "structure_evidence": evidence, "chart_candles": _snapshot(chart),
         "premium_zone": {"low": candidate["low"], "high": candidate["high"],
@@ -344,9 +422,7 @@ def valid_structure_entry(metadata, now):
         elif route == "bos_retest":
             expected = bos_candidate(five, one, now, tick, price, stamp, candidate["previous_observation"])
         elif route == "support_5m_recovery":
-            from index_swing_strategy import IndexSwingStrategy
-            reference = IndexSwingStrategy().prepare(symbol, metadata["option_type"], [], five, now, category)
-            expected = support_candidate(five, reference, now)
+            expected = support_candidate(five, None, now)
         else:
             zones = prepare_zones(five, now)
             zone = next((item for item in zones if item["route"] == route
@@ -355,11 +431,10 @@ def valid_structure_entry(metadata, now):
             if zone is None:
                 return False
             expected = zone_candidate(zone, five, one, price, stamp, now, tick)
-        expected = dict(expected)
-        expected["stop"], expected["target"] = _entry_risk_levels(
-            five, price, stamp, now, tick,
-        )
+        expected = _finalize_candidate(expected, five, price, stamp, now, tick)
         if expected != candidate:
+            return False
+        if metadata.get("targets") != expected["targets"]:
             return False
         signal = build_signal(symbol, metadata["option_type"], candidate, five, one,
                               {"price": price, "bid": price, "ask": price, "trade_timestamp": stamp},
@@ -376,7 +451,7 @@ def valid_structure_entry(metadata, now):
 
 
 def evaluate_structure(symbol, side, five, one, quote, now, tick, category="index_options"):
-    from index_swing_strategy import IndexSwingStrategy, _quote_values, premium_exchange
+    from index_swing_strategy import _quote_values, premium_exchange
     premium_exchange(symbol, category)
     if side not in ("CE", "PE"):
         raise IndicatorDataError("index_unsupported")
@@ -392,8 +467,7 @@ def evaluate_structure(symbol, side, five, one, quote, now, tick, category="inde
         diagnostic = {"route": route, "result": "REJECTED"}
         try:
             if route == "support_5m_recovery":
-                reference = IndexSwingStrategy().prepare(symbol, side, [], five, now, category)
-                candidate = support_candidate(five, reference, now)
+                candidate = support_candidate(five, None, now)
             elif route == "compression_breakout":
                 candidate = compression_candidate(five, one, now)
             elif route == "bos_retest":
@@ -408,7 +482,8 @@ def evaluate_structure(symbol, side, five, one, quote, now, tick, category="inde
                     raise IndicatorDataError("index_zone_missing")
                 price, stamp = _quote_values(quote, now)
                 zone = next((zone for zone in reversed(available)
-                             if zone["low"] <= price <= zone["high"]), None)
+                             if zone["low"] <= price <= zone["high"]
+                             or zone["route"] == "fvg_retest" and price > zone["high"]), None)
                 if zone is None:
                     raise IndicatorDataError("index_zone_not_touched")
                 candidate = zone_candidate(zone, five, one, price, stamp, now, tick)

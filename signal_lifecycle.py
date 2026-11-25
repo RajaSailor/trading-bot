@@ -29,7 +29,7 @@ from index_swing_strategy import (
     aggregate_five_minutes, describe_setup, premium_exchange, valid_entry as valid_index_entry,
 )
 from premium_indicators import IndicatorDataError, completed_candles
-from premium_risk_filter import rejection_reason as premium_risk_rejection
+from premium_risk_filter import minimum_distance_stop, rejection_reason as premium_risk_rejection
 from premium_patterns import PATTERN_POLICY
 from premium_sideways import signal_rejection as sideways_rejection
 from premium_strategy_engine import TRIGGER_LIVE
@@ -302,6 +302,8 @@ class SignalLifecycle:
             entry = (observed / tick).to_integral_value(rounding=ROUND_CEILING) * tick
             stop = ((low / tick).to_integral_value(rounding=ROUND_FLOOR) * tick if index_signal else
                     (low * Decimal(".95") / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
+            if meta.get("entry_policy") in (STRUCTURE_POLICY, PATTERN_POLICY):
+                stop = Decimal(str(minimum_distance_stop(entry, stop, tick)))
             if stop <= 0 or entry <= stop:
                 return None
             target = ((Decimal(str(_positive(meta["target"]))) / tick).to_integral_value(
@@ -309,7 +311,14 @@ class SignalLifecycle:
                 ((entry + 2 * (entry - stop)) / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
             if index_signal and not stop < entry < target:
                 return None
-            risk_rejection = premium_risk_rejection(entry, stop, target)
+            targets = [float(target)]
+            if meta.get("entry_policy") == STRUCTURE_POLICY:
+                targets = [float((Decimal(str(_positive(value))) / tick).to_integral_value(
+                    rounding=ROUND_FLOOR) * tick) for value in meta["targets"]]
+                if (not targets or len(targets) > 2 or targets[-1] != float(target)
+                        or any(left >= right for left, right in zip([float(entry), *targets], targets))):
+                    return None
+            risk_rejection = premium_risk_rejection(entry, stop, targets[0])
             if risk_rejection:
                 logger.info("Premium entry skipped: %s %s (%s; entry=%s stop=%s target=%s)",
                             underlying, side, risk_rejection, entry, stop, target)
@@ -324,7 +333,7 @@ class SignalLifecycle:
                            and meta.get("requested_stop_policy") == CANDLE_STOP_POLICY
                            else "compound_20_5" if index_signal else None)
             meta.update(entry=float(entry), stop_loss=float(stop), target=float(target),
-                        targets=[float(target)], risk_points=float(entry - stop),
+                        targets=targets, risk_points=float(entry - stop),
                         signal_id=signal_id, _lifecycle_managed=True,
                         durable_open_accepted=True, alert_sent=True,
                         observed_entry=float(observed),
@@ -335,6 +344,7 @@ class SignalLifecycle:
                 "status": "OPEN", "opened_at": stamp, "last_quote_at": stamp,
                 "entry": float(entry), "stop_loss": float(stop), "target": float(target),
                 "initial_stop_loss": float(stop), "initial_target": float(target),
+                "targets": targets, "t1_reached": False,
                 "trailing_step": 0, "advisory_trailing": None if index_signal else _trailing_settings(),
                 "index_swing": index_signal, "breakeven_applied": False,
                 "entry_strategy": self._entry_strategy(meta),
@@ -381,7 +391,7 @@ class SignalLifecycle:
             payload["metadata"].update({
                 "_lifecycle_managed": True, "signal_id": signal_id,
                 "entry": position["entry"], "stop_loss": position["stop_loss"],
-                "target": position["target"], "targets": [position["target"]],
+                "target": position["target"], "targets": position["targets"],
                 "risk_points": position["entry"] - position["stop_loss"],
                 "durable_open_accepted": True,
                 "alert_sent": True,
@@ -395,7 +405,7 @@ class SignalLifecycle:
     def _signal_message(position, event):
         label = {"OPEN": "POSITION OPEN TRIGGER", "TARGET": "TARGET ACHIEVED",
                  "STOP": "STOP LOSS TRIGGERED", "SESSION_CLOSE": "SESSION CLOSE EXIT",
-                 "MODIFY": "ADVISORY TRAILING MODIFY"}[event]
+                 "MODIFY": "ADVISORY TRAILING MODIFY", "T1": "TARGET 1 REACHED - STILL OPEN"}[event]
         message = (
             f"<b>{label}</b>\n"
             f"{_text(position['underlying'])} | {_text(position['option_symbol'])}\n"
@@ -407,11 +417,17 @@ class SignalLifecycle:
             f"Lot size: {_text(position.get('lot_size') or 'MISSING')}\n"
             f"Strategy: {_text(SignalLifecycle._strategy_label(position.get('entry_strategy') or SignalLifecycle._entry_strategy(position.get('metadata', {}))))}\n"
         )
+        if len(position.get("targets", [])) == 2:
+            message += (f"T1: {position['targets'][0]:.2f} | T2: {position['targets'][1]:.2f}\n")
         if event == "OPEN":
             message += f"Observed breakout premium: {position['observed_entry']:.2f}"
             if position.get("index_swing"):
                 message += "\n" + _text(describe_setup(position["metadata"]))
             return with_disclaimer(message)
+        if event == "T1":
+            return with_disclaimer(
+                message + f"Observed premium: {position['last_valid_premium']:.2f}\n"
+                "No exit booked at T1. Tracking T2 with the upward-only 5m stop trail.")
         if event == "MODIFY":
             return with_disclaimer(message + f"Step: {position['trailing_step']} | "
                     f"Observed premium: {position['last_valid_premium']:.2f}\n"
@@ -479,6 +495,7 @@ class SignalLifecycle:
             "entry": position.get("entry"),
             "stop": position.get("stop_loss"),
             "target": position.get("target"),
+            "targets": position.get("targets", [position.get("target")]),
             "observed_entry": position.get("observed_entry"),
             "observed_exit": position.get("observed_exit"),
             "security_id": position.get("security_id"),
@@ -703,6 +720,12 @@ class SignalLifecycle:
                 position["last_quote_at"] = stamp
                 position["last_valid_premium"] = price
                 position["last_valid_quote_at"] = stamp
+                targets = position.get("targets", [])
+                if (current < cutoff and len(targets) == 2 and not position.get("t1_reached")
+                        and price >= targets[0]):
+                    position.update(t1_reached=True, t1_reached_at=stamp, t1_observed_price=price)
+                    self._enqueue(db, position["id"] + ":T1", position["category"],
+                                  self._signal_message(position, "T1"), position)
                 if event and current < cutoff:
                     self._close(db, position, event, stamp, price)
                     closed += 1

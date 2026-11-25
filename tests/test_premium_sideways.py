@@ -104,12 +104,10 @@ def test_real_lifecycle_blocks_in_range_retests_across_assets_and_restarts(tmp_p
 
 @pytest.mark.parametrize("asset", ASSETS)
 @pytest.mark.parametrize("side", ["CE", "PE"])
-def test_real_compression_entry_after_closed_breakout_and_minute_confirmation(tmp_path, asset, side):
+def test_real_compression_entry_at_next_minute_open_without_minute_close(tmp_path, asset, side):
     symbol, category, _, _ = asset
-    five, _, _, _ = structure_history("compression_breakout")
-    five += bars([(80, 85, 78, 84)], start=OPEN + timedelta(minutes=30))
-    now = OPEN + timedelta(minutes=36, seconds=5)
-    one = bars([(84, 87, 83, 86)], 1, OPEN + timedelta(minutes=35))
+    five, _, now, _ = structure_history("compression_breakout")
+    one = []
     quote = {"price": 86, "bid": 85.95, "ask": 86.05, "trade_timestamp": now.timestamp()}
     signals, _, _ = evaluate_structure(symbol, side, five, one, quote, now, .05, category)
     signal = next(item for item in signals if item["setups"] == ["compression_breakout"])
@@ -118,7 +116,7 @@ def test_real_compression_entry_after_closed_breakout_and_minute_confirmation(tm
     position = service.open_once(payload)
     assert position is not None
     assert position["entry"] == 86
-    assert position["initial_stop_loss"] == 78
+    assert position["initial_stop_loss"] == 76
     assert service.status()["pending_notifications"] == 1
 
 
@@ -131,17 +129,22 @@ def test_real_scanner_suppresses_inside_range_alert(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("minutes", [5, 10, 15, 30, 60, 240])
-def test_real_pattern_entry_is_blocked_by_its_five_minute_range(tmp_path, minutes):
+@pytest.mark.parametrize("name", ["double_bottom", "triple_bottom"])
+@pytest.mark.parametrize("symbol", ["NIFTY", "SENSEX"])
+def test_real_pattern_neckline_confirmation_replaces_universal_range_gate(tmp_path, minutes, name, symbol):
     from index_swing_strategy import IndexSwingStrategy
     from tests.test_premium_patterns import entry_risk_history, pattern_history
 
-    _, base, now, quote = pattern_history(minutes=minutes)
+    _, base, now, quote = pattern_history(name=name, minutes=minutes)
     signals, _ = IndexSwingStrategy().evaluate_patterns(
-        "NIFTY", "PE", base, quote, now,
+        symbol, "PE", base, quote, now,
         five_candles=entry_risk_history(now, quote["price"]),
     )
     signal = next(item for item in signals if item["timeframe"] == f"{minutes}min")
-    payload, _ = asset_payload(signal, *ASSETS[0])
+    asset = next(asset for asset in ASSETS if asset[0] == symbol)
+    payload, _ = asset_payload(signal, *asset)
+    assert payload["metadata"]["entry_one_minute_candles"]
+    assert len(payload["metadata"]["entry_one_minute_candles"]) <= 10
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now)
-    assert service.open_once(payload) is None
-    assert not service.open_positions()
+    assert service.open_once(payload) is not None
+    assert len(service.open_positions()) == 1

@@ -48,13 +48,32 @@ def rejection_reason(five, one, price, stamp, now):
 
 
 def signal_rejection(metadata, now):
-    """Use serialized exact-contract evidence, also available after a restart."""
+    """Apply route-specific confirmation, rather than a second universal breakout."""
     try:
+        from premium_structure import STRUCTURE_POLICY
+        from premium_patterns import CANDLESTICK_PATTERN_NAMES, PATTERN_POLICY
+
         evidence = metadata.get("structure_evidence")
         if evidence is not None:
             five, one = evidence["five"], evidence["one"]
+            if metadata.get("entry_policy") == STRUCTURE_POLICY:
+                # The unchanged order-block touch route still needs its range gate.
+                if evidence["candidate"]["route"] != "order_block_retest":
+                    return None
         else:
             five, one = metadata["entry_candles"], metadata["entry_one_minute_candles"]
+            if metadata.get("entry_policy") == PATTERN_POLICY:
+                pattern = metadata["premium_pattern"]
+                if pattern["name"] not in CANDLESTICK_PATTERN_NAMES:
+                    return None
+                bars = completed_candles(five, now, timeframe_seconds=300)
+                end = pattern["confirmed_end"]
+                prior = [bar for bar in bars if bar["_timestamp_epoch"] + 300 < end]
+                if len(prior) < 2:
+                    return "sideways_history_missing"
+                if pattern["boundary"] <= max(bar["high"] for bar in prior[-2:]):
+                    return "pattern_range_not_cleared"
+                return None
         return rejection_reason(five, one, float(metadata["breakout_price"]),
                                 float(metadata["breakout_timestamp"]), now)
     except IndicatorDataError as exc:

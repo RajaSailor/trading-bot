@@ -37,10 +37,10 @@ def bars(values, minutes=5, start=OPEN):
 def structure_history(route="compression_breakout"):
     if route == "compression_breakout":
         five = bars([(120, 125, 110, 115), (130, 150, 125, 140), (110, 120, 100, 105),
-                     (95, 105, 90, 92), (80, 82, 75, 78), (78, 81, 76, 80)])
-        now = OPEN + timedelta(minutes=31, seconds=5)
-        one = bars([(78, 81, 76, 80)] * 5 + [(80, 85, 78, 84)], 1,
-                   OPEN + timedelta(minutes=25))
+                     (95, 105, 90, 92), (78, 82, 68, 78), (78, 81, 67, 80),
+                     (80, 85, 76, 84)])
+        now = OPEN + timedelta(minutes=35, seconds=5)
+        one = bars([(80, 85, 76, 84)] * 5, 1, OPEN + timedelta(minutes=30))
         price = 84
     elif route == "fvg_retest":
         five = bars([(130, 140, 125, 135), (140, 150, 130, 145), (110, 120, 100, 105),
@@ -110,7 +110,7 @@ def test_all_assets_admit_independent_routes_and_route_notifications(tmp_path, r
         signals, diagnostics, _ = evaluate_structure(symbol, side, five, one, quote, now, .05, category)
         assert not any(signal["setups"] == [route] for signal in signals)
         assert any(item["route"] == route
-                   and item.get("reason") == "index_previous_5m_low_not_below_entry"
+                   and item.get("reason") == "index_fvg_bullish_structure_missing"
                    for item in diagnostics)
         return
     signal, now, _ = signal_for(route, symbol, side, category)
@@ -138,12 +138,12 @@ def test_all_assets_admit_independent_routes_and_route_notifications(tmp_path, r
 def test_support_and_bos_routes_apply_to_every_category(asset):
     symbol, category, _, _ = asset
     five = bars([(70, 72, 65, 68), (50, 55, 47, 50), (55, 70, 52, 58),
-                 (54, 55, 50, 53), (50, 52, 47.1, 50), (50, 56, 49, 55)])
+                 (54, 55, 50, 53), (50, 52, 47.1, 48), (48, 56, 47.5, 55)])
     now = OPEN + timedelta(minutes=30, seconds=5)
     quote = {"price": 55, "bid": 54.95, "ask": 55.05, "trade_timestamp": now.timestamp()}
     signals, _, _ = evaluate_structure(symbol, "CE", five, [], quote, now, .05, category)
     support = next(s for s in signals if s["setups"] == ["support_5m_recovery"])
-    assert support["stop_loss"] == 49 and support["target"] == 70
+    assert support["stop_loss"] == 47.5 and support["targets"][0] == 70
     assert valid_entry(support, now)
     five, one, now = bos_history()
     quote.update(price=130.2, bid=130.15, ask=130.25, trade_timestamp=now.timestamp())
@@ -174,7 +174,7 @@ def test_daily_strategy_reports_pool_symbols_only_within_their_category(tmp_path
         }}, clock[0])
     # SENSEX exits on a profitable trailing stop, not at target.
     position = positions["SENSEX"]
-    start = now.replace(hour=9, minute=50, second=0, microsecond=0)
+    start = now.replace(hour=9, minute=55, second=0, microsecond=0)
     clock[0] = start + timedelta(minutes=5, seconds=5)
     service.observe_quotes({("BSE_FNO", position["security_id"]): {
         "price": 125, "trade_timestamp": clock[0].timestamp(),
@@ -329,48 +329,53 @@ def test_zone_touch_is_live_without_waiting_for_close_and_old_touches_invalidate
      "index_zone_entry_low_not_below_price"),
 ])
 def test_zone_quote_and_initial_stop_safety(mutation, reason):
-    five, one, now, quote = structure_history("fvg_retest")
-    mutation(five, one, quote, now)
+    five, one, now, quote = structure_history("order_block_retest")
+    if reason == "index_zone_entry_low_not_below_price":
+        five[-1]["low"] = quote["price"]
+        one[-1]["low"] = quote["price"]
+    else:
+        mutation(five, one, quote, now)
     signals, diagnostics, _ = evaluate_structure("NIFTY", "CE", five, one, quote, now, .05)
-    assert not any(s["setups"] == ["fvg_retest"] for s in signals)
+    assert not any(s["setups"] == ["order_block_retest"] for s in signals)
     assert any(d.get("reason") == reason for d in diagnostics)
 
 
-def test_compression_requires_two_closed_five_minute_bars_and_one_minute_close():
+def test_compression_requires_two_midpoint_tests_and_closed_untouched_breakout():
     five, one, now, _ = structure_history()
     candidate = compression_candidate(five, one, now)
     assert candidate["range_candles"] == 2
-    with pytest.raises(IndicatorDataError, match="range_missing"):
+    with pytest.raises(IndicatorDataError, match="open_window_missed"):
         compression_candidate(five, one, now - timedelta(seconds=10))
-    with pytest.raises(IndicatorDataError, match="range_missing"):
-        compression_candidate(five[:-1], one, now)
+    with pytest.raises(IndicatorDataError, match="open_window_missed"):
+        compression_candidate(five, one, now + timedelta(seconds=6))
     bad = deepcopy(five)
-    bad[-2]["low"] = 70
+    bad[-1]["low"] = 74.5
     with pytest.raises(IndicatorDataError, match="range_missing"):
         compression_candidate(bad, one, now)
 
 
 def test_compression_can_hold_for_more_candles_without_requiring_all_of_them():
     five, _, _, _ = structure_history()
-    five += bars([(79, 81, 76, 80)] * 8, start=OPEN + timedelta(minutes=30))
-    now = OPEN + timedelta(minutes=71, seconds=5)
-    one = bars([(80, 85, 79, 84)], 1, OPEN + timedelta(minutes=70))
+    five = five[:-1] + bars([(74, 81, 70, 80)] * 8 + [(80, 85, 76, 84)],
+                           start=OPEN + timedelta(minutes=30))
+    now = OPEN + timedelta(minutes=75, seconds=5)
+    one = bars([(80, 85, 76, 84)], 1, OPEN + timedelta(minutes=70))
     assert compression_candidate(five, one, now)["range_candles"] == 10
     # A red gap-up candle can still be the first close above the frozen range.
-    one[-1].update(open=84.5)
+    five[-1].update(open=84.5)
     assert compression_candidate(five, one, now)["trigger_close"] == 84
 
 
 
 def bos_history():
     five = bars([
-        (125, 130, 115, 120), (135, 150, 130, 140), (120, 125, 105, 110),
-        (125, 130, 120, 128), (115, 120, 108, 112), (129, 138, 128, 136),
-        (134, 135, 129.5, 129.9), (130, 130.3, 129.8, 130.2),
+        (125, 130, 115, 120), (135, 150, 130, 140), (120, 125, 108, 110),
+        (125, 130, 120, 128), (115, 120, 105, 112), (129, 138, 128, 136),
+        (134, 130.1, 129.5, 130), (130, 130.4, 129.8, 130.2),
     ])
-    now = OPEN + timedelta(minutes=35, seconds=20)
-    one = bars([(134, 135, 129.5, 129.9), (130, 130.3, 129.8, 130.2)], 1,
-               OPEN + timedelta(minutes=34))
+    five[6]["open"] = 130.05
+    now = OPEN + timedelta(minutes=36, seconds=5)
+    one = bars([(130, 130.4, 129.8, 130.2)], 1, OPEN + timedelta(minutes=35))
     return five, one, now
 
 
@@ -378,8 +383,10 @@ def bos_history():
 def test_bos_requires_lower_high_break_then_rejection_and_live_reclaim(side):
     five, one, now = bos_history()
     candidate = bos_candidate(five, one, now, .05, 130.2, now.timestamp())
-    assert candidate["boundary"] == 130
-    assert candidate["stop"] == 129.8
+    assert candidate["structure_level"] == 130
+    assert candidate["boundary"] == 130.1
+    assert candidate["stop"] == 129.5
+    assert candidate["structure_break"] == "bullish_choch"
     assert candidate["target"] == 150.05
     quote = {"price": 130.2, "bid": 130.15, "ask": 130.25, "trade_timestamp": now.timestamp()}
     signals, _, _ = evaluate_structure("BANKNIFTY", side, five, one, quote, now, .05)
@@ -458,7 +465,7 @@ def test_five_minute_trailing_never_lowers_stop_or_changes_target(tmp_path):
     clock[0] += timedelta(seconds=2)
     service.observe_quotes({("NSE_FNO", 101): {"price": 110, "trade_timestamp": clock[0].timestamp()}}, clock[0])
     assert service.open_positions()[0]["stop_loss"] == 76
-    start = now.replace(hour=9, minute=50, second=0, microsecond=0)
+    start = now.replace(hour=9, minute=55, second=0, microsecond=0)
     candles = bars([(90, 110, 88, 105)] * 5, 1, start)
     clock[0] = start + timedelta(minutes=5, seconds=5)
     service.observe_quotes({("NSE_FNO", 101): {"price": 105, "trade_timestamp": clock[0].timestamp()}}, clock[0])
@@ -482,7 +489,7 @@ def test_trailing_ignores_partial_and_entry_candles_and_closes_at_observed_quote
     clock = [now]
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: clock[0])
     service.open_once(payload)
-    start = now.replace(hour=9, minute=45, second=0, microsecond=0)
+    start = now.replace(hour=9, minute=50, second=0, microsecond=0)
     candles = bars([(90, 110, 88, 105)] * 5, 1, start)
     clock[0] = start + timedelta(minutes=5, seconds=5)
     service.observe_quotes({("NSE_FNO", 101): {"price": 105, "trade_timestamp": clock[0].timestamp()}}, clock[0])
@@ -558,7 +565,7 @@ def test_order_block_live_poll_emits_without_waiting_for_next_scanner_minute(tmp
     assert len(service.open_positions()) == 1
 
 
-def test_bos_live_poll_rejects_crossing_with_narrow_risk(tmp_path, monkeypatch):
+def test_bos_live_poll_still_rejects_target_below_ten_percent(tmp_path, monkeypatch):
     scanner, service, dm, _, _ = make_live_scanner(tmp_path, monkeypatch, "compression_breakout")
     five, one, now = bos_history()
     state = scanner._index_zone_states[("NSE_FNO", 101)]
