@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from exchange_calendar import previous_trading_day, session_windows
@@ -155,6 +156,11 @@ def _near(values, tolerance=.005):
     return max(values) - min(values) <= max(values) * tolerance
 
 
+def _matches_first_level(first, later):
+    reference = Decimal(str(first))
+    return abs(Decimal(str(later)) - reference) <= reference * Decimal(".06")
+
+
 def _bullish_candlesticks(bars, minutes):
     if len(bars) < 3:
         return []
@@ -295,7 +301,7 @@ def bullish_patterns(bars, minutes):
     three = points[-3:]
     if len(three) == 3 and tuple(p[1] for p in three) == ("L", "H", "L"):
         a, b, c = three
-        if _near([a[2], c[2]]):
+        if _matches_first_level(a[2], c[2]):
             add("double_bottom", three, lambda _: b[2],
                 min(a[2], c[2]), b[2] - min(a[2], c[2]))
     five = points[-5:]
@@ -306,7 +312,7 @@ def bullish_patterns(bars, minutes):
         if _near([a[2], c[2], e[2]]):
             add("triple_bottom", five, lambda _: boundary,
                 min(a[2], c[2], e[2]), boundary - min(a[2], c[2], e[2]))
-        if _near([a[2], e[2]], .01) and c[2] < min(a[2], e[2]) * .995:
+        if _matches_first_level(a[2], e[2]) and c[2] < min(a[2], e[2]) * .995:
             add("inverse_head_and_shoulders", five, lambda _: boundary,
                 e[2], boundary - c[2])
     if kinds == ("H", "L", "H", "L", "H"):

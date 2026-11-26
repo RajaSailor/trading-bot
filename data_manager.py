@@ -57,7 +57,7 @@ _DEFAULT_SESSION_ANCHOR_MINUTES = 9 * 60 + 15
 MARKET_DATA_DEPENDENCIES = {
     "dhanhq": "DhanHQ security master + intraday candles (required for the scanner)",
     "pandas": "DhanHQ security master DataFrame (required for the scanner)",
-    "websockets": "TradingView websocket candles (optional, falls back to DhanHQ)",
+    "websockets": "Dhan live premium feed (required in live mode); optional TradingView candles",
 }
 REQUIRED_SCANNER_DEPENDENCIES = ("dhanhq", "pandas")
 

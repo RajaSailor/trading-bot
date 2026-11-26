@@ -53,7 +53,7 @@ not proof that an institutional order or imbalance exists.
 | Route | Confirmation / entry | Initial stop | Fixed target |
 | --- | --- | --- | --- |
 | Compression | Mean of the first two completed 5m high/low midpoints is frozen. At least two consecutive candles touch it; the next completed 5m candle has low strictly above it. Fresh entry quote in the next minute's first ten seconds, without waiting for a 1m close. Prior direction may be rising or falling. | Previous completed 5m candle low, widened to minimum 5% distance | Nearest confirmed swing high above entry with reward/risk >=1:1 |
-| Bullish FVG | Three completed 5m candles; third low > first high; middle candle green with body >=50% of range. Require rising latest two confirmed highs and lows. After a completed 1m gap touch, a later green 1m candle closes above the gap's upper edge, with fresh premium still above it. A post-touch 1m close below the gap invalidates it. | Previous completed 5m candle low, widened to minimum 5% distance | Nearest confirmed swing high above entry with reward/risk >=1:1 |
+| Bullish FVG | Three completed 5m candles; third low > first high; middle candle green with body >=50% of range. Require rising latest two confirmed highs and lows. After a completed 1m gap touch, a completed 5m candle closes strictly above the gap's upper edge. The touch may be within that recovery candle, which need not be green. Entry requires a later fresh live premium strictly above that 5m closing price, not a completed 1m close. A post-touch 1m close below the gap still invalidates it. | Previous completed 5m candle low, widened to minimum 5% distance | Nearest confirmed swing high above entry with reward/risk >=1:1 |
 | Bullish order block | A completed bullish 5m candle first closes above the latest already-confirmed swing high; the last red candle within its preceding five candles defines the full [low, high] block. Breakout close must be above the block. First fresh live retest alerts. | Previous completed 5m candle low | Nearest confirmed swing high above entry with reward/risk >=1:1 |
 | BOS/retest | Latest two highs/lows in up to ten prior 5m bars establish rising structure (BOS) or falling structure (CHoCH). A 5m close breaks the latest confirmed high. A completed wick retest tests within +/-10% and closes at/above that high. Then a later completed 1m close exceeds the retest candle high; fresh premium must remain above it and within +10% of the broken level. | Previous completed 5m candle low, widened to minimum 5% distance | Nearest confirmed swing high above entry with reward/risk >=1:1 |
 
@@ -67,14 +67,16 @@ the entry explicitly instead of chasing a later price.
 
 Use only today's latest contiguous 5m block for zones, BOS and compression;
 range/structure cannot bridge missing candles. Latest zone/BOS history must
-end within 375 seconds; support and completed 1m FVG/BOS confirmations within
-75 seconds. An FVG may survive a closed retest while waiting for recovery,
+end within 375 seconds; support, completed 5m FVG recovery and completed 1m BOS
+confirmations within 75 seconds. The FVG entry quote must be strictly later
+than the recovery candle's end and strictly above its close; equality fails.
+An FVG may survive a closed retest while waiting for recovery,
 but a later completed 5m close below its lower edge invalidates it.
 Order blocks already touched by a subsequent completed candle are not replayed.
 When multiple zones overlap, scan-time
 entry uses the most recently formed eligible zone for that route.
-Zone entries are polled on the existing live-quote loop between minute scans,
-and still require their route's completed confirmation evidence. An
+Zone entries are evaluated on the live loop, independently of historical
+downloads, and still require their route's completed confirmation evidence. An
 order-block touch is unchanged pending a separately agreed tuning rule.
 
 The initial stop for every new structure or pattern route is the low of the
@@ -102,9 +104,9 @@ Examine the most recent appropriate pivot sequence in the last 80 full bars.
 
 | Pattern | Required structure |
 | --- | --- |
-| Double bottom | Low-high-low; lows within 0.5%; close above intervening high |
+| Double bottom | Low-high-low; second low within +/-6% of the first low, inclusive; close above intervening high |
 | Triple bottom | Low-high-low-high-low; all lows within 0.5%; close above both intervening highs |
-| Inverse head-and-shoulders | Low-high-low-high-low; shoulders within 1%; head at least 0.5% below both; close above both neckline highs |
+| Inverse head-and-shoulders | Low-high-low-high-low; right shoulder within +/-6% of the left shoulder, inclusive; head at least 0.5% below both; close above both neckline highs |
 | Ascending triangle | Three highs within 0.5%; two or three intervening lows rising by more than 0.5% each; close above all three highs |
 | Falling wedge | Three falling highs and three falling lows; declining upper line is steeper than lower; positive narrowing channel; intermediate points within 1% of their lines |
 | Bullish flag | Three falling highs/lows in a channel; negative slopes differ by at most 25%; preceding up-pole within eight bars is at least three channel widths and 5% of pole-high premium; pullback is no more than half the pole |
@@ -125,6 +127,13 @@ above the pattern close/boundary. For every route, initial stop is the previous
 completed 5m low, widened to at least 5% below entry, and target is the nearest confirmed swing high at least
 1R above entry. Skip when no such target exists. Forming patterns,
 continuation above an old breakout, and bearish patterns do not alert.
+
+For example, first bottom 100, rebound high 120, second bottom 106 (or 94)
+passes the matching tolerance; 106.01 or 93.99 does not. Entry still requires
+the first completed close strictly above 120 and the existing live-price/risk
+checks. The denominator is the first bottom, not the higher of the two lows.
+Triple-bottom, triangle, wedge and flag tolerances are unchanged. Double tops
+remain excluded from premium buys, with no automatic opposite-option trade.
 
 Build intraday timeframes from exact-contract one-minute OHLC, anchored to each
 exchange session. Require every constituent minute, reject partial buckets and
@@ -149,6 +158,74 @@ overlapping support and pattern signals. The chart freezes the completed detecti
 draws pattern vertices and neckline/trendlines, names the exact timeframe, and
 shows entry, initial stop and target. Pattern evidence and the risk levels are
 revalidated at durable lifecycle admission, not inferred from a label alone.
+
+### Full-universe WebSocket scanner
+
+The premium runtime defaults to `PREMIUM_LIVE_FEED_ENABLED=true`. It uses
+[Dhan's v2 live feed](https://dhanhq.co/docs/v2/live-market-feed/) Full packets,
+not the optional TradingView candle socket. Existing credentials and live-data
+entitlements are required. Keep one scanner process per account/deployment;
+the in-process registry does not coordinate subscription limits across replicas.
+`PREMIUM_LIVE_FEED_ENABLED=false` restores the older REST mode on restart.
+
+The scanner resolves all configured underlying ATM CE/PE contracts first,
+then subscribes before running any candle downloads. Spot selection still
+uses one batched REST LTP request per minute, not a per-option request.
+The exact exchange-segment/security-ID registry retains open advisory contracts
+when the selected ATM rolls. No matching quote or a selection older than
+120 seconds prevents new entries.
+
+One bounded history job runs per scanner cycle on the history thread.
+Previous/current-session one-minute seeds take priority; ten-session pattern
+history is optional, cached and periodically retried. Current history refreshes
+every five minutes and extended history every thirty minutes when capacity
+permits. These are scheduling intervals, not guaranteed maximum recovery
+times. A slow API call never holds the live-feed receiver or live evaluator.
+Only bars completed before the request's start time are authoritative seeds.
+
+The feed preserves the binary packet's epoch last-trade timestamp instead
+of the SDK's date-less `HH:MM:SS` output. Source trade freshness and local
+receipt freshness are both checked; fresh depth alone cannot refresh an old
+trade. Packet prices/depth supply the existing bid/ask/spread checks.
+Full-packet session OHLC is not used as one-minute OHLC. Observed trade
+updates construct minute bars; exact complete minute sets form five-minute
+and longer candles. Duplicate/out-of-order packets cannot rewrite finalized
+bars. Missing minutes are never filled with last price. The initial partial
+minute after subscription/reconnect is ineligible until REST supplies it.
+
+Live polling evaluates support, compression, FVG, OB and BOS independently
+from the REST sweep. Completed history snapshots are cached per minute and
+refreshed after history changes; recent observed minute evidence is refreshed
+on each poll. A separate bounded/coalescing worker scans chart patterns so
+longer histories cannot block the short compression window. Expired tasks
+are rejected, not backdated. All admissions revalidate source timestamps
+against the actual admission time, preserving the ten-second compression
+deadline, 75-second confirmation freshness and ten-second quote age.
+The existing persistent lifecycle/outbox, risk checks, per-side open locks,
+category channels and upward-only five-minute trailing are unchanged.
+Lifecycle maintenance consumes feed quotes/candles instead of competing REST
+requests; durable Telegram/chart work stays outside the receiver.
+
+Live packets are snapshots, not a promise that every exchange trade is
+delivered. REST reconciliation may correct observed bars; downstream
+historical comparisons are not retroactive fills or a guarantee of perfect
+TradingView parity. Inspect live-versus-history diagnostics when validating
+the deployment. Startup/recovery can legitimately miss a setup rather than
+invent missing evidence. Disconnects clear executable quotes and invalidate
+uncertain candle coverage; reconnects re-subscribe with bounded backoff.
+After a coverage gap, covering REST backfill or five consecutive fully observed
+completed live minutes are required before readiness can recover; the backfill
+flag remains set until authoritative history covers the gap.
+There is no silent REST fallback that claims to meet the live deadlines.
+
+Safe `/health` diagnostics under
+`workers.market_scanner.screener.live_market_data` expose connection/readiness,
+history work, pending/dropped pattern tasks, evaluation times, maximum live
+cycle duration and errors. Keep `LIVE_TRIGGER_ENABLED=true` and
+`LIVE_TRIGGER_POLL_SECONDS=1`; confirm the connection and advancing evaluation
+times after deploy. Roll back with `PREMIUM_LIVE_FEED_ENABLED=false` if the
+account lacks feed access. Neither successful connection nor HTTP health
+alone proves Telegram delivery or guarantees qualifying entries.
 
 ### Support recovery entry, expiry and target
 

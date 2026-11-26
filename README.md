@@ -26,8 +26,12 @@ with the upward-only five-minute stop trail. With only T1 available, it is the e
 
 Independent alternatives also include **bullish five-minute FVG/OB retests**,
 and **compression breakouts**. FVGs require rising confirmed premium swing highs
-and lows, a gap retest, then a later bullish completed one-minute close above
-the gap. Order-block tuning is unchanged: a fresh live block touch still needs
+and lows, a completed one-minute gap touch, then a **completed five-minute close
+strictly above the gap's upper edge**. The retest may occur within that same
+five-minute recovery candle. Entry needs a later fresh live premium strictly
+above that five-minute closing price, without waiting for a one-minute close.
+The existing 75-second confirmation window is retained. Order-block tuning is
+unchanged: a fresh live block touch still needs
 its existing range gate. Compression freezes the mean of the first two
 five-minute high/low midpoints; at least two consecutive candles must touch it.
 The confirming five-minute candle's **low must be strictly above** that midpoint.
@@ -46,6 +50,10 @@ three white soldiers. Check **5/10/15/30-minute, 1-hour and 4-hour** premium
 charts for index, stock and commodity options; no support recovery must also
 agree. Each alert identifies its pattern and timeframe and draws the evidence
 on the premium chart. Forming patterns and bearish-premium patterns do not trigger buys.
+Double-bottom lows match within **+/-6% of the first bottom**; inverse
+head-and-shoulders shoulders match within **+/-6% of the left shoulder**.
+Both still require a completed neckline breakout. Other pattern tolerances
+are unchanged; double tops do not generate premium-buy entries.
 No spot direction, opening range, spot pattern or volume filter must agree.
 Spot is used only to select the listed ATM strike; same-day expiry is skipped.
 
@@ -77,6 +85,30 @@ follow the relevant exchange session and daily patterns use completed session
 candles.
 These are unproven trial rules, not a claim of a proven win rate or a complete
 catalogue of every market pattern.
+
+With the premium strategy enabled, **Dhan WebSocket live scanning is enabled
+by default** (`PREMIUM_LIVE_FEED_ENABLED=true`). All resolved stock, commodity
+and index ATM option sides are subscribed before candle history is warmed.
+Completed candles and fresh quotes drive entries independently of slow REST
+history; a separate worker evaluates longer chart patterns. Existing open
+contracts remain subscribed after an ATM roll. The persistent lifecycle/outbox,
+category routing, risk checks and entry deadlines are retained.
+
+Render needs the existing `ACCESS_TOKEN` and `DHAN_CLIENT_ID` (or `API_KEY`),
+Dhan live-feed access, and outbound WSS access to `api-feed.dhan.co:443`.
+Keep `LIVE_TRIGGER_ENABLED=true` and `LIVE_TRIGGER_POLL_SECONDS=1`. After
+deploying, inspect `/health` ->
+`workers.market_scanner.screener.live_market_data`: confirm the feed connects,
+contracts become ready, and `last_live_evaluation_at` advances. Cold startup,
+ATM changes, missing minutes and reconnect gaps can temporarily block affected
+contracts while REST seeds/backfills them; they never create backdated entries.
+Full packets are observed market snapshots, not a guarantee of every exchange
+trade or chart-identical OHLC. Monitor the history reconciliation diagnostics.
+
+Set `PREMIUM_LIVE_FEED_ENABLED=false` and redeploy to roll back to the older
+REST scanner, whose multi-minute full-universe sweep may miss short entry
+windows. There is no silent fallback claiming equivalent timing when the
+live feed is unavailable. See [live scanner details](docs/TRADING_LOGIC.md#full-universe-websocket-scanner).
 
 Charts use exact-contract **Dhan candle data**, not authenticated Dhan website
 screenshots. Trading-candle spacing removes empty overnight/weekend expanses;
