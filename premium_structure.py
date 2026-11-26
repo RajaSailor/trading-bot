@@ -324,19 +324,26 @@ def _fvg_candidate(zone, five, one, price, stamp, now, tick):
     after = minutes[touch:]
     if any(bar["close"] < zone["low"] for bar in after):
         raise IndicatorDataError("index_fvg_support_failed")
-    trigger = next((bar for bar in after[1:]
-                    if bar["close"] > zone["high"] and bar["close"] > bar["open"]), None)
-    if trigger is None or price <= zone["high"]:
+    touch_start = minutes[touch]["_timestamp_epoch"]
+    trigger = next((bar for bar in bars
+                    if bar["_timestamp_epoch"] >= zone["known_at"]
+                    and bar["_timestamp_epoch"] + 300 > touch_start
+                    and bar["close"] > zone["high"]), None)
+    if trigger is None:
         raise IndicatorDataError("index_fvg_confirmation_missing")
-    end = trigger["_timestamp_epoch"] + 60
-    if not 0 <= stamp - end <= 75:
+    end = trigger["_timestamp_epoch"] + 300
+    if stamp <= end:
+        raise IndicatorDataError("index_confirmation_after_quote")
+    if stamp - end > 75:
         raise IndicatorDataError("index_fvg_confirmation_stale")
+    if price <= trigger["close"]:
+        raise IndicatorDataError("index_fvg_live_breakout_missing")
     target = _target(bars, price, tick, above=False)
     if target is None:
         raise IndicatorDataError("index_fvg_target_missing")
     return {
-        **zone, "boundary": zone["high"], "stop": bars[-1]["low"],
-        "target": target, "retest_start": minutes[touch]["_timestamp_epoch"],
+        **zone, "boundary": trigger["close"], "stop": bars[-1]["low"],
+        "target": target, "retest_start": touch_start,
         "trigger_start": trigger["_timestamp_epoch"], "trigger_end": end,
         "trigger_close": trigger["close"],
     }

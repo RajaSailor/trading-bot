@@ -18,6 +18,7 @@ from data_manager import (
     market_data_dependency_status,
 )
 from exchange_calendar import next_session_start, open_exchanges, seconds_until_next_open
+from index_swing_strategy import enabled as premium_strategy_enabled
 from latency_tracker import get_latency_tracker, now_mark
 from memory_diagnostics import current_rss_mb, log_rss
 from order_executor import Order, OrderExecutor
@@ -659,6 +660,9 @@ class MarketScannerWorker:
         self.live_trigger_enabled = os.getenv("LIVE_TRIGGER_ENABLED", "true").strip().lower() not in {
             "0", "false", "no", "off"
         }
+        self.live_feed_enabled = premium_strategy_enabled() and os.getenv(
+            "PREMIUM_LIVE_FEED_ENABLED", "true",
+        ).strip().lower() not in {"0", "false", "no", "off"}
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._live_thread: Optional[threading.Thread] = None
@@ -674,8 +678,14 @@ class MarketScannerWorker:
 
     def check_dependencies(self) -> bool:
         """Log data-source dependency diagnostics; return False if the scanner cannot run."""
+        if self.live_feed_enabled and not self.live_trigger_enabled:
+            self._last_error = "live_feed_requires_live_trigger"
+            logger.error("Dhan live premium scanning requires LIVE_TRIGGER_ENABLED=true")
+            return False
         self._dependencies = log_market_data_dependency_status(market_data_dependency_status())
         missing = [name for name in REQUIRED_SCANNER_DEPENDENCIES if not self._dependencies.get(name)]
+        if self.live_feed_enabled and not self._dependencies.get("websockets"):
+            missing.append("websockets")
         if missing:
             self._last_error = f"missing_dependencies: {', '.join(missing)}"
             logger.error(
@@ -724,6 +734,9 @@ class MarketScannerWorker:
 
     def stop(self) -> None:
         self._stop_event.set()
+        scanner_stop = getattr(self._scanner, "stop", None)
+        if callable(scanner_stop):
+            scanner_stop()
         for thread in (self._thread, self._live_thread, self._maintenance_thread):
             if thread and thread is not threading.current_thread():
                 thread.join(timeout=5)
@@ -754,7 +767,9 @@ class MarketScannerWorker:
         while not self._stop_event.is_set():
             try:
                 data_manager = self._data_manager or get_shared_data_manager()
-                self.signal_lifecycle.maintenance(data_manager)
+                live_scanner = getattr(self._scanner, "live_scanner", None)
+                provider = live_scanner if live_scanner is not None else data_manager
+                self.signal_lifecycle.maintenance(provider)
             except Exception as exc:
                 logger.error("Signal lifecycle maintenance failed: %s", exc.__class__.__name__)
             self._stop_event.wait(self.lifecycle_poll_seconds)
@@ -789,7 +804,8 @@ class MarketScannerWorker:
             except Exception as exc:
                 self._last_error = exc.__class__.__name__
                 logger.error("Scanner cycle failed: %s", exc.__class__.__name__)
-            self._stop_event.wait(max(1.0, poll_seconds))
+            live_scanner = getattr(self._scanner, "live_scanner", None)
+            self._stop_event.wait(1.0 if live_scanner is not None else max(1.0, poll_seconds))
 
     def live_forever(self) -> None:
         while not self._stop_event.is_set():
@@ -825,12 +841,14 @@ class MarketScannerWorker:
                 return True
 
         self._data_manager = get_shared_data_manager()
+        from premium_live_feed import PremiumLiveFeed
         return PremiumScreener(
             self._data_manager,
             _NullTelegramHandler(),
             _NullPositionManager(),
             signal_callback=self._enqueue_signal,
             paper_trade_notifier=self.paper_trade_notifier,
+            live_feed=PremiumLiveFeed() if self.live_feed_enabled else None,
             **({"signal_lifecycle": self.signal_lifecycle} if self.signal_lifecycle is not None else {}),
         )
 

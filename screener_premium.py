@@ -63,10 +63,9 @@ def _env_float(name: str, default: float) -> float:
 class PremiumScreener:
     """Monitor premium-only ATM setups across the three option categories.
 
-    * Candles (10-minute, incl. previous session) are refreshed once per
-      completed 10-minute bucket per underlying, only while its exchange is open.
-    * :meth:`live_check_once` polls batched LTPs for armed contracts and fires
-      immediately when the premium crosses the RED candle high.
+    Premium runtime entries use the injected live feed independently of
+    historical downloads. Without a feed, retain the legacy REST refresh
+    and quote watcher for explicit rollback and older strategies.
     """
 
     def __init__(
@@ -82,6 +81,7 @@ class PremiumScreener:
         clock=None,
         alert_state_file=None,
         signal_lifecycle=None,
+        live_feed=None,
     ) -> None:
         self.data_manager = data_manager
         self.telegram_handler = telegram_handler
@@ -125,6 +125,10 @@ class PremiumScreener:
         self.index_instruments = universe.get("index_options", [])
         self.commodity_instruments = universe.get("commodity_options", [])
         self.stock_instruments = universe.get("nifty50_stock_options", [])
+        self.live_scanner = None
+        if live_feed is not None and self.index_swing_enabled:
+            from premium_live_scanner import PremiumLiveScanner
+            self.live_scanner = PremiumLiveScanner(self, live_feed)
 
     # ================================================================ scan
     def option_instruments(self) -> List:
@@ -132,6 +136,8 @@ class PremiumScreener:
 
     def run_once(self, now: datetime | None = None) -> int:
         now = self._as_ist(now)
+        if self.live_scanner is not None:
+            return self.live_scanner.run_once(now)
         open_now = open_exchanges(now)
         self._prune_closed(open_now)
         if not open_now:
@@ -512,6 +518,8 @@ class PremiumScreener:
         """Poll fresh batched quotes for armed entries and existing paper positions."""
         fixed_now = now is not None
         now = self._as_ist(now if now is not None else self.clock())
+        if self.live_scanner is not None:
+            return self.live_scanner.live_check_once(now)
         open_now = open_exchanges(now)
         paper_contracts = []
         if self.paper_trade_notifier is not None:
@@ -1162,9 +1170,16 @@ class PremiumScreener:
                 expired = self._processed_signal_order.pop(0)
                 self._processed_signal_keys.discard(expired)
 
+    def stop(self) -> None:
+        if self.live_scanner is not None:
+            self.live_scanner.stop()
+
     def status(self) -> dict:
+        live_status = (self.live_scanner.status() if self.live_scanner is not None
+                       else {"mode": "rest", "timing_guaranteed": False})
         with self._lock:
             return {
+                "live_market_data": live_status,
                 "monitored_contracts": len(self._monitored),
                 "monitored_itm_plus_1": sum(
                     1 for state in self._monitored.values()

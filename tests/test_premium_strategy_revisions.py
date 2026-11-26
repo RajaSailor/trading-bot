@@ -5,8 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from index_swing_strategy import valid_entry
-from premium_indicators import IndicatorDataError
+from index_swing_strategy import IndexSwingStrategy, valid_entry
+from premium_indicators import IndicatorDataError, completed_candles
+from premium_patterns import bullish_patterns
 from premium_risk_filter import minimum_distance_stop
 from premium_structure import (
     bos_candidate, compression_candidate, evaluate_structure, prepare_zones, support_candidate,
@@ -30,13 +31,74 @@ def fvg_history():
     five = bars([
         (130, 140, 125, 135), (140, 180, 130, 150), (110, 120, 90, 100),
         (115, 130, 105, 120), (110, 125, 100, 115), (115, 140, 108, 135),
-        (125, 135, 115, 130), (132, 158, 130, 156), (150, 160, 145, 158),
+        (125, 135, 115, 130), (132, 158, 130, 156), (150, 190, 145, 158),
+        (150, 151, 140, 149),
     ])
     one = bars([(150, 151, 140, 143), (143, 151, 142, 150)], 1,
                OPEN + timedelta(minutes=45))
-    now = OPEN + timedelta(minutes=47, seconds=5)
+    now = OPEN + timedelta(minutes=50, seconds=5)
     quote = {"price": 150, "bid": 149.95, "ask": 150.05, "trade_timestamp": now.timestamp()}
     return five, one, now, quote
+
+
+def matching_pattern_history(name, second_level):
+    levels = ([112, 101, 112, 119, 112, second_level + 1, 112, 114, 122]
+              if name == "double_bottom" else
+              [112, 101, 112, 119, 110, 81, 110, 119, 112,
+               second_level + 1, 112, 114, 122])
+    five = bars([(value, value + 1, value - 1, value) for value in levels])
+    five[-1]["open"] = 114
+    five[-1]["low"] = 113
+    now = OPEN + timedelta(minutes=len(five) * 5, seconds=5)
+    return five, now
+
+
+@pytest.mark.parametrize("name", ["double_bottom", "inverse_head_and_shoulders"])
+@pytest.mark.parametrize("second_level,accepted", [
+    (93.99, False), (94, True), (94.01, True), (100, True),
+    (105.99, True), (106, True), (106.01, False), (106.38, False),
+])
+def test_pattern_matching_is_inclusive_six_percent_relative_to_first_level(name, second_level, accepted):
+    five, now = matching_pattern_history(name, second_level)
+    patterns = bullish_patterns(completed_candles(five, now, timeframe_seconds=300), 5)
+    matching = [pattern for pattern in patterns if pattern["name"] == name]
+    assert bool(matching) is accepted
+    if accepted:
+        assert matching[0]["boundary"] == 120
+
+
+@pytest.mark.parametrize("name", ["double_bottom", "inverse_head_and_shoulders"])
+def test_wider_pattern_tolerance_still_requires_first_completed_neckline_break(name):
+    five, now = matching_pattern_history(name, 106)
+    five[-1]["close"] = 120
+    assert not any(pattern["name"] == name for pattern in
+                   bullish_patterns(completed_candles(five, now, timeframe_seconds=300), 5))
+    five[-1]["close"] = 122
+    five[-2].update(high=123, close=121)
+    assert not any(pattern["name"] == name for pattern in
+                   bullish_patterns(completed_candles(five, now, timeframe_seconds=300), 5))
+
+
+@pytest.mark.parametrize("asset", ASSETS)
+@pytest.mark.parametrize("side", ["CE", "PE"])
+@pytest.mark.parametrize("name", ["double_bottom", "inverse_head_and_shoulders"])
+def test_six_percent_pattern_reaches_durable_admission_across_assets(tmp_path, asset, side, name):
+    five, _ = matching_pattern_history(name, 106)
+    values = [(145, 150, 140, 145), (160, 180, 150, 165), (130, 140, 125, 130)]
+    values += [(bar["open"], bar["high"], bar["low"], bar["close"]) for bar in five]
+    five = bars(values)
+    one = [{**bar, "timestamp": bar["timestamp"] + offset * 60}
+           for bar in five for offset in range(5)]
+    now = OPEN + timedelta(minutes=len(five) * 5, seconds=5)
+    quote = {"price": 122, "bid": 121.95, "ask": 122.05, "trade_timestamp": now.timestamp()}
+    symbol, category, _, _ = asset
+    signals, _ = IndexSwingStrategy().evaluate_patterns(
+        symbol, side, one, quote, now, category, five_candles=five, tick=.05,
+    )
+    signal = next(item for item in signals if item["premium_pattern"]["name"] == name)
+    assert valid_entry(signal, now)
+    service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now)
+    assert service.open_once(asset_payload(signal, *asset)[0]) is not None
 
 
 @pytest.mark.parametrize("entry,low,tick,expected", [
@@ -125,13 +187,19 @@ def test_support_requires_fresh_recovery_after_separated_second_touch(mutation):
 
 @pytest.mark.parametrize("asset", ASSETS)
 @pytest.mark.parametrize("side", ["CE", "PE"])
-def test_fvg_requires_bullish_structure_touch_and_later_one_minute_recovery(tmp_path, asset, side):
+def test_fvg_requires_completed_five_minute_recovery_then_live_breakout(tmp_path, asset, side):
     five, one, now, quote = fvg_history()
     symbol, category, _, _ = asset
     signals, _, _ = evaluate_structure(symbol, side, five, one, quote, now, .05, category)
     signal = next(item for item in signals if item["setups"] == ["fvg_retest"])
-    assert signal["entry"] > signal["premium_zone"]["high"]
-    assert signal["stop_loss"] == 142.5 and signal["target"] == 180
+    candidate = signal["structure_evidence"]["candidate"]
+    assert signal["entry"] > candidate["trigger_close"] > signal["premium_zone"]["high"]
+    assert signal["confirmation_end"] == (OPEN + timedelta(minutes=50)).timestamp()
+    assert candidate["trigger_start"] == (OPEN + timedelta(minutes=45)).timestamp()
+    assert signal["stop_loss"] == 140 and signal["target"] == 180
+    # No completed post-confirmation 1m candle is available or required.
+    assert one[-1]["timestamp"] < signal["confirmation_end"]
+    assert five[-1]["close"] < five[-1]["open"]
     assert valid_entry(signal, now)
     service = SignalLifecycle(tmp_path / "signals.db", clock=lambda: now)
     assert service.open_once(asset_payload(signal, *asset)[0]) is not None
@@ -139,7 +207,7 @@ def test_fvg_requires_bullish_structure_touch_and_later_one_minute_recovery(tmp_
 
 @pytest.mark.parametrize("mutation,reason", [
     ("touch_only", "index_fvg_confirmation_missing"),
-    ("same_candle_recovery", "index_fvg_confirmation_missing"),
+    ("forming_five_minute_recovery", "index_fvg_confirmation_missing"),
     ("below_gap", "index_fvg_support_failed"),
     ("lower_low", "index_fvg_bullish_structure_missing"),
     ("stale", "index_fvg_confirmation_stale"),
@@ -147,10 +215,10 @@ def test_fvg_requires_bullish_structure_touch_and_later_one_minute_recovery(tmp_
 def test_fvg_rejects_unconfirmed_failed_or_countertrend_retests(mutation, reason):
     five, one, now, quote = fvg_history()
     if mutation == "touch_only":
-        one[-1]["close"] = 144
-    elif mutation == "same_candle_recovery":
-        one = one[:1]
-        one[0]["close"] = 150
+        five[-1]["close"] = 145
+    elif mutation == "forming_five_minute_recovery":
+        now -= timedelta(minutes=3)
+        quote["trade_timestamp"] = now.timestamp()
     elif mutation == "below_gap":
         one[0].update(low=132, close=134)
     elif mutation == "lower_low":
@@ -164,13 +232,50 @@ def test_fvg_rejects_unconfirmed_failed_or_countertrend_retests(mutation, reason
 
 def test_fvg_remains_available_after_closed_retest_but_not_failed_support():
     five, _, now, _ = fvg_history()
-    five += bars([(150, 151, 140, 150)], start=OPEN + timedelta(minutes=45))
     later = OPEN + timedelta(minutes=50, seconds=5)
     assert any(zone["route"] == "fvg_retest" and zone["low"] == 135
                for zone in prepare_zones(five, later))
     five[-1].update(low=132, close=134)
     assert not any(zone["route"] == "fvg_retest" and zone["low"] == 135
                    for zone in prepare_zones(five, later))
+
+
+@pytest.mark.parametrize("price", [145, 148.95, 149])
+def test_fvg_live_price_must_be_strictly_above_five_minute_close(price):
+    five, one, now, quote = fvg_history()
+    quote.update(price=price, bid=price - .05, ask=price + .05)
+    _, diagnostics, _ = evaluate_structure("NIFTY", "CE", five, one, quote, now, .05)
+    assert next(item for item in diagnostics if item["route"] == "fvg_retest")["reason"] == (
+        "index_fvg_live_breakout_missing")
+
+
+@pytest.mark.parametrize("offset,accepted", [(-1, False), (0, False), (.001, True), (75, True),
+                                            (75.001, False)])
+def test_fvg_live_quote_must_follow_recovery_close_within_freshness_window(offset, accepted):
+    five, one, _, quote = fvg_history()
+    now = OPEN + timedelta(minutes=50, seconds=offset)
+    quote["trade_timestamp"] = now.timestamp()
+    signals, _, _ = evaluate_structure("NIFTY", "CE", five, one, quote, now, .05)
+    fvg = [item for item in signals if item["setups"] == ["fvg_retest"]]
+    assert bool(fvg) is accepted
+    if accepted:
+        assert valid_entry(fvg[0], now)
+
+
+@pytest.mark.parametrize("mutation", ["close", "boundary", "quote", "confirmation_end"])
+def test_fvg_durable_admission_reconstructs_five_minute_live_confirmation(mutation):
+    five, one, now, quote = fvg_history()
+    signals, _, _ = evaluate_structure("NIFTY", "CE", five, one, quote, now, .05)
+    signal = deepcopy(next(item for item in signals if item["setups"] == ["fvg_retest"]))
+    if mutation == "close":
+        signal["structure_evidence"]["five"][-1]["close"] = 150
+    elif mutation == "boundary":
+        signal["structure_evidence"]["candidate"]["boundary"] = 145
+    elif mutation == "quote":
+        signal["breakout_price"] = 149
+    else:
+        signal["confirmation_end"] -= 240
+    assert not valid_entry(signal, now)
 
 
 def test_compression_midpoint_is_fixed_and_not_recalculated_from_breakout():

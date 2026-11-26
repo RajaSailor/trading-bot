@@ -59,7 +59,7 @@ matplotlib==3.9.2
 # ============================================================================
 # dhanhq: DhanContext/dhanhq client + security master (fetch_security_list)
 # pandas: security master is returned as a DataFrame by dhanhq
-# websockets: TradingView websocket candle fetcher (also required by dhanhq)
+# websockets: Dhan live premium feed and optional TradingView candle fetcher
 dhanhq==2.2.0
 pandas==2.2.3
 websockets==13.1

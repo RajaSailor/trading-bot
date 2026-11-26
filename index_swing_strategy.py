@@ -662,7 +662,7 @@ def describe_setup(metadata):
         zone = metadata["premium_zone"]
         timing = ("Live zone touch; no candle-close confirmation"
                   if candidate["route"] == "order_block_retest"
-                  else "Bullish premium structure; gap retest then later bullish 1m close above FVG"
+                  else "Bullish premium structure; gap retest, completed 5m close above FVG, then live premium above that close"
                   if candidate["route"] == "fvg_retest"
                   else f"{candidate['structure_break']}: 5m swing break / retest, then 1m close above retest high"
                   if candidate["route"] == "bos_retest"
